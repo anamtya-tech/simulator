@@ -41,7 +41,7 @@ This pipeline creates labeled datasets for training audio classifiers by:
   - Sound Source Tracking (SST) - Kalman filter
   - 1024 frequency bins per detection
   - Position estimates (x, y, z) and activity scores
-- Output: JSON files in `z_odas/ClassifierLogs/`
+- Output: JSON files in `~/sodas/ClassifierLogs/` (set by `classifier_log_dir` in the ODAS config)
   - `sst_session_live.json_<timestamp>`: Frame-by-frame detections with frequency bins
   - `sst_classify_events_<timestamp>.json`: Event classifications
 
@@ -107,7 +107,7 @@ streamlit run app.py
 4. Click **"▶️ Run Simulation"**
 5. Monitor logs (socket server + ODAS output)
 6. Wait for completion (duration = scene duration)
-7. Output: SST and classify_events JSON in `z_odas/ClassifierLogs/`
+7. Output: SST and classify_events JSON in `~/sodas/ClassifierLogs/`
 
 #### Step 4: Analyze Results
 1. Navigate to **"📊 Results Analyzer"**
@@ -195,7 +195,7 @@ config/
 └── scenes/
     └── *.json                # Saved scene configurations
 
-z_odas/ClassifierLogs/
+~/sodas/ClassifierLogs/        # set by classifier_log_dir in chatak-odas config
 ├── sst_session_live.json_*   # ODAS detections with frequency bins
 └── sst_classify_events_*     # ODAS event classifications
 ```
@@ -229,12 +229,12 @@ python3 -c "import streamlit, numpy, pandas, scipy, librosa, soundfile, matplotl
 
 ### ODAS Not Found
 ```bash
-# Check ODAS binary exists
-ls -l /home/azureuser/z_odas/build/bin/odaslive
+# Check ODAS binary exists (chatak-odas fork)
+ls -l ~/z_odas_newbeamform/build/bin/odaslive
 
 # Rebuild if needed
-cd /home/azureuser/z_odas/build
-cmake .. && make
+cd ~/z_odas_newbeamform
+cmake -B build && cmake --build build -j$(nproc)
 ```
 
 ### Socket Connection Errors
@@ -265,6 +265,7 @@ This project builds upon ODAS (MIT License) and pyroomacoustics (MIT License).
 
 ## References
 
-- ODAS: https://github.com/introlab/odas
+- ODAS fork (Chatak): https://github.com/anamtya-tech/chatak-odas
+- ODAS upstream: https://github.com/introlab/odas
 - Pyroomacoustics: https://github.com/LCAV/pyroomacoustics
 - ReSpeaker Mic Array: https://wiki.seeedstudio.com/ReSpeaker_Mic_Array_v2.0/

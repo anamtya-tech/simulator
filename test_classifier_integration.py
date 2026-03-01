@@ -29,7 +29,7 @@ def test_parser():
     latest_file = parser.get_latest_session_file()
     
     if not latest_file:
-        print("\n❌ No session files found in /home/chatak/z_odas/ClassifierLogs/")
+        print("\n❌ No session files found in /home/azureuser/sodas/ClassifierLogs/")
         print("\nTo generate test data:")
         print("1. Open the Streamlit app: streamlit run /home/azureuser/simulator/app.py")
         print("2. Go to '⚙️ ODAS Simulator'")

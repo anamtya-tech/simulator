@@ -349,7 +349,7 @@ class CustomSimulator:
         
         with col2:
             st.markdown("**SODAS Results**")
-            sodas_dir = Path("/home/azureuser/z_odas/ClassifierLogs")
+            sodas_dir = Path("/home/azureuser/sodas/ClassifierLogs")
             sodas_files = list(sodas_dir.glob("sst_classify_events_*.json"))
             if sodas_files:
                 selected_sodas = st.selectbox(

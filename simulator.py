@@ -7,7 +7,7 @@ This orchestrates:
 3. Monitoring the logs and output
 4. Creating a run file with metadata linking scene config to ODAS output
 
-Output files are saved in z_odas/ClassifierLogs/:
+Output files are saved in ~/sodas/ClassifierLogs/:
 - sst_classify_events_<timestamp>.json
 - sst_session_live.json_<timestamp>.json
 """
