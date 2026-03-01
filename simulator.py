@@ -34,7 +34,6 @@ class SimulationRunner:
         self.socket_emit_script = "/home/azureuser/sodas/vm_socket_emit.py"
         self.odas_config = "/home/azureuser/sodas/local_socket.cfg"
         self.odaslive_bin = "/home/azureuser/z_odas_newbeamform/build/bin/odaslive"
-        #self.odaslive_bin = "/home/azureuser/z_odas/build/bin/odaslive"
         
         # Process handles
         self.socket_process = None

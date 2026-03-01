@@ -239,7 +239,7 @@ def main():
         print("\nExample:")
         print("  python compare_outputs.py \\")
         print("    outputs/renders/test_20251116_022813_custom_doa.json \\")
-        print("    ../z_odas/ClassifierLogs/sst_classify_events_1763260938.json")
+        print("    ~/sodas/ClassifierLogs/sst_classify_events_1763260938.json")
         sys.exit(1)
     
     custom_file = sys.argv[1]
