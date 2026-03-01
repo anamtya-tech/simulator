@@ -216,4 +216,12 @@ __marimo__/
 .streamlit/secrets.toml
 **Logs/
 **logs/
+
+# ── Local scratch / session docs (not for repo visitors) ──────────────────────
+tempdocs/
+
+# ── Runtime outputs (never commit) ────────────────────────────────────────────
+outputs/
+ClassifierLogs/
+*.raw
 **/**outputs/
