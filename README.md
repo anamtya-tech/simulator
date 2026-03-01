@@ -4,12 +4,12 @@ A Streamlit-based application for generating synthetic training data for directi
 
 ## Overview
 
-This pipeline creates labeled datasets for training audio classifiers by:
+This pipeline creates labelled datasets for fine-tuning YAMNet by:
 1. **Configuring** synthetic audio scenes with known source positions
 2. **Rendering** multi-channel audio using room acoustics simulation
-3. **Processing** with ODAS to detect sound source peaks
-4. **Matching** detected peaks to ground truth sources
-5. **Generating** labeled training datasets with frequency bin features
+3. **Processing** with ODAS to detect and classify sound source tracks
+4. **Matching** detected tracks to ground truth sources
+5. **Curating** labelled WAV datasets for YAMNet fine-tuning in the [yamnet repo](https://github.com/anamtya-tech/yamnet)
 
 ## Components
 
@@ -38,8 +38,8 @@ This pipeline creates labeled datasets for training audio classifiers by:
 - Orchestrates socket server (`vm_socket_emit.py`) and ODAS binary (`odaslive`)
 - Streams raw audio via TCP socket (port 10000)
 - ODAS processes audio with:
-  - Sound Source Tracking (SST) - Kalman filter
-  - 1024 frequency bins per detection
+  - Sound Source Tracking (SST) — Kalman filter
+  - 257-bin magnitude spectrum per detection (stored as `.bin` sidecar files)
   - Position estimates (x, y, z) and activity scores
 - Output: JSON files in `~/sodas/ClassifierLogs/` (set by `classifier_log_dir` in the ODAS config)
   - `sst_session_live.json_<timestamp>`: Frame-by-frame detections with frequency bins
@@ -47,12 +47,18 @@ This pipeline creates labeled datasets for training audio classifiers by:
 
 ### 5. Results Analyzer (`analyzer.py`)
 - Loads ground truth scene configuration
-- Parses ODAS output (detections with 1024 frequency bins)
+- Parses ODAS output (detections with 257-bin magnitude spectra + track metadata)
 - **Matches** detections to sources using angular threshold (default 10°)
 - Calculates statistics: precision, recall per source
-- **Generates** training dataset: CSV with [1024 bins, label] rows
+- Feeds matched results to `YAMNetDatasetCurator` for WAV extraction
 - Visualizes angular error distribution and label distribution
-- Saves datasets to `simulator/outputs/datasets/`
+
+### 6. YAMNet Dataset Curator (`yamnet_dataset_curator.py`)
+- Filters spatially + temporally aligned matches
+- Reconstructs audio from ODAS `.bin` sidecar spectra (via `audio_reconstructor.py`)
+- Stitches multiple `.bin` files per track for longer WAVs
+- Saves 16 kHz mono WAVs + `labels.csv` in YAMNet-compatible format
+- Output: `outputs/yamnet_datasets/<dataset_name>/`
 
 ## Installation
 
@@ -118,7 +124,19 @@ streamlit run app.py
    - Detection recall per source
    - Angular error distribution
    - Label distribution
-6. Download generated dataset CSV
+
+#### Step 5: Curate YAMNet Dataset
+1. Navigate to **"🎯 YAMNet Datasets"**
+2. Select or create a dataset (e.g., `yamnet_train_001`)
+3. Adjust curation settings (confidence threshold, angle threshold)
+4. Click **"Curate from last analysis"**
+5. Repeat steps 1–5 for multiple scenes
+6. When ready, train in the [yamnet repo](https://github.com/anamtya-tech/yamnet):
+   ```bash
+   python training/train_yamnet.py \
+       --dataset ~/simulator/outputs/yamnet_datasets/yamnet_train_001 \
+       --savedmodel model_store/base/yamnet_core_savedmodel
+   ```
 
 ## Output Format
 
@@ -148,15 +166,6 @@ streamlit run app.py
 }
 ```
 
-### Training Dataset CSV
-```csv
-bin_0,bin_1,...,bin_1023,label
--0.028,0.0007,...,0.0312,Axe
-0.0142,-0.0089,...,0.0198,Chainsaw
-0.0051,0.0234,...,-0.0067,Lion
-...
-```
-
 ## Architecture
 
 ### Data Flow
@@ -167,37 +176,52 @@ sources.csv → Scene Config → Pyroomacoustics → 6ch Raw Audio
                                                       ↓
                                             ODAS (odaslive)
                                                       ↓
-                                            SST JSON (1024 bins/detection)
+                                        SST JSON (detections + .bin sidecars)
                                                       ↓
-Ground Truth Scene Config ← Analyzer → Training Dataset CSV
+            Ground Truth Scene Config ← Analyzer → YAMNetDatasetCurator
+                                                      ↓
+                                        outputs/yamnet_datasets/<name>/
+                                          audio/*.wav + labels.csv
+                                                      ↓
+                                        yamnet repo: train_yamnet.py
+                                                      ↓
+                                        model_store/releases/*.tflite → ODAS
 ```
 
 ### File Structure
 ```
 simulator/
-├── app.py                    # Main Streamlit app
-├── configurator.py           # Scene configuration module
-├── renderer.py               # Audio rendering with pyroomacoustics
-├── simulator.py              # ODAS orchestration
-├── analyzer.py               # Peak matching and dataset generation
-├── requirements.txt          # Python dependencies
-├── README.md                 # This file
+├── app.py                        # Main Streamlit app
+├── configurator.py               # Scene + dataset configuration
+├── renderer.py                   # Audio rendering with pyroomacoustics
+├── simulator.py                  # ODAS orchestration
+├── analyzer.py                   # Detection matching and analysis
+├── yamnet_dataset_curator.py     # WAV extraction + labels.csv generation
+├── audio_reconstructor.py        # Spectra .bin → audio waveform
+├── yamnet_helper/                # Python YAMNet spectrum classifier (reference)
+├── requirements.txt
+├── README.md
 └── outputs/
-    ├── *.raw                 # Rendered audio files
-    ├── *_metadata.json       # Render metadata
+    ├── *.raw                     # Rendered audio files
+    ├── *_metadata.json           # Render metadata
     ├── runs/
-    │   └── run_*.json        # Simulation run manifests
-    └── datasets/
-        └── dataset_*.csv     # Training datasets
+    │   └── run_*.json            # Simulation run manifests
+    └── yamnet_datasets/
+        ├── curator_config.json
+        └── yamnet_train_001/
+            ├── audio/*.wav       # 16 kHz mono WAV training clips
+            ├── spectrograms/
+            ├── metadata/
+            └── labels.csv        # Master label file for training
 
 config/
-├── sources.csv               # Audio source catalog
+├── sources.csv                   # Audio source catalog
 └── scenes/
-    └── *.json                # Saved scene configurations
+    └── *.json                    # Saved scene configurations
 
-~/sodas/ClassifierLogs/        # set by classifier_log_dir in chatak-odas config
-├── sst_session_live.json_*   # ODAS detections with frequency bins
-└── sst_classify_events_*     # ODAS event classifications
+~/sodas/ClassifierLogs/           # set by classifier_log_dir in chatak-odas
+├── sst_session_live.json_*       # ODAS detections with .bin sidecar refs
+└── sst_classify_events_*         # ODAS event classifications
 ```
 
 ## Configuration
@@ -217,7 +241,7 @@ config/
 - **Hop Size**: 128 samples (~8ms frames)
 - **Frame Size**: 256 samples
 - **Tracking**: Kalman filter with dynamic source addition
-- **Frequency Bins**: 1024 per detection
+- **Frequency Bins**: 257 per detection (FFT size 512, half spectrum, stored as `.bin` sidecars)
 
 ## Troubleshooting
 
@@ -251,13 +275,12 @@ cmake -B build && cmake --build build -j$(nproc)
 ## Future Enhancements
 
 - [ ] Multi-scene batch processing
-- [ ] Real-time visualization of detections
-- [ ] Model training integration (scikit-learn/PyTorch)
-- [ ] Active learning loop (add misclassified samples back)
-- [ ] Export to multiple formats (Parquet, HDF5)
-- [ ] GPU acceleration for rendering
-- [ ] Reverb and room parameter customization
-- [ ] SNR-based filtering for low-quality detections
+- [ ] Real-time visualisation of detections
+- [ ] Manual label correction UI for `yamnet_unknown` samples
+- [ ] Automatic fold assignment (train/val/test) in the curator
+- [ ] GPU acceleration for audio rendering
+- [ ] Reverb and room parameter customisation
+- [ ] SNR-based filtering for low-quality reconstructions
 
 ## License
 
@@ -266,6 +289,7 @@ This project builds upon ODAS (MIT License) and pyroomacoustics (MIT License).
 ## References
 
 - ODAS fork (Chatak): https://github.com/anamtya-tech/chatak-odas
+- YAMNet training: https://github.com/anamtya-tech/yamnet
 - ODAS upstream: https://github.com/introlab/odas
 - Pyroomacoustics: https://github.com/LCAV/pyroomacoustics
 - ReSpeaker Mic Array: https://wiki.seeedstudio.com/ReSpeaker_Mic_Array_v2.0/
