@@ -26,7 +26,6 @@ from simulator import SimulationRunner
 from analyzer import ResultAnalyzer
 from custom_simulator import CustomSimulator
 from odas_simulator import ODASSimulator
-# from model_interface import ModelInterface  # Removed - using YAMNet instead
 
 # Configuration
 SOURCES_CSV_PATH = "/home/azureuser/config/sources.csv"
@@ -238,13 +237,6 @@ def show_dataset_manager():
     
     dataset_config = DatasetConfigurator(OUTPUT_DIR)
     dataset_config.render()
-
-def show_model_training():
-    """Model training interface"""
-    st.header("🤖 Model Training")
-    
-    model_interface = ModelInterface(OUTPUT_DIR)
-    model_interface.render()
 
 if __name__ == "__main__":
     main()
