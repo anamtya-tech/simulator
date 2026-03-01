@@ -20,7 +20,7 @@ import soundfile as sf
 import numpy as np
 
 # Import custom modules
-from configurator import SceneConfigurator
+from configurator import SceneConfigurator, DatasetConfigurator
 from renderer import AudioRenderer
 from simulator import SimulationRunner
 from analyzer import ResultAnalyzer
@@ -85,7 +85,7 @@ def main():
         "Select Module",
         ["📁 Sources Library", "🎨 Scene Configurator", "🔊 Audio Renderer", 
          "⚙️ ODAS Simulator", "🔬 Custom DOA Processor", 
-         "📊 Results Analyzer"]
+         "📊 Results Analyzer", "🎯 YAMNet Datasets"]
          # Removed "🤖 Model Training" - using YAMNet instead
     )
     
@@ -109,6 +109,8 @@ def main():
     #     show_odas_processor()
     elif page == "📊 Results Analyzer":
         show_analyzer()
+    elif page == "🎯 YAMNet Datasets":
+        show_dataset_manager()
     # Removed Model Training - using YAMNet instead
     # elif page == "🤖 Model Training":
     #     show_model_training()
@@ -224,11 +226,18 @@ def show_odas_processor():
     odas_sim.render()
 
 def show_analyzer():
-    """Results analyzer interface"""
+    """Results analysis interface"""
     st.header("📊 Results Analyzer")
     
     analyzer = ResultAnalyzer(OUTPUT_DIR, ODAS_LOGS_DIR)
     analyzer.render()
+
+def show_dataset_manager():
+    """YAMNet dataset management interface"""
+    st.header("🎯 YAMNet Dataset Manager")
+    
+    dataset_config = DatasetConfigurator(OUTPUT_DIR)
+    dataset_config.render()
 
 def show_model_training():
     """Model training interface"""

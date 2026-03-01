@@ -26,12 +26,26 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.express as px
 from dataset_manager import DatasetManager
+from yamnet_dataset_curator import YAMNetDatasetCurator
 
 # Global configuration
 CONFIG = {
-    'angle_threshold_deg': 10.0,  # Max angular difference to match
-    'time_window_offset': 2.5,  # Time offset in seconds for matching (±2.5s)
-    'distance_weight': 0.1  # Weight for distance in matching (vs angle)
+    'angle_threshold_deg': 15.0,  # Max angular difference to match (widened from 10→15 to catch ODAS localisation jitter)
+    # Asymmetric time windows around each GT source.
+    # ODAS Kalman filter has a variable startup delay (observed: 0–6s) and a
+    # track-persistence tail after the sound ends (observed: 2.5–13s).
+    # Using a single symmetric offset (old: ±2.5s) caused temporal_mismatch on
+    # every sample that ODAS started tracking late or kept alive after GT end.
+    # pre:  how far BEFORE the GT start we accept a detection (Frog early-start: 3.5s)
+    # post: how far AFTER  the GT end   we accept a detection (Wolfhowl persistence: 12.75s)
+    'time_window_pre_s':  5.0,   # seconds before GT start  (was: 2.5s symmetric)
+    'time_window_post_s': 14.0,  # seconds after  GT end    (was: 2.5s symmetric)
+    'distance_weight': 0.1,  # Weight for distance in matching (vs angle)
+    # Planar microphone arrays (all mics at z=0) cannot reliably estimate
+    # source elevation.  When True, spatial matching uses azimuth-only
+    # (horizontal-plane) angle difference instead of full 3D angular distance.
+    # This prevents the large elevation error from blocking correct matches.
+    'use_azimuth_only_matching': True,
 }
 
 class ResultAnalyzer:
@@ -44,6 +58,10 @@ class ResultAnalyzer:
         
         # Initialize dataset manager
         self.dataset_manager = DatasetManager(output_dir)
+        # Initialize YAMNet curator (writes audio/spectrograms to yamnet_datasets/)
+        self.yamnet_curator = YAMNetDatasetCurator(
+            output_dir=str(self.base_output_dir / 'yamnet_datasets')
+        )
     
     def render(self):
         """Render the analyzer interface"""
@@ -58,18 +76,59 @@ class ResultAnalyzer:
                 save_to_dataset = st.checkbox(
                     "Save to dataset",
                     value=True,
-                    help="Save high-confidence matches to training dataset"
+                    help="Curate GT-matched detections into the YAMNet training dataset"
                 )
                 active_dataset = self.dataset_manager.get_active_dataset_name()
                 st.info(f"Active dataset: **{active_dataset}**")
             
             with col2:
-                config = self.dataset_manager._load_config()
-                confidence_threshold = st.slider(
-                    "Confidence threshold for saving",
-                    0.0, 1.0, config['confidence_threshold'],
-                    help="Only save samples with confidence >= this value"
+                # Legacy spatial-confidence threshold (kept for DatasetManager CSV path)
+                confidence_threshold = self.dataset_manager._load_config()['confidence_threshold']
+
+                # YAMNet classification confidence threshold for the curator.
+                # Samples are saved when YAMNet confidence is *below* this value
+                # (wrong / unsure = needs training). Correct high-confidence
+                # detections are skipped — they don't need more training data.
+                cur_criteria = self.yamnet_curator.config.get('curation_criteria', {})
+                yamnet_conf_threshold = st.slider(
+                    "YAMNet confidence threshold",
+                    min_value=0.0, max_value=1.0,
+                    value=float(cur_criteria.get('confidence_threshold', 0.75)),
+                    step=0.05,
+                    help=(
+                        "Save sample when YAMNet confidence is **below** this value. "
+                        "Lower = only save very wrong predictions. "
+                        "Higher = save anything YAMNet isn't fully sure about. "
+                        "Default 0.75 (save if < 75% confident)."
+                    )
                 )
+                # Persist change to curator config immediately
+                if yamnet_conf_threshold != cur_criteria.get('confidence_threshold', 0.75):
+                    self.yamnet_curator.config['curation_criteria']['confidence_threshold'] = yamnet_conf_threshold
+                    self.yamnet_curator._save_config()
+
+            st.markdown("**🏷️ Label Strategy**")
+            LABEL_STRATEGIES = [
+                "ODAS event voting",
+                "Python YAMNet (re-classify .bin)",
+                "Ground truth only",
+                "Fine-tuned model",
+            ]
+            label_strategy = st.selectbox(
+                "Label source",
+                LABEL_STRATEGIES,
+                index=0,
+                help=(
+                    "**ODAS event voting** — use top-K × N-hop vote winner from firmware (default).\n\n"
+                    "**Python YAMNet (re-classify .bin)** — ignore firmware labels, re-run Python YAMNet "
+                    "on the saved .bin sidecar patches. Useful after updating the model without re-running ODAS.\n\n"
+                    "**Ground truth only** — label = scene ground truth from spatial alignment. "
+                    "Ignores YAMNet entirely; unmatched detections are skipped.\n\n"
+                    "**Fine-tuned model** — re-classify .bin patches using the active fine-tuned .pth model "
+                    "(if available)."
+                )
+            )
+            st.session_state['label_strategy'] = label_strategy
         
         # Load run selection
         run_files = sorted(
@@ -120,6 +179,27 @@ class ResultAnalyzer:
                     value=False,
                     help="Save unmatched detections with label 'unknown'"
                 )
+            st.caption(
+                "🕒 **ODAS Kalman timing offsets** — ODAS takes time to converge on a source "
+                "(startup delay) and keeps tracking after it ends (persistence tail). "
+                "Widen the post-window to catch late starters; the pre-window catches "
+                "early ghost tracks."
+            )
+            col3, col4 = st.columns(2)
+            with col3:
+                time_pre = st.slider(
+                    "Pre-window (s before GT start)",
+                    0.0, 10.0, CONFIG['time_window_pre_s'], 0.5,
+                    help="Accept ODAS detections up to this many seconds BEFORE the GT source starts. "
+                         "Handles cases where Kalman locks on early (observed: up to 3.5s)."
+                )
+            with col4:
+                time_post = st.slider(
+                    "Post-window (s after GT end)",
+                    0.0, 20.0, CONFIG['time_window_post_s'], 0.5,
+                    help="Accept ODAS detections up to this many seconds AFTER the GT source ends. "
+                         "Handles Kalman persistence tail (observed: up to 12.75s for Wolfhowl)."
+                )
         
         # Check if analysis exists
         analysis_path = self._get_analysis_path(run_id)
@@ -145,11 +225,13 @@ class ResultAnalyzer:
         # Run analysis
         if analyze_button:
             with st.spinner("Analyzing..."):
-                results = self._analyze_run(run_data, angle_threshold, save_unmatched)
+                results = self._analyze_run(run_data, angle_threshold, save_unmatched,
+                                            time_pre=time_pre, time_post=time_post)
                 
                 if results:
                     # Use YAMNet classifications instead of custom model
-                    results = self._apply_yamnet_classifications(results)
+                    strategy = st.session_state.get('label_strategy', 'ODAS event voting')
+                    results = self._apply_yamnet_classifications(results, label_strategy=strategy)
                     
                     # Save analysis JSON
                     self._save_analysis(run_id, results, angle_threshold)
@@ -173,9 +255,25 @@ class ResultAnalyzer:
                             st.info(f"ℹ️ Skipped {dataset_stats['skipped_low_confidence']} low-confidence samples")
                         if dataset_stats['skipped_unknown'] > 0:
                             st.info(f"ℹ️ Skipped {dataset_stats['skipped_unknown']} unknown samples")
+
+                        # Also curate into YAMNet audio/spectrogram dataset
+                        try:
+                            # Apply the UI threshold before curating
+                            self.yamnet_curator.config['curation_criteria']['confidence_threshold'] = yamnet_conf_threshold
+                            yamnet_stats = self.yamnet_curator.curate_from_analysis(results, run_id)
+                            saved_t = yamnet_stats.get('saved', 0)
+                            saved_u = yamnet_stats.get('unknown_saved', 0)
+                            if saved_t or saved_u:
+                                st.info(f"🎵 YAMNet dataset: {saved_t} training + {saved_u} unknown samples saved")
+                        except Exception as e:
+                            st.warning(f"⚠️ YAMNet curation skipped: {e}")
                     
                     st.success("✅ Analysis complete!")
-                    st.rerun()
+                    st.session_state['analysis_just_completed'] = True
+            # st.rerun() must be OUTSIDE the spinner context — calling it inside
+            # keeps the spinner open forever on the next render.
+            if st.session_state.pop('analysis_just_completed', False):
+                st.rerun()
         
         # Display results if analysis exists
         if analysis_exists:
@@ -280,7 +378,8 @@ class ResultAnalyzer:
                 path.unlink()
         st.success(f"Deleted analysis for {run_id}")
     
-    def _analyze_run(self, run_data, angle_threshold, save_unmatched):
+    def _analyze_run(self, run_data, angle_threshold, save_unmatched,
+                     time_pre=None, time_post=None):
         """Analyze a simulation run"""
         try:
             # Get session_live file
@@ -309,7 +408,8 @@ class ResultAnalyzer:
             
             # Match detections to sources
             matches, unmatched = self._match_detections_to_sources(
-                detections, scene_data, angle_threshold
+                detections, scene_data, angle_threshold,
+                                time_pre=time_pre, time_post=time_post
             )
             
             st.info(f"Matched: {len(matches)}, Unmatched: {len(unmatched)}")
@@ -346,6 +446,8 @@ class ResultAnalyzer:
     def _parse_odas_output(self, session_live_file):
         """Parse ODAS session_live JSON file"""
         detections = []
+        # Base dir for resolving relative spectra_file paths written by ODAS
+        session_base_dir = os.path.dirname(os.path.abspath(session_live_file))
         
         with open(session_live_file, 'r') as f:
             for line_num, line in enumerate(f, 1):
@@ -353,11 +455,13 @@ class ResultAnalyzer:
                     data = json.loads(line.strip())
                     time_stamp = data.get('timeStamp', 0)
                     
-                    # Each line represents 8ms of analysis
-                    # Line 1 = 0-8ms (use start time = 0ms)
-                    # Line 2 = 8-16ms (use start time = 8ms)
-                    # Line N = (N-1)*8 to N*8 ms
-                    line_timestamp = (line_num - 1) * 0.008  # Convert to seconds
+                    # timeStamp is the cumulative ODAS hop count (each hop = 8ms).
+                    # With ROLLING_HOPS=6 the JSON is gated at 48ms so line_num
+                    # no longer maps 1:1 with 8ms steps — using line_num would
+                    # compress a 33s session into ~5.5s, making Frog/Elephant GT
+                    # windows (15-30s) completely unreachable.
+                    # Correct conversion: actual_seconds = timeStamp * hop_duration
+                    line_timestamp = time_stamp * 0.008  # hop_count × 8ms/hop
                     
                     for src in data.get('src', []):
                         frame_count = src.get('frame_count', 0)
@@ -371,14 +475,35 @@ class ResultAnalyzer:
                             'y': src.get('y', 0),
                             'z': src.get('z', 0),
                             'activity': src.get('activity', 0),
+                            # Legacy single-frame bins (backward compat — empty in new firmware)
                             'bins': src.get('bins', []),
-                            # YAMNet classification data
+                            # Legacy single-class fields (backward compat)
                             'class_id': src.get('class_id', -1),
                             'class_name': src.get('class_name', 'unclassified'),
                             'class_confidence': src.get('class_confidence', 0.0),
                             'class_timestamp': src.get('class_timestamp', 0),
-                            'track_id': src.get('id', 0),
-                            'track_tag': src.get('tag', ''),
+                            # ── Event fields (6-hop rolling mode, min_event_votes gated) ──
+                            # Emitted only when ROLLING_HOPS hops are full and
+                            # event_votes >= min_event_votes (default 4/6).
+                            'event_class_id':        src.get('event_class_id', -1),
+                            'event_class_name':      src.get('event_class_name', 'unclassified'),
+                            'event_votes':           src.get('event_votes', 0),
+                            'event_avg_confidence':  src.get('event_avg_confidence', 0.0),
+                            'event_max_confidence':  src.get('event_max_confidence', 0.0),
+                            # ── Full ranked candidate list (top-K × N-hop voting) ──
+                            # [{class_id, class_name, hop_votes, avg_confidence}, ...] sorted desc.
+                            'event_candidates':      src.get('event_candidates', []),
+                            # ── Spectra sidecar (sim_mode=1 only) ──
+                            # Path to 96×257 float32 .bin file for this event's last hop.
+                            # Load with: np.fromfile(path, dtype=np.float32).reshape(96, 257)
+                            # Empty string on Pi (sim_mode=0).
+                            'spectra_file': self._resolve_spectra_path(
+                                src.get('spectra_file', ''), session_base_dir),
+                            # ── Full 6-hop Top-K history ──
+                            # List of up to 6 dicts: {timestamp, class_ids[5], class_names[5], confidences[5]}
+                            'topk_history': src.get('topk_history', []),
+                            'track_id':   src.get('id', 0),
+                            'track_tag':  src.get('tag', ''),
                             'track_type': src.get('type', '')
                         }
                         detections.append(detection)
@@ -387,6 +512,26 @@ class ResultAnalyzer:
         
         return detections
     
+    def _resolve_spectra_path(self, spectra_file, base_dir):
+        """Resolve spectra_file path to an absolute path that actually exists.
+        
+        Old firmware writes relative paths like ./ClassifierLogs/patch_5_1425.bin
+        relative to the ODAS build dir (the *parent* of the ClassifierLogs dir
+        where the session JSON lives).  New firmware (after the getcwd() fix)
+        writes absolute paths directly.
+        """
+        if not spectra_file:
+            return ''
+        if os.path.isabs(spectra_file):
+            return spectra_file  # New firmware: absolute already
+        # Relative path: try parent of session-file dir (= ODAS build dir) first,
+        # then the session-file dir itself, then CWD.
+        for candidate_base in [os.path.dirname(base_dir), base_dir, os.getcwd()]:
+            p = os.path.normpath(os.path.join(candidate_base, spectra_file))
+            if os.path.exists(p):
+                return p
+        return spectra_file  # return original if nothing matched
+
     def _cartesian_to_spherical(self, x, y, z):
         """Convert Cartesian coordinates to spherical (azimuth, elevation)"""
         r = np.sqrt(x**2 + y**2 + z**2)
@@ -416,6 +561,25 @@ class ResultAnalyzer:
         angle_deg = np.degrees(angle_rad)
         
         return angle_deg
+
+    def _azimuth_distance(self, az1, az2):
+        """Horizontal-plane (azimuth-only) angular distance in degrees.
+
+        Ignores elevation entirely.  For planar microphone arrays the
+        elevation estimate is unreliable (all mics are at z=0), but
+        azimuth is well-determined.  Using azimuth-only distance prevents
+        large elevation errors (~40°) from blocking valid spatial matches.
+
+        Args:
+            az1, az2: azimuths in radians (output of _cartesian_to_spherical)
+        Returns:
+            Angular difference in degrees, in [0, 180].
+        """
+        diff = abs(az1 - az2)
+        # Wrap to [0, π]
+        if diff > np.pi:
+            diff = 2 * np.pi - diff
+        return float(np.degrees(diff))
     
     def _calculate_confidence(self, angular_error):
         """Calculate confidence score based on angular error using cosine similarity
@@ -430,15 +594,24 @@ class ResultAnalyzer:
         confidence = max(0.0, np.cos(angle_rad))
         return float(confidence)
     
-    def _match_detections_to_sources(self, detections, scene, angle_threshold):
-        """Match detected peaks to ground truth sources using time-window strategy
-        
+    def _match_detections_to_sources(self, detections, scene, angle_threshold,
+                                     time_pre=None, time_post=None):
+        """Match detected peaks to ground truth sources using asymmetric time windows.
+
+        ODAS Kalman filter has two characteristic timing artefacts:
+          - Startup delay:   track first appears 1–6 s AFTER the sound starts
+          - Persistence tail: track stays alive 2.5–13 s AFTER the sound ends
+        Using a single symmetric window (±2.5s) causes temporal_mismatch on most
+        samples.  Asymmetric pre/post windows absorb both effects.
+
         Two-pass approach:
-        1. For each source's time window [start-2.5, end+2.5], match peaks to that source
-        2. Label remaining unmatched peaks as 'unknown' with confidence=0
+        1. For each source window [start - pre, end + post], match direction‑matched
+           detections to that source (first match wins; prevents double-assigning).
+        2. Label remaining unmatched detections as 'unknown'.
         """
         sources = scene.get('directional_sources', [])
-        time_offset = CONFIG['time_window_offset']
+        pre  = time_pre  if time_pre  is not None else CONFIG['time_window_pre_s']
+        post = time_post if time_post is not None else CONFIG['time_window_post_s']
         
         matched_detection_indices = set()
         matches = []
@@ -449,9 +622,11 @@ class ResultAnalyzer:
             src_end = src.get('end_time', float('inf'))
             src_label = src.get('label', 'unknown')
             
-            # Define search window with offset
-            window_start = src_start - time_offset
-            window_end = src_end + time_offset
+            # Define asymmetric search window:
+            # Pre-window catches ODAS early-starts (e.g. Frog detected 3.5s before GT start).
+            # Post-window catches Kalman persistence tails (e.g. Wolfhowl tracked 12.75s after GT end).
+            window_start = src_start - pre
+            window_end   = src_end   + post
             
             # Get source position
             if 'position' in src:
@@ -472,9 +647,15 @@ class ResultAnalyzer:
                 if idx in matched_detection_indices:
                     continue
                 
-                # Calculate angular distance
+                # Calculate angular distance.
+                # For planar arrays (use_azimuth_only_matching=True) we compare
+                # only horizontal-plane azimuths because elevation estimates are
+                # unreliable when all microphones lie in the same horizontal plane.
                 det_az, det_el = self._cartesian_to_spherical(det['x'], det['y'], det['z'])
-                angle_diff = self._angular_distance(det_az, det_el, src_az, src_el)
+                if CONFIG.get('use_azimuth_only_matching', True):
+                    angle_diff = self._azimuth_distance(det_az, src_az)
+                else:
+                    angle_diff = self._angular_distance(det_az, det_el, src_az, src_el)
                 
                 # Match if within angular threshold
                 if angle_diff <= angle_threshold:
@@ -507,17 +688,109 @@ class ResultAnalyzer:
         
         return matches, unmatched
     
-    def _apply_yamnet_classifications(self, results):
+    def _derive_label(self, det, strategy='ODAS event voting'):
         """
-        Use YAMNet classifications from ODAS as predictions.
-        Compare with ground truth and identify samples needing fine-tuning.
-        
-        Strategy:
-        1. For each detection, use class_name from YAMNet (already in JSON)
-        2. Compare with ground truth label
-        3. If mismatch or low confidence: mark for dataset/fine-tuning
+        Derive (class_id, class_name, confidence, votes) from a detection dict
+        using the chosen label strategy.  Returns a dict with keys:
+          class_id, class_name, confidence, votes, strategy_used,
+          top_k_candidates   ← full ranked list from event_candidates[]
+          ambiguous          ← True when #2 candidate has same hop-votes as #1
+        so callers are decoupled from firmware field names.
         """
-        st.info("🎯 Using YAMNet classifications from ODAS...")
+        # ── Strategy 1: firmware top-K × N-hop vote winner ──────────────────
+        if strategy == 'ODAS event voting':
+            ev_id    = det.get('event_class_id', -1)
+            ev_name  = det.get('event_class_name', 'unclassified')
+            ev_conf  = det.get('event_max_confidence') or det.get('event_avg_confidence', 0.0)
+            ev_votes = det.get('event_votes', 0)
+
+            # Full ranked candidate list from the 6-hop top-K pool.
+            # Each entry: {class_id, class_name, hop_votes, avg_confidence}
+            candidates = det.get('event_candidates', [])
+
+            # Ambiguity: #2 candidate has the same hop-vote count as the winner.
+            # Ambiguous detections are less trustworthy as training labels.
+            ambiguous = (
+                len(candidates) >= 2 and
+                candidates[0].get('hop_votes', 0) == candidates[1].get('hop_votes', 0)
+            )
+
+            if ev_id != -1 and ev_name not in ('unclassified', ''):
+                return dict(class_id=ev_id, class_name=ev_name,
+                            confidence=ev_conf, votes=ev_votes,
+                            top_k_candidates=candidates,
+                            ambiguous=ambiguous,
+                            strategy_used='odas_voting')
+            # Fallback to legacy single-hop fields
+            return dict(class_id=det.get('class_id', -1),
+                        class_name=det.get('class_name', 'unclassified'),
+                        confidence=det.get('class_confidence', 0.0),
+                        votes=0, top_k_candidates=[], ambiguous=False,
+                        strategy_used='odas_legacy')
+
+        # ── Strategy 2: re-classify .bin sidecar with Python YAMNet ─────────
+        if strategy == 'Python YAMNet (re-classify .bin)':
+            spectra_file = det.get('spectra_file', '')
+            if spectra_file and os.path.exists(spectra_file):
+                try:
+                    import numpy as np
+                    from yamnet_helper.yamnet_spectrum_classifier import YAMNetSpectrumClassifier
+                    if not hasattr(self, '_py_yamnet'):
+                        MODEL = '/home/azureuser/z_odas_newbeamform/models/yamnet_core.tflite'
+                        CSV   = '/home/azureuser/z_odas_newbeamform/models/yamnet_class_map.csv'
+                        self._py_yamnet = YAMNetSpectrumClassifier(MODEL, CSV)
+                    patch = np.fromfile(spectra_file, dtype=np.float32).reshape(96, 257)
+                    cid, cname, conf = self._py_yamnet.classify_patch(patch)
+                    return dict(class_id=cid, class_name=cname, confidence=float(conf),
+                                votes=1, strategy_used='python_yamnet')
+                except Exception:
+                    pass
+            return dict(class_id=-1, class_name='unclassified', confidence=0.0,
+                        votes=0, strategy_used='python_yamnet_missing_bin')
+
+        # ── Strategy 3: ground truth only ───────────────────────────────────
+        if strategy == 'Ground truth only':
+            # Caller must have set match['label'] from scene config already.
+            # Return a sentinel so _apply_yamnet_classifications skips the
+            # YAMNet-vs-GT comparison and just trusts the GT label.
+            return dict(class_id=-2, class_name='__ground_truth__', confidence=1.0,
+                        votes=0, strategy_used='ground_truth')
+
+        # ── Strategy 4: fine-tuned model ─────────────────────────────────────
+        if strategy == 'Fine-tuned model':
+            spectra_file = det.get('spectra_file', '')
+            if spectra_file and os.path.exists(spectra_file):
+                try:
+                    import numpy as np, torch
+                    from model_trainer import load_finetuned_model  # if available
+                    if not hasattr(self, '_ft_model'):
+                        model_path = str(Path(self.base_output_dir) / 'models' / 'active_model.pth')
+                        self._ft_model = load_finetuned_model(model_path)
+                    patch = np.fromfile(spectra_file, dtype=np.float32).reshape(96, 257)
+                    cid, cname, conf = self._ft_model.predict_patch(patch)
+                    return dict(class_id=cid, class_name=cname, confidence=float(conf),
+                                votes=1, strategy_used='finetuned_model')
+                except Exception:
+                    pass
+            return dict(class_id=-1, class_name='unclassified', confidence=0.0,
+                        votes=0, strategy_used='finetuned_missing')
+
+        # Fallback
+        return dict(class_id=-1, class_name='unclassified', confidence=0.0,
+                    votes=0, strategy_used='unknown')
+
+    def _apply_yamnet_classifications(self, results, label_strategy='ODAS event voting'):
+        """
+        Derive labels for all detections using the chosen label_strategy.
+        Compares against ground truth, marks samples needing fine-tuning.
+        """
+        strategy_labels = {
+            'ODAS event voting':               '🎯 ODAS top-K voting',
+            'Python YAMNet (re-classify .bin)':'🐍 Python YAMNet re-classify',
+            'Ground truth only':               '📍 Ground truth labels',
+            'Fine-tuned model':                '🧠 Fine-tuned model',
+        }
+        st.info(f"{strategy_labels.get(label_strategy, label_strategy)} — labeling detections...")
         
         matches_needing_training = []
         yamnet_predicted = 0
@@ -526,22 +799,48 @@ class ResultAnalyzer:
         unclassified = 0
         
         for match in results['matches']:
-            # Get YAMNet classification from detection
-            yamnet_class = match['detection'].get('class_name', 'unclassified')
-            yamnet_conf = match['detection'].get('class_confidence', 0.0)
-            yamnet_id = match['detection'].get('class_id', -1)
-            
-            # Store YAMNet prediction (both as yamnet_* and model_* for compatibility)
+            det = match['detection']
+            lbl = self._derive_label(det, strategy=label_strategy)
+            yamnet_class = lbl['class_name']
+            yamnet_conf  = lbl['confidence']
+            yamnet_id    = lbl['class_id']
+            ev_votes     = lbl['votes']
+            match['label_strategy'] = lbl['strategy_used']
+
+            # Store prediction (both as yamnet_* and model_* for compatibility)
             match['yamnet_class'] = yamnet_class
             match['yamnet_confidence'] = yamnet_conf
             match['yamnet_id'] = yamnet_id
-            match['model_prediction'] = yamnet_class  # For report display
-            match['model_confidence'] = yamnet_conf   # For report display
-            
+            match['yamnet_votes'] = ev_votes
+            match['model_prediction'] = yamnet_class
+            match['model_confidence'] = yamnet_conf
+            # Expose full candidate list to the visualizer
+            match['event_candidates'] = det.get('event_candidates', [])
+            # Top-K ambiguity flag from _derive_label
+            match['top_k_candidates'] = lbl.get('top_k_candidates', [])
+            match['ambiguous'] = lbl.get('ambiguous', False)
+
+            # Ground-truth-only strategy: label IS the ground truth — no YAMNet
+            # comparison needed; mark as correct if spatially matched.
+            if yamnet_id == -2:  # sentinel from _derive_label ground_truth strategy
+                if match['match_type'] == 'ground_truth':
+                    yamnet_correct += 1
+                    match['yamnet_class'] = match.get('label', 'unknown')
+                    match['yamnet_match'] = True
+                    match['needs_training'] = False
+                    match['model_prediction'] = match.get('label', 'unknown')
+                    yamnet_predicted += 1
+                else:
+                    unclassified += 1
+                    match['needs_training'] = True
+                    match['training_reason'] = 'no_ground_truth'
+                    matches_needing_training.append(match)
+                continue
+
             if yamnet_class == 'unclassified' or yamnet_id == -1:
                 unclassified += 1
                 match['needs_training'] = True
-                match['training_reason'] = 'yamnet_unclassified'
+                match['training_reason'] = 'unclassified'
                 matches_needing_training.append(match)
                 continue
             
@@ -550,14 +849,9 @@ class ResultAnalyzer:
             # Compare with ground truth
             if match['match_type'] == 'ground_truth':
                 gt_label = match['label']
-                
-                # Simple string matching (you may want to create a mapping later)
-                # YAMNet uses generic classes like "Animal", "Dog", "Bird"
-                # Ground truth uses specific like "wolfhowl", "elephant", "frog"
                 yamnet_lower = yamnet_class.lower()
                 gt_lower = gt_label.lower()
                 
-                # Check if they match (exact or partial)
                 if yamnet_lower == gt_lower or yamnet_lower in gt_lower or gt_lower in yamnet_lower:
                     yamnet_correct += 1
                     match['yamnet_match'] = True
@@ -566,22 +860,20 @@ class ResultAnalyzer:
                     yamnet_incorrect += 1
                     match['yamnet_match'] = False
                     match['needs_training'] = True
-                    match['training_reason'] = f'yamnet_mismatch (yamnet: {yamnet_class}, gt: {gt_label})'
+                    match['training_reason'] = f'mismatch (pred: {yamnet_class}, gt: {gt_label})'
                     matches_needing_training.append(match)
                 
-                # Also check confidence
                 if yamnet_conf < 0.5:
                     match['needs_training'] = True
                     match['training_reason'] = match.get('training_reason', '') + ' low_confidence'
                     if match not in matches_needing_training:
                         matches_needing_training.append(match)
             else:
-                # Unknown detection - use YAMNet but mark for review if low confidence
                 match['label'] = yamnet_class
                 match['confidence'] = yamnet_conf
                 if yamnet_conf < 0.5:
                     match['needs_training'] = True
-                    match['training_reason'] = 'yamnet_low_confidence'
+                    match['training_reason'] = 'low_confidence'
                     matches_needing_training.append(match)
         
         # Update summary stats
@@ -823,7 +1115,7 @@ class ResultAnalyzer:
                     'source_position': [float(x) for x in m['source'].get('position', [m['source'].get('x', 0), m['source'].get('y', 0), m['source'].get('z', 0)])] if m['source'] else None,
                     'angular_error': float(m['angular_error']) if m['angular_error'] is not None else None,
                     'confidence': float(m['confidence']),
-                    'bins_count': len(m['detection']['bins']),
+                    'bins_count': (1 if m['detection'].get('spectra_file') and os.path.exists(m['detection'].get('spectra_file','')) else len(m['detection'].get('bins', []))),
                     # Add model prediction fields if available
                     'model_prediction': str(m['model_prediction']) if 'model_prediction' in m else None,
                     'model_confidence': float(m['model_confidence']) if 'model_confidence' in m else None,
@@ -837,7 +1129,7 @@ class ResultAnalyzer:
                     'frame_count': int(u['frame_count']),
                     'position': [float(u['x']), float(u['y']), float(u['z'])],
                     'activity': float(u['activity']),
-                    'bins_count': len(u['bins'])
+                    'bins_count': (1 if u.get('spectra_file') and os.path.exists(u.get('spectra_file','')) else len(u.get('bins', [])))
                 }
                 for u in results['unmatched']
             ]
@@ -847,8 +1139,10 @@ class ResultAnalyzer:
         # This prevents corruption if the process is killed during write
         temp_path = analysis_path.with_suffix('.json.tmp')
         try:
-            with open(temp_path, 'w') as f:
-                json.dump(save_data, f, indent=2)
+            with open(temp_path, 'w', encoding='utf-8', errors='replace') as f:
+                # ensure_ascii=True converts any surrogates/high codepoints to
+                # \uXXXX escapes so the JSON is always valid UTF-8
+                json.dump(save_data, f, indent=2, ensure_ascii=True)
             # Atomic rename - if this succeeds, the file is complete
             temp_path.rename(analysis_path)
         except Exception as e:
@@ -1023,8 +1317,13 @@ class ResultAnalyzer:
         # Create the report
         html_content = self._create_plotly_report(results)
         
+        # Strip surrogate characters that json-c may embed in malformed UTF-8
+        # class names — Python's strict UTF-8 codec rejects them on write.
+        html_content = html_content.encode('utf-8', errors='surrogatepass') \
+                                   .decode('utf-8', errors='replace')
+        
         # Save to file
-        with open(report_path, 'w') as f:
+        with open(report_path, 'w', encoding='utf-8', errors='replace') as f:
             f.write(html_content)
         
         st.success(f"📊 Generated interactive report: {report_path.name}")
@@ -1211,47 +1510,60 @@ class ResultAnalyzer:
             html_parts.append("        </table>\n    </div>\n")
         
         # YAMNet Classification Statistics
-        classified_matches = [m for m in matches if m.get('class_name', 'unclassified') != 'unclassified']
+        # Use yamnet_class/yamnet_confidence from match dict — set by
+        # _apply_yamnet_classifications(), which already prefers event_* fields.
+        classified_matches = [m for m in matches
+                              if m.get('yamnet_class', 'unclassified') not in ('unclassified', '', None)
+                              and m.get('yamnet_id', -1) != -1]
         if classified_matches:
             # Calculate classification statistics
             class_counts = {}
             class_confidences = {}
+            class_votes    = {}   # event_votes per class (0 for legacy firmware)
             for m in classified_matches:
-                cname = m.get('class_name', 'unknown')
+                cname = m.get('yamnet_class', 'unknown')
+                votes = m.get('yamnet_votes', 0)
                 class_counts[cname] = class_counts.get(cname, 0) + 1
                 if cname not in class_confidences:
                     class_confidences[cname] = []
-                class_confidences[cname].append(m.get('class_confidence', 0))
-            
-            avg_class_conf = np.mean([m.get('class_confidence', 0) for m in classified_matches])
-            
+                    class_votes[cname]       = []
+                class_confidences[cname].append(m.get('yamnet_confidence', 0))
+                class_votes[cname].append(votes)
+
+            avg_class_conf = np.mean([m.get('yamnet_confidence', 0) for m in classified_matches])
+            has_votes = any(m.get('yamnet_votes', 0) > 0 for m in classified_matches)
+
+            mode_label = '6-hop Rolling Mode' if has_votes else 'Single-hop'
             html_parts.append(f"""
     <div class="section">
-        <h2>🎯 YAMNet Classification Statistics</h2>
+        <h2>🎯 YAMNet Classification Statistics <small style="font-size:13px;color:#888;">({mode_label})</small></h2>
         <div class="stats-grid">
-            <div class="stat-card" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
-                <div class="stat-label">Classified Detections</div>
+            <div class="stat-card" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">  
+                <div class="stat-label">Classified Events</div>
                 <div class="stat-value">{len(classified_matches)}</div>
             </div>
-            <div class="stat-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+            <div class="stat-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">  
                 <div class="stat-label">Unique Classes</div>
                 <div class="stat-value">{len(class_counts)}</div>
             </div>
-            <div class="stat-card" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
-                <div class="stat-label">Avg Classification Confidence</div>
+            <div class="stat-card" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">  
+                <div class="stat-label">Avg Confidence</div>
                 <div class="stat-value">{avg_class_conf:.3f}</div>
             </div>
+            {f'<div class="stat-card" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);">' if has_votes else ''}
+            {f'<div class="stat-label">Avg Votes / Event</div><div class="stat-value">{np.mean([m.get("yamnet_votes",0) for m in classified_matches]):.1f} / 6</div></div>' if has_votes else ''}
         </div>
         
         <h3>Classification Distribution</h3>
         <table>
             <tr>
                 <th>Class Name</th>
-                <th>Count</th>
-                <th>Percentage</th>
-                <th>Avg Confidence</th>
-                <th>Min Confidence</th>
-                <th>Max Confidence</th>
+                <th>Events</th>
+                <th>%</th>
+                <th>Avg Conf</th>
+                <th>Min Conf</th>
+                <th>Max Conf</th>
+                {'<th>Avg Votes</th>' if has_votes else ''}
             </tr>
 """)
             for cname, count in sorted(class_counts.items(), key=lambda x: x[1], reverse=True):
@@ -1259,6 +1571,8 @@ class ResultAnalyzer:
                 avg_conf = np.mean(class_confidences[cname])
                 min_conf = np.min(class_confidences[cname])
                 max_conf = np.max(class_confidences[cname])
+                avg_v    = np.mean(class_votes[cname]) if has_votes else 0
+                votes_cell = f'<td>{avg_v:.1f} / 6</td>' if has_votes else ''
                 html_parts.append(f"""
             <tr>
                 <td><strong>{cname}</strong></td>
@@ -1267,6 +1581,7 @@ class ResultAnalyzer:
                 <td>{avg_conf:.3f}</td>
                 <td>{min_conf:.3f}</td>
                 <td>{max_conf:.3f}</td>
+                {votes_cell}
             </tr>
 """)
             html_parts.append("""
@@ -1499,7 +1814,7 @@ class ResultAnalyzer:
                 if 'yamnet_class' in match and match['yamnet_class']:
                     detection_entry['yamnet_class'] = match['yamnet_class']
                     detection_entry['yamnet_confidence'] = match.get('yamnet_confidence', 0)
-                    detection_entry['match_type'] = match.get('match_type', 'ground_truth')
+                    detection_entry['yamnet_votes'] = match.get('yamnet_votes', 0)
                     detection_entry['match_type'] = match.get('match_type', 'ground_truth')
                 
                 comparison_data[time_key]['detections'].append(detection_entry)
@@ -1580,7 +1895,11 @@ class ResultAnalyzer:
                         var yamnetColor = det.label === det.yamnet_class ? '#4CAF50' : '#f44336';
                         html += '<td style="color: ' + yamnetColor + '; font-weight: bold;">' + det.yamnet_class;
                         if (det.yamnet_confidence !== undefined) {{
-                            html += '<br><small>(' + det.yamnet_confidence.toFixed(2) + ')</small>';
+                            html += '<br><small>conf: ' + det.yamnet_confidence.toFixed(2);
+                            if (det.yamnet_votes && det.yamnet_votes > 0) {{
+                                html += ' &nbsp;·&nbsp; votes: ' + det.yamnet_votes + '/6';
+                            }}
+                            html += '</small>';
                         }}
                         html += '</td>';
                     }} else {{
@@ -1621,14 +1940,22 @@ class ResultAnalyzer:
 """)
         
         # Collect YAMNet classification data
+        # Prefer event fields (6-hop rolling mode); fall back to legacy fields.
         yamnet_data = {}
         for match in matches:
             det = match['detection']
-            class_name = det.get('class_name', 'unclassified')
-            confidence = det.get('class_confidence', 0.0)
+            ev_id   = det.get('event_class_id', -1)
+            ev_name = det.get('event_class_name', 'unclassified')
+            ev_conf = det.get('event_avg_confidence', 0.0)
+            if ev_id != -1 and ev_name not in ('unclassified', ''):
+                class_name = ev_name
+                confidence = ev_conf
+            else:
+                class_name = det.get('class_name', 'unclassified')
+                confidence = det.get('class_confidence', 0.0)
             timestamp = det['timestamp']
             track_id = det.get('track_id', 0)
-            
+
             # Skip if no valid classification
             if class_name == 'unclassified' or confidence == 0.0 or class_name == '':
                 continue
@@ -1738,8 +2065,137 @@ class ResultAnalyzer:
         Plotly.newPlot('yamnet_timeline', yamnetData, yamnetLayout);
     </script>
 """)
-        
-        # Add audio waveform section
+
+        # ── Event Votes Distribution chart (new firmware only) ────────────────
+        votes_data = []
+        for match in matches:
+            v = match.get('yamnet_votes', 0)
+            c = match.get('yamnet_class', '')
+            if v > 0 and c and c != 'unclassified':
+                votes_data.append({'votes': v, 'class': c,
+                                   'ts': match['detection']['timestamp']})
+
+        if votes_data:
+            # Histogram of vote counts (1–6) coloured by class
+            from collections import defaultdict
+            vote_by_class = defaultdict(lambda: [0]*7)  # index = vote count 0-6
+            for d in votes_data:
+                vote_by_class[d['class']][d['votes']] += 1
+
+            vote_traces = []
+            colors = px.colors.qualitative.Dark24
+            for ci, (cls, counts) in enumerate(sorted(vote_by_class.items())):
+                vote_traces.append({
+                    'x': list(range(1, 7)),
+                    'y': counts[1:7],
+                    'name': cls,
+                    'type': 'bar',
+                    'marker': {'color': colors[ci % len(colors)]},
+                    'hovertemplate': f'<b>{cls}</b><br>Votes: %{{x}}/6<br>Events: %{{y}}<extra></extra>'
+                })
+
+            html_parts.append(f"""
+    <div class="section">
+        <h2>\ud83d\uddf3\ufe0f Event Votes Distribution</h2>
+        <p style="color: #666; margin-bottom: 15px;">
+            Number of events by vote count (out of 6 rolling hops).
+            Higher votes = more consistent classification over time.
+        </p>
+        <div id="votes_chart"></div>
+    </div>
+    <script>
+        var votesData = {json.dumps(vote_traces)};
+        var votesLayout = {{
+            barmode: 'stack',
+            xaxis: {{ title: 'Hop votes (out of 6)', dtick: 1 }},
+            yaxis: {{ title: 'Number of events' }},
+            height: 320,
+            plot_bgcolor: '#fafafa',
+            paper_bgcolor: 'white',
+            margin: {{ l: 60, r: 40, t: 20, b: 60 }},
+            legend: {{ orientation: 'h', yanchor: 'bottom', y: -0.4,
+                       xanchor: 'center', x: 0.5 }}
+        }};
+        Plotly.newPlot('votes_chart', votesData, votesLayout);
+    </script>
+""")
+        # ─────────────────────────────────────────────────────────────────────
+        # TOP-K HISTORY HEATMAP
+        # For every confirmed event that has topk_history, show a heatmap of
+        # top-1 confidence over time (one row per YAMNet class seen in top-5,
+        # one column per hop 1-6).  Each event gets its own Plotly chart.
+        topk_events = [m for m in matches
+                       if m['detection'].get('topk_history')
+                       and len(m['detection']['topk_history']) > 0]
+        if topk_events:
+            html_parts.append("""
+    <div class="section">
+        <h2>📊 Top-K Classification History per Event</h2>
+        <p style="color:#666;margin-bottom:15px;">
+            Heatmap of top-5 class confidences across the 6-hop rolling window
+            for each confirmed event.  Brighter = higher confidence.
+        </p>
+""")
+            for ei, m in enumerate(topk_events[:20]):   # cap at 20 events
+                det    = m['detection']
+                hops   = det['topk_history']
+                ev_cls = det.get('event_class_name', det.get('yamnet_class', '?'))
+                ev_ts  = det.get('timestamp', 0)
+                votes  = det.get('event_votes', 0)
+
+                # Collect all unique class names across all hops (top-5 each)
+                all_classes = []
+                for hop in hops:
+                    for cn in hop.get('class_names', []):
+                        if cn not in all_classes:
+                            all_classes.append(cn)
+
+                # Build (class × hop) confidence matrix
+                n_cls  = len(all_classes)
+                n_hops = len(hops)
+                matrix = [[0.0]*n_hops for _ in range(n_cls)]
+                for hi, hop in enumerate(hops):
+                    for ki, cn in enumerate(hop.get('class_names', [])):
+                        ci = all_classes.index(cn)
+                        matrix[ci][hi] = hop.get('confidences', [0]*5)[ki]
+
+                # Highlight row of the winning event class
+                win_idx = all_classes.index(ev_cls) if ev_cls in all_classes else -1
+                row_colors = ['rgba(255,193,7,0.25)' if i == win_idx else 'rgba(0,0,0,0)'
+                              for i in range(n_cls)]
+
+                chart_id = f'topk_heatmap_{ei}'
+                html_parts.append(f'        <div id="{chart_id}" style="margin-bottom:8px;"></div>\n')
+                html_parts.append(f"""    <script>
+        (function() {{
+            var z    = {json.dumps(matrix)};
+            var text = z.map(function(row) {{
+                return row.map(function(v) {{ return v.toFixed(3); }});
+            }});
+            var data = [{{
+                z: z, text: text, type: 'heatmap',
+                colorscale: 'YlOrRd', zmin: 0, zmax: 1,
+                x: {json.dumps([f'hop {h+1}' for h in range(n_hops)])},
+                y: {json.dumps(list(reversed(all_classes)))},
+                hovertemplate: '<b>%{{y}}</b><br>%{{x}}: conf %{{text}}<extra></extra>',
+                texttemplate: '%{{text}}'
+            }}];
+            var layout = {{
+                title: {{ text: 'Event @ {ev_ts:.2f}s &nbsp;·&nbsp; <b>{ev_cls}</b> &nbsp;·&nbsp; votes {votes}/6',
+                          font: {{ size: 13 }} }},
+                height: {max(180, n_cls * 28 + 80)},
+                margin: {{ l: 160, r: 40, t: 40, b: 50 }},
+                xaxis: {{ side: 'bottom' }},
+                plot_bgcolor: '#fafafa', paper_bgcolor: 'white'
+            }};
+            Plotly.newPlot('{chart_id}', data, layout, {{responsive: true}});
+        }})();
+    </script>
+""")
+            html_parts.append("    </div>\n")  # close section
+
+        # ─────────────────────────────────────────────────────────────────────
+
         self._add_audio_waveform_section(html_parts, results)
         
         html_parts.append("""

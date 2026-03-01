@@ -518,3 +518,346 @@ class SceneConfigurator:
             if st.button("❌ Cancel", key="load_cancel"):
                 st.session_state.show_load_dialog = False
                 st.rerun()
+
+
+class DatasetConfigurator:
+    """Configure YAMNet dataset curation settings"""
+    
+    def __init__(self, output_dir='outputs'):
+        from yamnet_dataset_curator import YAMNetDatasetCurator
+        from dataset_visualizer import DatasetVisualizer
+        
+        self.curator = YAMNetDatasetCurator(output_dir=f'{output_dir}/yamnet_datasets')
+        self.visualizer = DatasetVisualizer(curator=self.curator)
+    
+    def render(self):
+        """Render dataset configuration interface"""
+        st.subheader("🎯 YAMNet Dataset Management")
+        st.markdown("Manage datasets for fine-tuning YAMNet")
+        
+        # Tabs for different views
+        tab1, tab2, tab3, tab4 = st.tabs(["📊 Datasets", "⚙️ Settings", "📈 Visualizer", "📖 Guide"])
+        
+        with tab1:
+            self._render_dataset_list()
+        
+        with tab2:
+            self._render_settings()
+        
+        with tab3:
+            self.visualizer.render()
+        
+        with tab4:
+            self._render_guide()
+    
+    def _render_dataset_list(self):
+        """Render list of datasets with management options"""
+        st.markdown("### Available Datasets")
+        
+        datasets = self.curator.list_datasets()
+        
+        if not datasets:
+            st.info("No datasets created yet. Run analysis with YAMNet curation enabled to create datasets.")
+            
+            # Create new dataset
+            st.markdown("---")
+            st.markdown("#### Create New Dataset")
+            new_name = st.text_input("Dataset name", "yamnet_train_001")
+            if st.button("Create Dataset"):
+                self.curator.set_active_dataset(new_name)
+                st.success(f"Created dataset: {new_name}")
+                st.rerun()
+            return
+        
+        # Display datasets
+        for dataset_name in datasets:
+            stats = self.curator.get_dataset_stats(dataset_name)
+            
+            if stats is None:
+                continue
+            
+            is_active = dataset_name == self.curator.get_active_dataset()
+            
+            with st.expander(
+                f"{'🟢' if is_active else '⚪'} {dataset_name} ({stats['sample_count']} samples)",
+                expanded=is_active
+            ):
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric("Total Samples", stats['sample_count'])
+                
+                with col2:
+                    st.metric("Audio Files", stats['actual_audio_files'])
+                
+                with col3:
+                    st.metric("Unique Labels", len(stats['samples_by_label']))
+                
+                # Label distribution
+                if stats['samples_by_label']:
+                    st.markdown("**Label Distribution:**")
+                    label_df = pd.DataFrame([
+                        {'Label': label, 'Count': count}
+                        for label, count in stats['samples_by_label'].items()
+                    ])
+                    st.dataframe(label_df, use_container_width=True)
+                
+                # Actions
+                st.markdown("**Actions:**")
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    if st.button("Set as Active", key=f"activate_{dataset_name}"):
+                        self.curator.set_active_dataset(dataset_name)
+                        st.success(f"Activated: {dataset_name}")
+                        st.rerun()
+                
+                with col2:
+                    if st.button("Prepare for TensorFlow", key=f"tf_{dataset_name}"):
+                        with st.spinner("Preparing dataset..."):
+                            result = self.curator.create_tensorflow_dataset(dataset_name)
+                            st.success("✅ Dataset prepared!")
+                            st.json(result)
+                
+                with col3:
+                    st.text(f"Path: {stats['path']}")
+        
+        # Create new dataset
+        st.markdown("---")
+        st.markdown("### Create New Dataset")
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            new_name = st.text_input("Dataset name", key="new_dataset_name")
+        with col2:
+            st.write("")  # Spacer
+            st.write("")  # Spacer
+            if st.button("➕ Create"):
+                if new_name:
+                    self.curator.set_active_dataset(new_name)
+                    st.success(f"Created and activated: {new_name}")
+                    st.rerun()
+        
+        # Merge datasets
+        st.markdown("---")
+        st.markdown("### Merge Datasets")
+        
+        if len(datasets) >= 2:
+            selected_datasets = st.multiselect(
+                "Select datasets to merge",
+                datasets
+            )
+            
+            merged_name = st.text_input(
+                "Name for merged dataset",
+                f"merged_{datetime.now().strftime('%Y%m%d')}"
+            )
+            
+            if st.button("🔀 Merge Selected"):
+                if len(selected_datasets) >= 2 and merged_name:
+                    with st.spinner("Merging datasets..."):
+                        result = self.curator.merge_datasets(selected_datasets, merged_name)
+                        if result:
+                            st.success(f"✅ Merged {result['total_samples']} samples into {merged_name}")
+                            st.rerun()
+                else:
+                    st.warning("Select at least 2 datasets to merge")
+    
+    def _render_settings(self):
+        """Render curation settings"""
+        st.markdown("### Curation Settings")
+        st.markdown("Configure which samples to include in YAMNet datasets")
+        
+        config = self.curator.config
+        criteria = config['curation_criteria']
+        
+        # Curation criteria
+        st.markdown("#### Selection Criteria")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            include_mismatches = st.checkbox(
+                "Include Mismatches",
+                value=criteria['include_mismatches'],
+                help="Save samples where YAMNet prediction doesn't match ground truth (if aligned)"
+            )
+            
+            include_unclassified = st.checkbox(
+                "Include Unclassified",
+                value=criteria['include_unclassified'],
+                help="Save samples YAMNet couldn't classify (if aligned)"
+            )
+            
+            min_activity = st.slider(
+                "Minimum Activity Level",
+                0.0, 1.0, criteria['min_activity'],
+                help="Skip samples with activity below this threshold"
+            )
+        
+        with col2:
+            include_low_confidence = st.checkbox(
+                "Include Low Confidence",
+                value=criteria['include_low_confidence'],
+                help="Save samples with low YAMNet confidence (if aligned)"
+            )
+            
+            save_unknown = st.checkbox(
+                "Save Misaligned for Manual Review",
+                value=criteria.get('save_unknown', True),
+                help="Save samples outside thresholds for manual verification"
+            )
+        
+        st.info("📌 **Note**: Direction and confidence thresholds are configured in Analysis Settings (used for both matching and curation)")
+        
+        # Audio reconstruction settings
+        st.markdown("---")
+        st.markdown("#### Audio Reconstruction")
+        
+        audio_params = config['audio_params']
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            target_duration = st.number_input(
+                "Target Duration (seconds)",
+                min_value=0.5,
+                max_value=10.0,
+                value=audio_params['target_duration'],
+                step=0.5,
+                help="Target length for reconstructed audio clips"
+            )
+        
+        with col2:
+            overlap_frames = st.number_input(
+                "Overlap Frames",
+                min_value=1,
+                max_value=10,
+                value=audio_params['overlap_frames'],
+                help="Number of frames to overlap for smooth reconstruction"
+            )
+        
+        # Save button
+        if st.button("💾 Save Settings", use_container_width=True):
+            config['curation_criteria'].update({
+                'include_mismatches': include_mismatches,
+                'include_unclassified': include_unclassified,
+                'include_low_confidence': include_low_confidence,
+                'min_activity': min_activity,
+                'save_unknown': save_unknown
+                # Note: confidence_threshold and direction_threshold_deg come from Analysis Settings
+            })
+            
+            config['audio_params'].update({
+                'target_duration': target_duration,
+                'overlap_frames': overlap_frames
+            })
+            
+            self.curator._save_config(config)
+            st.success("✅ Settings saved!")
+        
+        # Active dataset info
+        st.markdown("---")
+        st.markdown("#### Active Dataset")
+        
+        active = self.curator.get_active_dataset()
+        stats = self.curator.get_dataset_stats(active)
+        
+        if stats:
+            st.info(f"**{active}** - {stats['sample_count']} samples")
+    
+    def _render_guide(self):
+        """Render usage guide"""
+        st.markdown("""
+        ### 📖 YAMNet Dataset Curation Guide
+        
+        #### Overview
+        This feature curates training datasets for fine-tuning YAMNet based on ODAS analysis results.
+        
+        #### How It Works
+        
+        1. **Analysis Phase**
+           - ODAS processes audio and provides YAMNet classifications
+           - Ground truth labels come from your scene configuration
+           - System compares YAMNet predictions with ground truth
+        
+        2. **Curation Phase**
+           - Samples are selected based on curation criteria:
+             - **Mismatches**: YAMNet prediction ≠ ground truth
+             - **Unclassified**: YAMNet didn't provide classification
+             - **Low Confidence**: YAMNet confidence below threshold
+           - Audio is reconstructed from frequency bins (1024 bins from ODAS)
+           - Samples saved as WAV files with metadata
+        
+        3. **Dataset Organization**
+           - Each dataset contains:
+             - `audio/`: WAV files (16kHz mono)
+             - `spectrograms/`: Visual representations
+             - `metadata/`: CSV files with labels and metadata
+             - `labels.csv`: Master label file for training
+        
+        #### Dataset Format
+        
+        The dataset follows TensorFlow Hub YAMNet format:
+        - **Audio**: 16kHz mono WAV files
+        - **Labels**: CSV with columns: filename, label, fold, yamnet_class, confidence, etc.
+        - **Splits**: train/val/test folds for proper evaluation
+        
+        #### Fine-Tuning Workflow
+        
+        1. **Curate Data**: Run multiple simulations, system automatically curates samples
+        2. **Review**: Use Dataset Visualizer to listen and verify samples
+        3. **Prepare**: Click "Prepare for TensorFlow" to create train/val/test splits
+        4. **Train**: Use TensorFlow/Keras to fine-tune YAMNet
+        5. **Evaluate**: Test on validation set
+        6. **Deploy**: Update ODAS with fine-tuned model
+        
+        #### Best Practices
+        
+        - **Diverse Data**: Include samples from various runs and conditions
+        - **Balanced Labels**: Try to get similar counts for each class
+        - **Quality Check**: Review samples in visualizer before training
+        - **Iterative**: Fine-tune → test → curate more data → repeat
+        
+        #### Audio Reconstruction
+        
+        Since ODAS provides only magnitude spectra (1024 frequency bins), we use:
+        - **Griffin-Lim Algorithm**: Iterative phase reconstruction
+        - **Overlap-Add**: For temporal continuity across frames
+        - Quality is sufficient for training, though not perfect for human listening
+        
+        #### TensorFlow Training Example
+        
+        ```python
+        import tensorflow as tf
+        import tensorflow_hub as hub
+        import pandas as pd
+        
+        # Load YAMNet
+        model = hub.load('https://tfhub.dev/google/yamnet/1')
+        
+        # Load your dataset
+        df = pd.read_csv('outputs/yamnet_datasets/yamnet_train_001/labels.csv')
+        train_df = df[df['fold'] == 'train']
+        
+        # Create dataset
+        def load_audio(filename):
+            audio, sr = tf.audio.decode_wav(tf.io.read_file(filename))
+            return audio[:, 0]  # mono
+        
+        # Fine-tune transfer learning style
+        # (Add classification head on top of YAMNet embeddings)
+        ```
+        
+        #### Troubleshooting
+        
+        - **No samples curated**: Adjust thresholds, ensure YAMNet is classifying
+        - **Audio quality poor**: Increase overlap_frames, check ODAS bin quality
+        - **Imbalanced labels**: Collect more data for underrepresented classes
+        
+        #### Next Steps
+        
+        - See [TensorFlow YAMNet Tutorial](https://www.tensorflow.org/hub/tutorials/yamnet)
+        - Check `outputs/yamnet_datasets/` for your curated data
+        - Use Dataset Visualizer tab to explore samples
+        """)

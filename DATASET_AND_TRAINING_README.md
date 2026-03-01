@@ -172,40 +172,94 @@ With an active model deployed, the analyzer becomes smarter:
 
 ```
 simulator/outputs/
+├── yamnet_datasets/
+│   ├── curator_config.json            # Active dataset target + curation criteria
+│   ├── yamnet_train_001/              # Primary YAMNet fine-tuning dataset
+│   │   ├── audio/                     # Reconstructed WAV files (1 per ODAS track)
+│   │   │   └── <run_id>_<idx>_t<ts>_<N>bins_dir<az>deg_<label>.wav
+│   │   ├── spectrograms/              # Mel-spectrogram PNG visualisations
+│   │   ├── metadata/                  # Per-run metadata CSVs
+│   │   └── labels.csv                 # Master label file (all runs)
+│   └── yamnet_unknown_001/            # Samples with no GT match (unknown class)
+│       └── (same structure)
 ├── dataset/
-│   ├── dataset_config.json           # Configuration and metadata
-│   ├── train1/                        # First training dataset
-│   │   ├── run_001_20250127_143022.csv
-│   │   ├── run_002_20250127_150133.csv
-│   │   └── ...
-│   ├── train2/                        # Second training dataset (incremental)
-│   │   ├── run_015_20250128_090122.csv
-│   │   └── ...
-│   └── train_merged_20250130_120000/  # Merged dataset
-│       └── train_merged_20250130_120000.csv
+│   └── train1/                        # Legacy lightweight-CNN dataset
+│       └── <run_id>.csv
 └── models/
-    ├── active_model.pth                # Currently deployed model
-    ├── active_model_metadata.json      # Active model info
-    ├── model_train1_20250127_155530.pth # Training checkpoints
-    ├── best_model.pth                   # Best model during training
+    ├── active_model.pth
     └── ...
 ```
 
-### Dataset CSV Format
+### YAMNet `labels.csv` Schema
 
-Each CSV file contains:
+The master label file written by `YAMNetDatasetCurator`:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `filename` | str | WAV filename (unique key) |
+| `run_id` | str | Simulation run identifier |
+| `timestamp` | float | Detection time in seconds (ODAS `timeStamp × 0.008`) |
+| `label` | str | Ground truth class (from scene config) |
+| `yamnet_class` | str | ODAS top-1 event class name |
+| `yamnet_confidence` | float | Peak single-hop confidence (`event_max_confidence`) |
+| `yamnet_votes` | int | Hops that agreed on the winning class (0–6) |
+| `yamnet_ambiguous` | bool | True when #2 candidate ties #1 on hop votes |
+| `top_k_candidates` | str | Top-5 candidates: `Name(Nv,conf)\|...` pipe-separated |
+| `ground_truth` | str | GT label (same as `label` for matched samples) |
+| `curation_reason` | str | Comma-separated tags e.g. `unclassified,low_confidence_0.00,mismatch_yamnet:X_gt:Y,ambiguous_topk` |
+| `activity` | float | ODAS track activity score |
+| `n_stitched_bins` | int | Number of `.bin` sidecars stitched into this WAV |
+| `stitched_duration_s` | float | Reconstructed audio duration in seconds |
+| `position` | dict | ODAS 3D position `{x,y,z}` |
+| `confidence` | float | Spatial angular match confidence |
+| `angular_error` | float | Degrees between ODAS direction and GT source |
+| `dataset_type` | str | `training` or `unknown` |
+| `clean_match` | bool | True when GT-matched and routed to training |
+| `manual_verification_needed` | bool | Flagged for human review |
+| `fold` | str | Train/val split fold (default `train`) |
+
+### Audio WAV Naming Convention
 
 ```
-Columns:
-- run_id: Identifier for the simulation run
-- timestamp: Time of detection in simulation
-- label: Audio source class (wolf, elephant, frog, etc.)
-- confidence: Match confidence score (0.0-1.0)
-- angular_error: Angular error in degrees (for matched samples)
-- activity: ODAS activity score
-- position_x, position_y, position_z: Detection position
-- bin_0, bin_1, ..., bin_1023: Frequency bin values (features)
+{run_id}_{idx:04d}_t{timestamp}_{N}bins_dir{az_error:.0f}deg_{label}.wav
 ```
+
+Example: `wolf_frog_ele_20260301_015542_run_20260301_111706_0000_t3_520_2bins_dir9deg_Wolfhowl.wav`
+
+- `t3_520` = timestamp 3.520 s
+- `2bins` = 2 `.bin` sidecars stitched → ~1.5 s audio
+- `dir9deg` = 9° angular error from GT source
+
+### Track-Based WAV Stitching
+
+Each ODAS track can produce multiple `.bin` sidecars (one per 48 ms YAMNet
+evaluation).  The curator **groups all `.bin` files for the same `track_id`**
+and reconstructs them into a single WAV:
+
+| Track bins | Audio duration | Notes |
+|-----------|---------------|-------|
+| 1 | ~0.76 s | Minimum — one evaluation |
+| 2 | ~1.53 s | |
+| 3 | ~2.30 s | |
+| 6 | ~4.60 s | Common for 5-second sound clips |
+
+This yields significantly longer, higher-quality YAMNet training inputs
+compared to per-bin WAVs.
+
+### YAMNet Confidence Threshold
+
+The **YAMNet confidence threshold** slider in the Dataset Curation Settings
+expander controls which samples the curator saves:
+
+- **Save when `yamnet_conf < threshold`** — captures events the base model
+  doesn't know (needs training).
+- **Skip when `yamnet_conf ≥ threshold`** — the base model already classifies
+  this correctly; no fine-tuning benefit.
+- Default: **0.75**.  Range: 0.0–1.0 (step 0.05).  Persists to
+  `curator_config.json`.
+
+This is separate from the spatial angular match confidence (which determines
+whether a detection is ground-truth matched at all).
 
 ## Model Details
 

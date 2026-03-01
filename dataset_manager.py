@@ -43,15 +43,29 @@ class DatasetManager:
             'created_at': datetime.now().isoformat(),
             'dataset_base_name': self.dataset_base_name,
             'active_dataset': f'{self.dataset_base_name}1',
-            'confidence_threshold': 0.85,  # Only save matches with confidence >= this
+            'confidence_threshold': 0.05,  # Only save matches with confidence >= this
             'datasets': {}
         }
         self._save_config(config)
     
     def _load_config(self):
-        """Load dataset configuration"""
+        """Load dataset configuration, merging with defaults for any missing keys"""
+        defaults = {
+            'created_at': datetime.now().isoformat(),
+            'dataset_base_name': self.dataset_base_name,
+            'active_dataset': f'{self.dataset_base_name}1',
+            'unknown_dataset': None,
+            'confidence_threshold': 0.05,  # Spatial angular match confidence (cos of angle error)
+            'datasets': {}
+        }
         with open(self.config_path, 'r') as f:
-            return json.load(f)
+            on_disk = json.load(f)
+        # Merge: defaults first, then on-disk values override
+        merged = {**defaults, **on_disk}
+        # If merged differs from on-disk (new keys added), persist the fix
+        if merged != on_disk:
+            self._save_config(merged)
+        return merged
     
     def _save_config(self, config):
         """Save dataset configuration"""
@@ -59,9 +73,13 @@ class DatasetManager:
             json.dump(config, f, indent=2)
     
     def get_active_dataset_name(self):
-        """Get the currently active dataset name"""
+        """Get the currently active dataset name, auto-creating one if none is set"""
         config = self._load_config()
-        return config['active_dataset']
+        name = config['active_dataset']
+        if not name:
+            # No active dataset — create the first one automatically
+            name, _ = self.create_new_dataset()
+        return name
     
     def set_active_dataset(self, dataset_name):
         """Set the active dataset for curation"""
