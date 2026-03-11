@@ -25,8 +25,8 @@ from datetime import datetime
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.express as px
-from dataset_manager import DatasetManager
 from yamnet_dataset_curator import YAMNetDatasetCurator
+from timing_compensator import TimingCompensator
 
 # Global configuration
 CONFIG = {
@@ -36,10 +36,12 @@ CONFIG = {
     # track-persistence tail after the sound ends (observed: 2.5–13s).
     # Using a single symmetric offset (old: ±2.5s) caused temporal_mismatch on
     # every sample that ODAS started tracking late or kept alive after GT end.
-    # pre:  how far BEFORE the GT start we accept a detection (Frog early-start: 3.5s)
-    # post: how far AFTER  the GT end   we accept a detection (Wolfhowl persistence: 12.75s)
-    'time_window_pre_s':  5.0,   # seconds before GT start  (was: 2.5s symmetric)
-    'time_window_post_s': 14.0,  # seconds after  GT end    (was: 2.5s symmetric)
+    # YAMNet has 960ms-2400ms latency BEFORE emission (accumulation delay).
+    # Kalman has 0-6s startup delay and 2.5-13s persistence tail.
+    # pre:  catch YAMNet latency + Kalman startup (detections arrive late)
+    # post: catch Kalman persistence tail (tracks linger after sound ends)
+    'time_window_pre_s':  2.0,   # seconds before GT start — warmup silence handles cold-start, 2s covers Kalman jitter
+    'time_window_post_s': 3.0,   # seconds after  GT end   — tail silence handles flush, 3s catches Kalman persistence
     'distance_weight': 0.1,  # Weight for distance in matching (vs angle)
     # Planar microphone arrays (all mics at z=0) cannot reliably estimate
     # source elevation.  When True, spatial matching uses azimuth-only
@@ -56,12 +58,13 @@ class ResultAnalyzer:
         self.analysis_dir.mkdir(parents=True, exist_ok=True)
         self.odas_logs_dir = odas_logs_dir
         
-        # Initialize dataset manager
-        self.dataset_manager = DatasetManager(output_dir)
         # Initialize YAMNet curator (writes audio/spectrograms to yamnet_datasets/)
         self.yamnet_curator = YAMNetDatasetCurator(
             output_dir=str(self.base_output_dir / 'yamnet_datasets')
         )
+        
+        # Initialize timing compensator for interval-based matching
+        self.timing_compensator = TimingCompensator()
     
     def render(self):
         """Render the analyzer interface"""
@@ -78,13 +81,8 @@ class ResultAnalyzer:
                     value=True,
                     help="Curate GT-matched detections into the YAMNet training dataset"
                 )
-                active_dataset = self.dataset_manager.get_active_dataset_name()
-                st.info(f"Active dataset: **{active_dataset}**")
             
             with col2:
-                # Legacy spatial-confidence threshold (kept for DatasetManager CSV path)
-                confidence_threshold = self.dataset_manager._load_config()['confidence_threshold']
-
                 # YAMNet classification confidence threshold for the curator.
                 # Samples are saved when YAMNet confidence is *below* this value
                 # (wrong / unsure = needs training). Correct high-confidence
@@ -242,21 +240,8 @@ class ResultAnalyzer:
                     # Create dataset CSV
                     self._create_dataset(results, run_id, save_unmatched)
                     
-                    # Save to training dataset if enabled
+                    # Save to YAMNet training dataset if enabled
                     if save_to_dataset:
-                        dataset_stats = self.dataset_manager.save_matches_to_dataset(
-                            results['matches'],
-                            run_id,
-                            confidence_threshold=confidence_threshold
-                        )
-                        
-                        st.success(f"💾 Dataset curation: {dataset_stats['saved']} samples saved to {dataset_stats['dataset']}")
-                        if dataset_stats['skipped_low_confidence'] > 0:
-                            st.info(f"ℹ️ Skipped {dataset_stats['skipped_low_confidence']} low-confidence samples")
-                        if dataset_stats['skipped_unknown'] > 0:
-                            st.info(f"ℹ️ Skipped {dataset_stats['skipped_unknown']} unknown samples")
-
-                        # Also curate into YAMNet audio/spectrogram dataset
                         try:
                             # Apply the UI threshold before curating
                             self.yamnet_curator.config['curation_criteria']['confidence_threshold'] = yamnet_conf_threshold
@@ -320,17 +305,23 @@ class ResultAnalyzer:
                 
                 # Show report in full page when button clicked
                 if view_report:
-                    with open(report_path, 'r') as f:
-                        html_content = f.read()
-                    import streamlit.components.v1 as components
-                    
                     st.markdown("---")
                     st.markdown("### 📊 Interactive Report Viewer")
-                    st.info("⚡ Fully interactive - rotate 3D plots, zoom timeline, hover for details")
-                    
-                    # Use full width and large height for better viewing
-                    components.html(html_content, width=None, height=2000, scrolling=True)
-                    
+                    try:
+                        with open(report_path, 'r') as f:
+                            html_content = f.read()
+                        html_size_kb = len(html_content) / 1024
+                        if html_size_kb < 2048:  # <2MB safe to embed
+                            import streamlit.components.v1 as components
+                            st.info(f"⚡ Fully interactive ({html_size_kb:.0f} KB) — rotate 3D plots, zoom timeline, hover for details")
+                            components.html(html_content, width=None, height=2000, scrolling=True)
+                        else:
+                            st.warning(
+                                f"📁 Report is **{html_size_kb:.0f} KB** — too large to embed safely.  \n"
+                                f"Use the **Download** button above, then open the file in your browser."
+                            )
+                    except Exception as _e:
+                        st.error(f"Could not load report: {_e}")
                     st.markdown("---")
                     if st.button("⬆️ Back to Top", key=f"back_{run_id}"):
                         st.rerun()
@@ -351,7 +342,27 @@ class ResultAnalyzer:
             
             with col2:
                 with st.expander("📄 View Analysis JSON"):
-                    st.json(analysis_data)
+                    # Show summary only — full matches array can be thousands of
+                    # entries and pushing it over Streamlit's WebSocket causes
+                    # StreamClosedError.  Offer a download for the full file.
+                    summary_view = {
+                        'run_id':     analysis_data.get('run_id'),
+                        'scene_name': analysis_data.get('scene_name'),
+                        'timestamp':  analysis_data.get('timestamp'),
+                        'summary':    analysis_data.get('summary'),
+                        'by_source':  analysis_data.get('by_source'),
+                        'match_count': len(analysis_data.get('matches', [])),
+                    }
+                    st.json(summary_view)
+                    if analysis_path.exists():
+                        with open(analysis_path, 'rb') as f:
+                            st.download_button(
+                                "📥 Download full analysis JSON",
+                                f,
+                                file_name=analysis_path.name,
+                                mime='application/json',
+                                key=f'dl_json_{run_id}'
+                            )
         
         # Show recent analyses
         st.markdown("---")
@@ -399,7 +410,18 @@ class ResultAnalyzer:
                 scene_data = json.load(f)
             
             # Parse ODAS output
-            detections = self._parse_odas_output(session_live_file)
+            # warmup_seconds: silence prepended to render so ODAS can initialise
+            # its spatial filters before the first source starts.  The renderer
+            # stores this in the run metadata; default 0 for older renders.
+            # NOTE: warmup_seconds is stored inside scene_metadata (because run
+            # JSON copies the render metadata there), so we check both locations.
+            warmup_seconds = float(
+                run_data.get('warmup_seconds',
+                    run_data.get('scene_metadata', {}).get('warmup_seconds', 0.0))
+            )
+            if warmup_seconds > 0:
+                st.info(f"⏱ Warmup offset: subtracting {warmup_seconds:.0f}s from event timestamps")
+            detections = self._parse_odas_output(session_live_file, warmup_seconds=warmup_seconds)
             st.info(f"Parsed {len(detections)} detections from ODAS output")
             
             if not detections:
@@ -443,8 +465,16 @@ class ResultAnalyzer:
             st.code(traceback.format_exc())
             return None
     
-    def _parse_odas_output(self, session_live_file):
-        """Parse ODAS session_live JSON file"""
+    def _parse_odas_output(self, session_live_file, warmup_seconds=0.0):
+        """Parse ODAS session_live JSON file.
+
+        Args:
+            session_live_file: Path to the sst_session_live JSON.
+            warmup_seconds: Silence prepended to the render before sending to
+                ODAS (written by renderer into render metadata as
+                'warmup_seconds').  Subtracted from every event timestamp so
+                times align with the original scene GT windows.
+        """
         detections = []
         # Base dir for resolving relative spectra_file paths written by ODAS
         session_base_dir = os.path.dirname(os.path.abspath(session_live_file))
@@ -461,7 +491,9 @@ class ResultAnalyzer:
                     # compress a 33s session into ~5.5s, making Frog/Elephant GT
                     # windows (15-30s) completely unreachable.
                     # Correct conversion: actual_seconds = timeStamp * hop_duration
-                    line_timestamp = time_stamp * 0.008  # hop_count × 8ms/hop
+                    # hop_count × 8ms/hop, minus the silence prepended before
+                    # the scene audio so that times align with GT windows.
+                    line_timestamp = time_stamp * 0.008 - warmup_seconds
                     
                     for src in data.get('src', []):
                         frame_count = src.get('frame_count', 0)
@@ -499,6 +531,11 @@ class ResultAnalyzer:
                             # Empty string on Pi (sim_mode=0).
                             'spectra_file': self._resolve_spectra_path(
                                 src.get('spectra_file', ''), session_base_dir),
+                            # Number of *real* spectral frames written into the 96-slot buffer
+                            # via spec_at_peak (SSL peak events).  Values << 96 mean the
+                            # buffer is mostly zeros and the reconstructed audio will be
+                            # near-silent even though the track direction is correct.
+                            'spectral_count': src.get('spectral_count', 0),
                             # ── Full 6-hop Top-K history ──
                             # List of up to 6 dicts: {timestamp, class_ids[5], class_names[5], confidences[5]}
                             'topk_history': src.get('topk_history', []),
@@ -596,13 +633,14 @@ class ResultAnalyzer:
     
     def _match_detections_to_sources(self, detections, scene, angle_threshold,
                                      time_pre=None, time_post=None):
-        """Match detected peaks to ground truth sources using asymmetric time windows.
+        """Match detected peaks to ground truth sources using interval overlap and event validity.
 
-        ODAS Kalman filter has two characteristic timing artefacts:
-          - Startup delay:   track first appears 1–6 s AFTER the sound starts
-          - Persistence tail: track stays alive 2.5–13 s AFTER the sound ends
-        Using a single symmetric window (±2.5s) causes temporal_mismatch on most
-        samples.  Asymmetric pre/post windows absorb both effects.
+        Improvements over previous version:
+          1. Event validity filtering: Only process detections with valid classifications
+             (event_class_id != -1, event_votes >= 4, activity > 0.5, confidence > 0.6)
+          2. Interval-based matching: Account for YAMNet's 960ms accumulation window
+             using timing_compensator to calculate actual sound capture intervals
+          3. Asymmetric windows: pre=10s (YAMNet latency), post=5s (Kalman persistence)
 
         Two-pass approach:
         1. For each source window [start - pre, end + post], match direction‑matched
@@ -612,6 +650,58 @@ class ResultAnalyzer:
         sources = scene.get('directional_sources', [])
         pre  = time_pre  if time_pre  is not None else CONFIG['time_window_pre_s']
         post = time_post if time_post is not None else CONFIG['time_window_post_s']
+        
+        # Check if detections have new event fields (firmware version check)
+        has_event_fields = False
+        if len(detections) > 0:
+            sample_det = detections[0]
+            has_event_fields = 'event_class_id' in sample_det and 'event_votes' in sample_det
+        
+        # Filter detections for valid events (only if new firmware with event fields)
+        valid_detections = []
+        filtered_stats = {'total': len(detections), 'no_classification': 0, 'low_votes': 0, 
+                         'low_confidence': 0, 'valid': 0, 'legacy_mode': not has_event_fields}
+        if has_event_fields:
+            # New firmware: Apply event validity filtering
+            for det in detections:
+                # Check 1: Has valid classification (not -1)
+                if det.get('event_class_id', -1) == -1:
+                    filtered_stats['no_classification'] += 1
+                    continue
+                
+                # Check 2: Has at least 1 hop vote (ODAS already gates at min_event_votes)
+                # We accept votes >= 1 here; the curator/labeler decides quality.
+                if det.get('event_votes', 0) < 1:
+                    filtered_stats['low_votes'] += 1
+                    continue
+                
+                # Check 3: Acoustic confidence gate (replaces Kalman activity threshold).
+                # Kalman activity reflects track persistence, not acoustic strength —
+                # it stays near zero during the Kalman warm-up phase (~150 hops).
+                # event_avg_confidence is the mean YAMNet confidence across rolling
+                # hops, which IS noise-robust: random noise rarely scores >= 0.1
+                # consistently on any YAMNet class.
+                if det.get('event_avg_confidence', 0.0) < 0.1:
+                    filtered_stats['low_confidence'] += 1
+                    continue
+                
+                valid_detections.append(det)
+                filtered_stats['valid'] += 1
+        else:
+            # Legacy firmware: Use all detections (backward compatibility)
+            valid_detections = list(detections)
+            filtered_stats['valid'] = len(detections)
+        
+        # Log filtering stats
+        if len(detections) > 0:
+            if has_event_fields:
+                validity_rate = (filtered_stats['valid'] / filtered_stats['total']) * 100
+                print(f"Detection filtering: {filtered_stats['valid']}/{filtered_stats['total']} valid ({validity_rate:.1f}%)")
+                print(f"  Filtered: no_class={filtered_stats['no_classification']}, "
+                      f"low_votes={filtered_stats['low_votes']}, "
+                      f"low_confidence={filtered_stats['low_confidence']}")
+            else:
+                print(f"Legacy mode: Using all {len(detections)} detections (no event fields in session data)")
         
         matched_detection_indices = set()
         matches = []
@@ -636,11 +726,23 @@ class ResultAnalyzer:
             src_az, src_el = self._cartesian_to_spherical(src_pos[0], src_pos[1], src_pos[2])
             
             # Find all detections in this time window
-            for idx, det in enumerate(detections):
+            for idx, det in enumerate(valid_detections):
                 det_time = det['timestamp']
+                frame_count = det.get('frame_count', 1)
                 
-                # Skip if outside time window
-                if not (window_start <= det_time <= window_end):
+                # Calculate detection interval using timing compensator
+                # (accounts for YAMNet's 960ms accumulation window)
+                has_overlap, overlap_conf, overlap_info = self.timing_compensator.check_temporal_overlap(
+                    gt_start=window_start,
+                    gt_end=window_end,
+                    detection=det
+                )
+                
+                # Build overlap dict for downstream use
+                overlap = {'has_overlap': has_overlap, 'confidence': overlap_conf}
+
+                # Skip if no interval overlap with extended GT window
+                if not has_overlap:
                     continue
                 
                 # Skip if already matched to another source
@@ -659,28 +761,42 @@ class ResultAnalyzer:
                 
                 # Match if within angular threshold
                 if angle_diff <= angle_threshold:
-                    confidence = self._calculate_confidence(angle_diff)
+                    spatial_confidence = self._calculate_confidence(angle_diff)
+                    
+                    # Combine spatial and temporal confidence
+                    # spatial_confidence: based on angular error (0-1)
+                    # overlap_conf: based on temporal overlap percentage (0-1)
+                    combined_confidence = (spatial_confidence + overlap_conf) / 2.0
                     
                     matches.append({
                         'detection': det,
                         'source': src,
                         'angular_error': angle_diff,
-                        'confidence': confidence,
+                        'confidence': combined_confidence,
+                        'spatial_confidence': spatial_confidence,
+                        'temporal_confidence': overlap_conf,
+                        'temporal_overlap_percent': overlap_info.get('overlap_percent', 0.0),
+                        'detection_interval': f"[{overlap_info.get('det_start', det_time):.2f}s - {overlap_info.get('det_end', det_time):.2f}s]",
                         'label': src_label,
-                        'match_type': 'ground_truth'  # Indicate this is ground truth matching
+                        'match_type': 'ground_truth'
                     })
                     
                     matched_detection_indices.add(idx)
         
-        # PASS 2: Label unmatched detections as 'unknown'
+        # PASS 2: Label unmatched valid detections as 'unknown'
+        # Note: Only valid_detections are considered, so invalid events are implicitly filtered out
         unmatched = []
-        for idx, det in enumerate(detections):
+        for idx, det in enumerate(valid_detections):
             if idx not in matched_detection_indices:
                 matches.append({
                     'detection': det,
                     'source': None,
                     'angular_error': None,
                     'confidence': 0.0,
+                    'spatial_confidence': 0.0,
+                    'temporal_confidence': 0.0,
+                    'temporal_overlap_percent': 0.0,
+                    'detection_interval': 'N/A',
                     'label': 'unknown',
                     'match_type': 'unmatched'
                 })
@@ -800,6 +916,27 @@ class ResultAnalyzer:
         
         for match in results['matches']:
             det = match['detection']
+
+            # ── Enrich in-memory match with patch_quality + spectral_count ──
+            # These fields are computed by _build_match_record for JSON saving
+            # but the curator runs on the LIVE match dicts before JSON is written,
+            # so we must compute and set them here too.
+            if 'patch_quality' not in match:
+                src = match.get('source')
+                ts  = det.get('timestamp', 0.0)
+                fc  = det.get('frame_count', 0)
+                track_start = det.get('track_start', ts - fc * 0.008)
+                if src:
+                    gt_s = float(src.get('start_time', ts))
+                    gt_e = float(src.get('end_time',   ts))
+                    if   track_start < gt_s:  match['patch_quality'] = 'pre_gt'
+                    elif track_start <= gt_e: match['patch_quality'] = 'during_gt'
+                    else:                     match['patch_quality'] = 'post_gt'
+                else:
+                    match['patch_quality'] = 'unknown'
+            if 'spectral_count' not in match:
+                match['spectral_count'] = int(det.get('spectral_count', 0))
+
             lbl = self._derive_label(det, strategy=label_strategy)
             yamnet_class = lbl['class_name']
             yamnet_conf  = lbl['confidence']
@@ -1089,11 +1226,96 @@ class ResultAnalyzer:
             return [self._convert_to_native(item) for item in obj]
         else:
             return obj
-    
+
+    def _build_match_record(self, m):
+        """Build the flat dict saved per matched detection.
+
+        Adds patch-quality fields that flag whether the YAMNet spectra patch
+        was captured during the ground-truth window or in the post-GT reverb tail.
+
+        Fields added:
+          track_start        – when ODAS first started accumulating spectra for
+                               this track (timestamp − frame_count × 8 ms).
+          detection_latency  – seconds between GT end and track_start.
+                               0 means the track started before or during GT.
+          patch_gt_overlap   – fraction (0–1) of the GT window duration that is
+                               covered by the spectra patch interval.
+          patch_quality      – "during_gt"   patch fully or partially overlaps GT
+                               "post_gt"     track born after GT ended
+                               "pre_gt"      track born before GT started (unusual)
+        """
+        det = m['detection']
+        ts = float(det['timestamp'])
+        fc = int(det.get('frame_count', 0))
+        track_start = ts - fc * 0.008          # seconds: when track was born
+
+        src = m.get('source') or {}
+        gt_start = float(src.get('start_time', ts))
+        gt_end   = float(src.get('end_time',   ts))
+        gt_dur   = max(gt_end - gt_start, 1e-6)
+
+        # How late (in seconds) the track started relative to GT end
+        detection_latency = max(0.0, track_start - gt_end)
+
+        # Overlap between [track_start, ts] and [gt_start, gt_end]
+        patch_overlap_s = max(0.0, min(ts, gt_end) - max(track_start, gt_start))
+        patch_gt_overlap = patch_overlap_s / gt_dur
+
+        if track_start < gt_start:
+            patch_quality = 'pre_gt'
+        elif track_start <= gt_end:
+            patch_quality = 'during_gt'
+        else:
+            patch_quality = 'post_gt'
+
+        src_pos = None
+        if src:
+            sp = src.get('position', [src.get('x', 0), src.get('y', 0), src.get('z', 0)])
+            src_pos = [float(x) for x in sp]
+
+        return {
+            'timestamp':          ts,
+            'frame_count':        fc,
+            'track_start':        round(track_start, 4),
+            'position':           [float(det['x']), float(det['y']), float(det['z'])],
+            'activity':           float(det['activity']),
+            'source_label':       str(m['label']),
+            'source_position':    src_pos,
+            'gt_start':           gt_start,
+            'gt_end':             gt_end,
+            # ── Timing quality ──
+            'detection_latency':  round(detection_latency, 4),
+            'patch_gt_overlap':   round(patch_gt_overlap, 4),
+            'patch_quality':      patch_quality,
+            # ── Spatial ──
+            'angular_error':      float(m['angular_error']) if m['angular_error'] is not None else None,
+            'confidence':         float(m['confidence']),
+            # spectral_count: number of real SSL-peak frames written into the 96-slot
+            # YAMNet buffer.  0/1 means the buffer is nearly empty → audio ≈ silence.
+            # bins_count kept for backward compat (legacy = 1 if spectra_file exists).
+            'spectral_count':     int(det.get('spectral_count', 0)),
+            'bins_count':         int(det.get('spectral_count', 0)) if det.get('spectral_count', 0) > 0
+                                  else (1 if det.get('spectra_file') and os.path.exists(det.get('spectra_file', ''))
+                                        else len(det.get('bins', []))),
+            'spectra_file':       det.get('spectra_file', ''),
+            # ── YAMNet top-voted class (for quick access) ──
+            'model_prediction':   str(m['model_prediction']) if 'model_prediction' in m else None,
+            'model_confidence':   float(m['model_confidence']) if 'model_confidence' in m else None,
+            # ── Per-hop YAMNet voting summary ──
+            'event_votes':        int(det.get('event_votes', 0)),
+            'event_avg_confidence': float(det.get('event_avg_confidence', 0.0)),
+            'event_max_confidence': float(det.get('event_max_confidence', 0.0)),
+            # ── Full ranked candidate list: [{class_id, class_name, hop_votes, avg_confidence}] ──
+            'event_candidates':   self._convert_to_native(det.get('event_candidates', [])),
+            # ── Per-hop Top-K history: [{timestamp, class_ids[5], class_names[5], confidences[5]}] ──
+            'topk_history':       self._convert_to_native(det.get('topk_history', [])),
+            'match_type':         str(m.get('match_type', 'ground_truth')),
+        }
+
     def _save_analysis(self, run_id, results, angle_threshold):
         """Save analysis results to JSON"""
         analysis_path = self._get_analysis_path(run_id)
-        
+
         # Create a saveable version (without large bin arrays)
         save_data = {
             'analysis_id': run_id,
@@ -1106,21 +1328,7 @@ class ResultAnalyzer:
             'by_source': self._convert_to_native(results['by_source']),
             'model_stats': self._convert_to_native(results.get('model_stats', {})),
             'matches': [
-                {
-                    'timestamp': float(m['detection']['timestamp']),
-                    'frame_count': int(m['detection']['frame_count']),
-                    'position': [float(m['detection']['x']), float(m['detection']['y']), float(m['detection']['z'])],
-                    'activity': float(m['detection']['activity']),
-                    'source_label': str(m['label']),
-                    'source_position': [float(x) for x in m['source'].get('position', [m['source'].get('x', 0), m['source'].get('y', 0), m['source'].get('z', 0)])] if m['source'] else None,
-                    'angular_error': float(m['angular_error']) if m['angular_error'] is not None else None,
-                    'confidence': float(m['confidence']),
-                    'bins_count': (1 if m['detection'].get('spectra_file') and os.path.exists(m['detection'].get('spectra_file','')) else len(m['detection'].get('bins', []))),
-                    # Add model prediction fields if available
-                    'model_prediction': str(m['model_prediction']) if 'model_prediction' in m else None,
-                    'model_confidence': float(m['model_confidence']) if 'model_confidence' in m else None,
-                    'match_type': str(m.get('match_type', 'ground_truth'))
-                }
+                self._build_match_record(m)
                 for m in results['matches']
             ],
             'unmatched': [
@@ -1129,7 +1337,17 @@ class ResultAnalyzer:
                     'frame_count': int(u['frame_count']),
                     'position': [float(u['x']), float(u['y']), float(u['z'])],
                     'activity': float(u['activity']),
-                    'bins_count': (1 if u.get('spectra_file') and os.path.exists(u.get('spectra_file','')) else len(u.get('bins', [])))
+                    'spectral_count': int(u.get('spectral_count', 0)),
+                    'bins_count': int(u.get('spectral_count', 0)) if u.get('spectral_count', 0) > 0
+                                  else (1 if u.get('spectra_file') and os.path.exists(u.get('spectra_file','')) else len(u.get('bins', []))),
+                    'spectra_file': u.get('spectra_file', ''),
+                    'model_prediction': str(u.get('event_class_name', 'unclassified')),
+                    'model_confidence': float(u.get('event_max_confidence', 0.0)),
+                    'event_votes': int(u.get('event_votes', 0)),
+                    'event_avg_confidence': float(u.get('event_avg_confidence', 0.0)),
+                    'event_max_confidence': float(u.get('event_max_confidence', 0.0)),
+                    'event_candidates': self._convert_to_native(u.get('event_candidates', [])),
+                    'topk_history': self._convert_to_native(u.get('topk_history', []))
                 }
                 for u in results['unmatched']
             ]

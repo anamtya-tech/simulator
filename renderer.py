@@ -336,10 +336,36 @@ class AudioRenderer:
         if max_val > 0:
             mic_signals = mic_signals / max_val * 0.95
         
-        # Create 6-channel output (channel 1 and 6 are zeros)
+        # Create 6-channel output: ch0 and ch5 are silent (non-mic channels).
+        # Real mic signals go into 0-indexed channels 1,2,3,4 to match the
+        # ReSpeaker 4-Mic Array layout and ODAS config map: (1, 2, 3, 4).
         six_channel = np.zeros((self.n_channels_output, actual_samples))
-        six_channel[1:5, :] = mic_signals  # Channels 2-5 are the 4 mics
-        
+        six_channel[1:5, :] = mic_signals  # 0-indexed ch1,ch2,ch3,ch4 = 4 mics
+
+        # ── ODAS warm-up silence prepend ─────────────────────────────────────
+        # ODAS's GCC-PHAT coherence estimator and PF noise-floor tracker need
+        # a few seconds of silence to converge before the first source starts.
+        # Without this, the very first source (e.g. Wolfhowl at t=5s) fires
+        # while ODAS is still initialising, causing spec_at_peak to rarely win
+        # the SSL vote → spectral_count=1 → near-silent reconstructed audio.
+        # We prepend WARMUP_SECONDS of zeros to every channel, store the offset
+        # in the metadata, and the analyser subtracts it back from timestamps.
+        WARMUP_SECONDS = 10
+        warmup_samples = int(WARMUP_SECONDS * self.sample_rate)
+        head_silence = np.zeros((self.n_channels_output, warmup_samples))
+        six_channel = np.concatenate([head_silence, six_channel], axis=1)
+
+        # ── ODAS tail-flush silence append ────────────────────────────────────
+        # ODAS Kalman filter may still be accumulating the last source when the
+        # audio ends.  Appending silence lets the tracker fully flush pending
+        # hop evaluations before the socket closes, ensuring the last animal
+        # (e.g. Elephant, the shortest GT window) gets its full sc count.
+        TAIL_SECONDS = 10
+        tail_samples = int(TAIL_SECONDS * self.sample_rate)
+        tail_silence = np.zeros((self.n_channels_output, tail_samples))
+        six_channel = np.concatenate([six_channel, tail_silence], axis=1)
+        # ─────────────────────────────────────────────────────────────────────
+
         # Convert to int16
         audio_int16 = (six_channel * 32767).astype(np.int16)
         
@@ -367,7 +393,9 @@ class AudioRenderer:
             'absorption': absorption,
             'max_order': max_order,
             'scene_file': str(Path(self.scenes_dir) / f"{scene['name']}.json"),
-            'output_file': str(output_path)
+            'output_file': str(output_path),
+            'warmup_seconds': WARMUP_SECONDS,
+            'tail_silence_seconds': TAIL_SECONDS,
         }
         
         metadata_path = str(output_path).replace('.raw', '.json')

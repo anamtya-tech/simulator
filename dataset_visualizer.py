@@ -207,7 +207,7 @@ class DatasetVisualizer:
         """Display dataset overview statistics"""
         st.markdown("### 📋 Dataset Overview")
         
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
             st.metric("Total Samples", stats['sample_count'])
@@ -220,6 +220,12 @@ class DatasetVisualizer:
         
         with col4:
             st.metric("Runs Processed", stats['runs_processed'])
+        
+        with col5:
+            # Count how many samples have .bin spectral files
+            bins_dir = Path(stats['path']) / 'bins'
+            bin_count = len(list(bins_dir.glob('*.bin'))) if bins_dir.exists() else 0
+            st.metric("Bin Files", bin_count)
         
         # Label distribution
         with st.expander("📊 Label Distribution", expanded=False):
@@ -268,6 +274,9 @@ class DatasetVisualizer:
                     st.text(f"Activity: {row.get('activity', 0):.3f}")
                     if 'curation_reason' in row:
                         st.text(f"Reason: {row.get('curation_reason', 'N/A')}")
+                    if 'n_frames' in row.index:
+                        nf = int(row.get('n_frames', 0))
+                        st.text(f"Frames: {nf}  (~{nf * 128 / 16000:.1f}s)")
                 
                 # Position
                 if 'position' in row and isinstance(row['position'], str):
@@ -286,12 +295,26 @@ class DatasetVisualizer:
                     st.text(f"YAMNet: {yamnet_class}")
                 else:
                     st.markdown("**✅ Match**" if gt != 'unknown' else "**❓ Unknown GT**")
+                
+                # Bin / spectra info
+                spectra_file = row.get('spectra_file', '')
+                n_frames = int(row.get('n_frames', 0)) if 'n_frames' in row.index else 0
+                if spectra_file and isinstance(spectra_file, str) and spectra_file.strip():
+                    bin_path = dataset_path / spectra_file
+                    duration_s = n_frames * 128 / 16000  # hop_length=128, sr=16000
+                    st.markdown("**🔬 Spectral .bin:**")
+                    st.text(f"Frames: {n_frames}  (~{duration_s:.1f}s)")
+                    st.text(f"Shape: {n_frames}×257 float32")
+                    if not bin_path.exists():
+                        st.caption("⚠️ .bin missing — re-run curation")
+                elif 'spectra_file' not in row.index:
+                    st.caption("⚠️ No spectra_file column — re-run curation")
             
             # Audio playback
             audio_path = dataset_path / 'audio' / row['filename']
             
             if audio_path.exists():
-                st.markdown("**🔊 Audio:**")
+                st.markdown("**🔊 Audio (Griffin-Lim reconstruction):**")
                 
                 # Load and display audio
                 try:
@@ -303,12 +326,46 @@ class DatasetVisualizer:
             else:
                 st.warning(f"Audio file not found: {row['filename']}")
             
-            # Spectrogram visualization
+            # Spectrogram visualization (PNG saved by curator)
             spec_path = dataset_path / 'spectrograms' / row['filename'].replace('.wav', '.png')
             
             if spec_path.exists():
-                st.markdown("**📊 Spectrogram:**")
+                st.markdown("**📊 Spectrogram (from .bin):**")
                 st.image(str(spec_path), use_column_width=True)
+            
+            # Raw .bin heatmap (interactive)
+            spectra_file = row.get('spectra_file', '')
+            if spectra_file and isinstance(spectra_file, str) and spectra_file.strip():
+                bin_path = dataset_path / spectra_file
+                if bin_path.exists():
+                    with st.expander("🔬 Raw Spectral Heatmap (.bin)", expanded=False):
+                        try:
+                            raw = np.fromfile(bin_path, dtype=np.float32)
+                            actual_frames = raw.size // 257
+                            if actual_frames > 0:
+                                spectra = raw[:actual_frames * 257].reshape(actual_frames, 257)
+                                # Transpose: y=freq (257 bins), x=time frames
+                                fig = go.Figure(go.Heatmap(
+                                    z=spectra.T,
+                                    colorscale='Viridis',
+                                    showscale=True,
+                                    colorbar=dict(title='Magnitude'),
+                                ))
+                                fig.update_layout(
+                                    title=f'Linear Magnitude Spectra — {actual_frames} frames × 257 bins',
+                                    xaxis_title='Time Frame',
+                                    yaxis_title='Frequency Bin (0–8 kHz)',
+                                    height=300,
+                                    margin=dict(l=50, r=20, t=40, b=40),
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
+                                st.caption(
+                                    f"Shape: {actual_frames}×257 | "
+                                    f"Duration: ~{actual_frames * 128 / 16000:.2f}s | "
+                                    "Linear magnitude (pre-mel, pre-log) — same input ODAS feeds to YAMNet"
+                                )
+                        except Exception as e:
+                            st.warning(f"Could not render .bin: {e}")
     
     def _display_analytics(self, full_df, filtered_df, stats):
         """Display analytics and visualizations"""

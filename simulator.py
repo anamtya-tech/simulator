@@ -31,8 +31,8 @@ class SimulationRunner:
         self.odas_logs_dir = odas_logs_dir
         
         # Paths
-        self.socket_emit_script = "/home/azureuser/sodas/vm_socket_emit.py"
-        self.odas_config = "/home/azureuser/sodas/local_socket.cfg"
+        self.socket_emit_script = "/home/azureuser/z_odas_newbeamform/vm_socket_emit.py"
+        self.odas_config = "/home/azureuser/z_odas_newbeamform/config/runtime/local_socket.cfg"
         self.odaslive_bin = "/home/azureuser/z_odas_newbeamform/build/bin/odaslive"
         
         # Process handles
@@ -105,6 +105,19 @@ class SimulationRunner:
         run_name = f"{render_id}_run_{run_timestamp}"
         
         try:
+            # Kill any process already holding the port (leftover from a previous
+            # run that didn't clean up cleanly — prevents "Address already in use").
+            try:
+                result = subprocess.run(
+                    ["fuser", "-k", f"{port}/tcp"],
+                    capture_output=True, timeout=5
+                )
+                if result.returncode == 0:
+                    st.write(f"⚠️ Released stale process on port {port}")
+                    time.sleep(1)  # Give the OS time to free the port
+            except Exception:
+                pass  # fuser not available or no process on port — fine
+
             # Start socket server in background
             st.write("🔌 Starting socket server...")
             socket_cmd = [
@@ -164,7 +177,12 @@ class SimulationRunner:
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            duration = metadata.get('duration', 10)
+            # Total audio duration = scene duration + warmup (head) + tail flush
+            # The renderer prepends warmup_seconds of silence and appends
+            # tail_silence_seconds so the Kalman filter fully flushes.
+            warmup_seconds = metadata.get('warmup_seconds', 0)
+            tail_seconds   = metadata.get('tail_silence_seconds', 0)
+            duration = metadata.get('duration', 10) + warmup_seconds + tail_seconds
             start_time = time.time()
             
             while True:
@@ -243,7 +261,8 @@ class SimulationRunner:
                 'classify_events_file': classify_events_file,
                 'session_live_file': session_live_file,
                 'port': port,
-                'odas_config': self.odas_config
+                'odas_config': self.odas_config,
+                'warmup_seconds': metadata.get('warmup_seconds', 0),
             }
             
             run_file_path = str(self.runs_dir / f"{run_name}.json")
@@ -290,6 +309,15 @@ class SimulationRunner:
             self.odas_process = None
         
         st.info("Processes stopped")
+
+    def _free_port(self, port):
+        """Kill any process holding the given TCP port."""
+        try:
+            subprocess.run(["fuser", "-k", f"{port}/tcp"],
+                           capture_output=True, timeout=5)
+            time.sleep(0.5)
+        except Exception:
+            pass
     
     def _show_previous_runs(self):
         """Display previous simulation runs"""

@@ -300,7 +300,20 @@ class AudioReconstructor:
         if not all_frames:
             return None
 
-        frames = np.vstack(all_frames)          # (total_frames × 257)
+        # ODAS writes each .bin with a rolling window of 96 frames at a hop of
+        # 48 frames (50 % overlap).  Naively vstacking all bins repeats the
+        # shared frames, making the audio 3-6× too long.  Instead we keep all
+        # 96 frames of the first bin and only append the NEW 48 frames from
+        # each subsequent bin (the second half, which hasn't been seen before).
+        ODAS_HOP_FRAMES = 48   # mod_sst.c fires classify_track_hop every 48 frames
+        deduped = [all_frames[0]]
+        for f in all_frames[1:]:
+            # The last ODAS_HOP_FRAMES rows of f are new; earlier rows overlap
+            # with the tail of the previous bin.
+            new_rows = f[-ODAS_HOP_FRAMES:] if len(f) >= ODAS_HOP_FRAMES else f
+            deduped.append(new_rows)
+
+        frames = np.vstack(deduped)             # (unique_frames × 257)
         audio = self.reconstruct_multi_frame(frames)
         return {
             'audio':       audio,

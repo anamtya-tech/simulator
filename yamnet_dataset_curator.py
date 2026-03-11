@@ -49,11 +49,16 @@ class YAMNetDatasetCurator:
         self.config = self._load_or_create_config()
         
         # Audio parameters (must match ODAS configuration)
-        # ODAS uses frameSize=512 → halfFrameSize=257 bins, hopSize=128 @ 16kHz
+        # ODAS uses frameSize=512 → halfFrameSize=257 bins @ 16kHz
+        # ODAS processing hop = 128 samples (frame_duration=8ms).
+        # hop_length for Griffin-Lim MUST be 128 to match: each spectral
+        # frame in a .bin represents 128 new PCM samples.  Using hop=512
+        # stretches the reconstructed audio 4× in time.
+        # With dedup stitching: 6 bins → (96+5×48)×128/16000 = 2.69s (correct).
         self.sample_rate = 16000  # Hz - YAMNet requires 16kHz
-        self.frame_duration = 0.008  # 8ms per hop (128/16000)
+        self.frame_duration = 0.008  # 8ms per ODAS processing hop (128/16000)
         self.n_fft = 512           # Must match ODAS frameSize (NOT 1024)
-        self.hop_length = 128      # hopSize from ODAS config
+        self.hop_length = 128      # ODAS hopSize=128 — do NOT change to 512 (4× stretch)
 
         # AudioReconstructor for multi-frame .bin sidecar reconstruction
         from audio_reconstructor import AudioReconstructor
@@ -73,7 +78,9 @@ class YAMNetDatasetCurator:
             'include_direction_mismatch': True,
             'direction_threshold_deg': 15.0,
             'min_activity': 0.01,
+            'min_spectral_bins': 1,   # Min real spectral frames in ODAS buffer; < 1 = no spectral data
             'save_unknown': True,
+            'echo_pad_seconds': 0.5,  # Extra PCM to read past gt_end — captures natural decay/reverb tail
         }
         if self.config_path.exists():
             with open(self.config_path, 'r') as f:
@@ -106,6 +113,8 @@ class YAMNetDatasetCurator:
                 'include_direction_mismatch': True,  # Direction doesn't match ground truth
                 'direction_threshold_deg': 15.0,  # Max angular error (degrees)
                 'min_activity': 0.01,  # Minimum activity level (near-zero filters only dead tracks)
+                'min_spectral_bins': 1,  # Min real spectral frames; < 1 means no spectral data at all
+                'echo_pad_seconds': 0.5,  # Extra PCM past gt_end — captures natural reverb/decay tail
                 'save_unknown': True  # Save non-matching samples for manual labeling
             },
             'audio_params': {
@@ -197,7 +206,12 @@ class YAMNetDatasetCurator:
         """
         criteria = self.config['curation_criteria']
         matches = analysis_results.get('matches', [])
-        
+
+        # Pre-check raw render availability once — used to bypass the spectral
+        # gate for during_gt matches (audio extracted from render, not .bin).
+        _raw_file = analysis_results.get('run_metadata', {}).get('raw_audio_file', '')
+        has_raw_render = bool(_raw_file and os.path.exists(str(_raw_file)))
+
         # Filter matches based on criteria
         samples_for_training = []  # Clean samples with issues - for training
         samples_unknown = []  # Need manual verification
@@ -230,20 +244,52 @@ class YAMNetDatasetCurator:
             if angular_error is not None and angular_error <= direction_threshold:
                 is_spatially_aligned = True
             
-            # Check if matched to a ground truth source (implies temporal alignment)
-            is_temporally_aligned = (match_type == 'ground_truth')
-            
-            # Must be both spatially AND temporally aligned for clean training data
-            is_clean_match = is_spatially_aligned and is_temporally_aligned and ground_truth != 'unknown'
-            
+            # Check if matched to a ground truth source AND within the GT window.
+            # patch_quality == 'during_gt' means the ODAS track was born inside
+            # the GT time window.  pre_gt / post_gt events point in the right
+            # direction but contain no actual animal audio (the animal is not
+            # playing yet / has already finished) → route to unknown only.
+            patch_quality = match.get('patch_quality', 'unknown')
+            is_temporally_aligned = (
+                match_type == 'ground_truth' and patch_quality == 'during_gt'
+            )
+
+            # Spectral quality gate: require the ODAS spectral buffer to contain
+            # at least MIN_SPECTRAL_BINS real frames.  Buffers with fewer frames
+            # are mostly zeros → YAMNet classifies them as Silence regardless of
+            # what the source is playing, producing useless training samples.
+            MIN_SPECTRAL_BINS = criteria.get('min_spectral_bins', 3)
+            spectral_count = match.get('spectral_count', match.get('bins_count', 0))
+            # For GT during_gt matches, raw render extraction is used (not .bin),
+            # so the spectral gate is irrelevant — bypass it.
+            has_enough_spectral = (
+                (spectral_count >= MIN_SPECTRAL_BINS)
+                or (has_raw_render and is_temporally_aligned)
+            )
+
+            # Must be spatially aligned, during GT, AND have spectral content.
+            is_clean_match = (
+                is_spatially_aligned
+                and is_temporally_aligned
+                and has_enough_spectral
+                and ground_truth != 'unknown'
+            )
+
             if not is_clean_match:
-                # NOT aligned with ground truth → Manual verification needed
+                # NOT a clean match → route to unknown for manual review.
                 if criteria.get('save_unknown', True):
                     reason_parts = []
                     if not is_spatially_aligned and angular_error is not None:
                         reason_parts.append(f'direction_error_{angular_error:.1f}deg')
                     if not is_temporally_aligned:
-                        reason_parts.append('temporal_mismatch')
+                        if patch_quality == 'pre_gt':
+                            reason_parts.append('pre_gt')
+                        elif patch_quality == 'post_gt':
+                            reason_parts.append('post_gt_reverb')
+                        else:
+                            reason_parts.append('temporal_mismatch')
+                    if not has_enough_spectral:
+                        reason_parts.append(f'sparse_spectra_{spectral_count}bins')
                     if ground_truth == 'unknown':
                         reason_parts.append('no_ground_truth')
                     
@@ -342,6 +388,8 @@ class YAMNetDatasetCurator:
     
     def _save_samples(self, samples, run_id, analysis_results, dataset_name=None):
         """Save samples to specified dataset"""
+        criteria = self.config.get('curation_criteria', {})
+
         if dataset_name is None:
             dataset_name = self.get_active_dataset()
         
@@ -357,17 +405,37 @@ class YAMNetDatasetCurator:
         label_counts = {}
         sample_metadata = []
         csv_path = None  # Initialize to None
+
+        # Track (label, gt_start, gt_end) tuples already saved via render
+        # extraction.  When multiple ODAS tracks fire on the same source they
+        # all map to the same GT window → identical audio → keep only the first.
+        saved_render_windows: set = set()
         
-        # ── Group samples by track_id and stitch consecutive .bin files ────────
-        # Each ODAS track can fire multiple ROLLING_HOPS evaluation events,
-        # each producing one .bin sidecar (96×257 float32, ~0.76 s).
-        # Stitching all .bin files for the same track yields 1.5–4.6 s WAVs,
-        # which is much better for YAMNet (ideal input ≥ 0.96 s).
+        # ── Group samples by GT window and stitch ALL .bin files ─────────────
+        # Problem with track_id grouping: Kalman tracks flicker — they die
+        # briefly and re-acquire with a NEW track_id even while the same animal
+        # is continuously present.  This produces many separate 1-bin (~0.77s)
+        # samples instead of one long continuous sample per GT occurrence.
+        #
+        # Fix: group by (label, gt_start, gt_end) — the GT source window IS
+        # the sample unit.  All ODAS tracks that matched the same animal at the
+        # same time get merged into one sample, bins stitched in time order.
+        #
+        # For unmatched / unknown samples (no GT source), fall back to track_id.
         from collections import defaultdict as _dd
         track_groups = _dd(list)
         for sample in samples:
-            tid = sample['detection'].get('track_id', id(sample))
-            track_groups[tid].append(sample)
+            src = sample.get('source') or {}
+            gt_s = src.get('start_time')
+            gt_e = src.get('end_time')
+            lbl  = sample.get('label', '')
+            if gt_s is not None and gt_e is not None and lbl and lbl != 'unknown':
+                # Key = GT source window — merges all flickering tracks
+                group_key = (lbl, gt_s, gt_e)
+            else:
+                # No GT match: keep per-track grouping
+                group_key = ('_track_', sample['detection'].get('track_id', id(sample)))
+            track_groups[group_key].append(sample)
 
         # Build one stitched event per track
         stitched_events = []
@@ -402,11 +470,21 @@ class YAMNetDatasetCurator:
                 fallback_bins = event['fallback_bins']
                 n_bins = event['n_bins']
 
-                # ── Audio reconstruction ───────────────────────────────────
-                # Priority: stitch all .bin → single .bin → legacy 257-float bins
+                # ── Audio reconstruction ─────────────────────────────────
+                # Priority 1: ODAS .bin spectral reconstruction (Griffin-Lim)
+                #   → this is the DEPLOYMENT path: in the field ODAS beamforms
+                #     the mic array and passes the resulting spectral bins to
+                #     YAMNet.  Training data MUST go through the same pipeline
+                #     so the model learns the ODAS-beamformed audio domain
+                #     (spatial filtering, SNR characteristics, freq shaping).
+                # Priority 2 (fallback): raw render PCM extraction
+                #   → only used when NO .bin data exists (e.g. weak/tonal sources
+                #     where ODAS rarely wins the pot-coherence competition, sc=1).
+                #     One file per GT window saved via saved_render_windows dedup.
                 audio_waveform = None
                 used_spectra_file = sf_ordered[0] if sf_ordered else None
 
+                # ── Priority 1: ODAS beamformed .bin → Griffin-Lim ───────────
                 if n_bins > 1:
                     result = self._recon.reconstruct_from_spectra_files(sf_ordered)
                     if result is not None:
@@ -417,6 +495,38 @@ class YAMNetDatasetCurator:
                         audio_waveform = result['audio']
                 elif fallback_bins:
                     audio_waveform = self._reconstruct_audio_from_bins(fallback_bins)
+
+                # ── Priority 2 fallback: raw render extraction ────────────────
+                # Only triggered when .bin reconstruction yielded nothing (weak
+                # source, sc=0/1, empty buffer).  Saves one file per GT window.
+                if audio_waveform is None:
+                    run_meta      = analysis_results.get('run_metadata', {})
+                    raw_audio_file = run_meta.get('raw_audio_file')
+                    if (raw_audio_file
+                            and rep.get('match_type') == 'ground_truth'
+                            and rep.get('patch_quality') == 'during_gt'):
+                        src    = rep.get('source') or {}
+                        gt_s   = src.get('start_time')
+                        gt_e   = src.get('end_time')
+                        if gt_s is not None and gt_e is not None and gt_e > gt_s:
+                            scene_meta = run_meta.get('scene_metadata', {})
+                            ws = float(run_meta.get(
+                                'warmup_seconds',
+                                scene_meta.get('warmup_seconds', 0.0)))
+                            sr  = scene_meta.get('sample_rate',  16000)
+                            nc  = scene_meta.get('n_channels',   6)
+                            echo_pad = float(criteria.get('echo_pad_seconds', 0.5))
+                            gt_e_padded = gt_e + echo_pad
+                            _win_key = (rep.get('label', ''), gt_s, gt_e)
+                            if _win_key not in saved_render_windows:
+                                render_audio = self._extract_audio_from_render(
+                                    raw_audio_file, gt_s, gt_e_padded, ws, sr, nc)
+                                if render_audio is not None and len(render_audio) > 0:
+                                    audio_waveform = render_audio
+                                    used_spectra_file = None
+                                    saved_render_windows.add(_win_key)
+                            else:
+                                continue
 
                 if audio_waveform is None or len(audio_waveform) == 0:
                     continue
@@ -437,16 +547,43 @@ class YAMNetDatasetCurator:
                 else:
                     filename_base = f"{run_id}_{idx:04d}_t{timestamp_str}_{bins_tag}_{label}"
 
-                # Save audio as WAV
+                # Save audio as WAV (Griffin-Lim from .bin — human-audible verification
+                # that ODAS heard the right sound; can round-trip: WAV → STFT → bins)
                 wav_path = audio_dir / f"{filename_base}.wav"
                 self._save_audio(audio_waveform, wav_path)
 
-                # Save spectrogram visualization using first (or only) .bin
+                # ── Copy .bin patches into dataset/bins/ ──────────────────────
+                # Stitch all ordered .bin files into one (N*96)×257 float32 file.
+                # Training reads this directly: load → mel+log → 96×64 → YAMNet.
+                bins_dir = dataset_path / 'bins'
+                bins_dir.mkdir(parents=True, exist_ok=True)
+                bin_dest_path = bins_dir / f"{filename_base}.bin"
+                saved_bin_path = None
+                if sf_ordered:
+                    all_patches = []
+                    for sf in sf_ordered:
+                        try:
+                            raw = np.fromfile(sf, dtype=np.float32)
+                            n_f = raw.size // 257
+                            if n_f > 0:
+                                all_patches.append(raw[:n_f * 257].reshape(n_f, 257))
+                        except Exception:
+                            pass
+                    if all_patches:
+                        combined = np.vstack(all_patches).astype(np.float32)
+                        combined.tofile(bin_dest_path)
+                        saved_bin_path = str(bin_dest_path)
+
+                # Save spectrogram visualization from the saved .bin
                 spec_path = spec_dir / f"{filename_base}.png"
-                if used_spectra_file and os.path.exists(used_spectra_file):
-                    patch = np.fromfile(used_spectra_file, dtype=np.float32)
-                    n = patch.size // 257
-                    self._save_spectrogram_plot(patch[:n*257].reshape(n, 257), spec_path, label)
+                if saved_bin_path:
+                    patch_vis = np.fromfile(saved_bin_path, dtype=np.float32)
+                    n_vis = patch_vis.size // 257
+                    self._save_spectrogram_plot(patch_vis[:n_vis*257].reshape(n_vis, 257), spec_path, label)
+                elif used_spectra_file and os.path.exists(used_spectra_file):
+                    patch_vis = np.fromfile(used_spectra_file, dtype=np.float32)
+                    n_vis = patch_vis.size // 257
+                    self._save_spectrogram_plot(patch_vis[:n_vis*257].reshape(n_vis, 257), spec_path, label)
                 elif fallback_bins:
                     self._save_spectrogram_plot(np.array(fallback_bins).reshape(1, -1), spec_path, label)
 
@@ -456,8 +593,15 @@ class YAMNetDatasetCurator:
                     f"{c.get('class_name','?')}({c.get('hop_votes',0)}v,{c.get('avg_confidence',0):.2f})"
                     for c in top_k[:5]  # top-5 at most
                 )
+                _n_frames = (np.fromfile(saved_bin_path, dtype=np.float32).size // 257) if saved_bin_path else 0
                 metadata = {
                     'filename': f"{filename_base}.wav",
+                    # spectra_file: relative path to stitched .bin inside the dataset.
+                    # Shape: (n_frames × 257) float32 linear magnitude spectra.
+                    # Training pipeline: load .bin → apply mel+log → 96×64 → YAMNet.
+                    # The .wav is the Griffin-Lim reconstruction for human verification only.
+                    'spectra_file': f"bins/{filename_base}.bin" if saved_bin_path else '',
+                    'n_frames': _n_frames,
                     'run_id': run_id,
                     'timestamp': timestamp,
                     'label': label,
@@ -469,6 +613,8 @@ class YAMNetDatasetCurator:
                     'ground_truth': rep.get('label', 'unknown'),
                     'curation_reason': rep.get('curation_reason', ''),
                     'activity': det.get('activity', 0),
+                    'spectral_count': det.get('spectral_count', 0),
+                    'patch_quality': rep.get('patch_quality', 'unknown'),
                     'n_stitched_bins': n_bins,
                     'stitched_duration_s': round(len(audio_waveform) / self._recon.sample_rate, 3),
                     'position': {
@@ -554,6 +700,57 @@ class YAMNetDatasetCurator:
             'csv_path': str(csv_path) if csv_path else 'N/A'
         }
     
+    def _extract_audio_from_render(self, render_file, start_time, end_time,
+                                   warmup_seconds=0.0, sr=16000, n_channels=6):
+        """Extract mono audio from the raw S16_LE interleaved render file.
+
+        Because the rendered .raw file contains the original source audio
+        (before ODAS spatial processing), this gives perfect-quality training
+        patches for GT-labelled windows — no Griffin-Lim reconstruction artefacts.
+
+        Args:
+            render_file: Path to the raw S16_LE 6-channel PCM file.
+            start_time / end_time: Scene time window in seconds (GT window,
+                NOT adjusted for warmup — this function adds warmup internally).
+            warmup_seconds: Silence prepended to render before the scene starts.
+            sr: Sample rate (Hz).
+            n_channels: Number of interleaved channels in the file.
+
+        Returns:
+            np.ndarray (float32, shape=(n_samples,)) or None on failure.
+        """
+        if not render_file or not os.path.exists(render_file):
+            return None
+        try:
+            render_start = start_time + warmup_seconds
+            render_end   = end_time   + warmup_seconds
+            if render_end <= render_start:
+                return None
+
+            bytes_per_sample = 2          # S16_LE = 2 bytes
+            start_frame = int(render_start * sr)
+            end_frame   = int(render_end   * sr)
+            n_frames    = end_frame - start_frame
+            if n_frames <= 0:
+                return None
+
+            start_byte = start_frame * n_channels * bytes_per_sample
+            n_bytes    = n_frames    * n_channels * bytes_per_sample
+
+            with open(render_file, 'rb') as f:
+                f.seek(start_byte)
+                raw_data = f.read(n_bytes)
+
+            if len(raw_data) < n_channels * bytes_per_sample:
+                return None
+
+            n_frames_actual = len(raw_data) // (n_channels * bytes_per_sample)
+            data  = np.frombuffer(raw_data, dtype='<i2').reshape(n_frames_actual, n_channels)
+            audio = data.mean(axis=1).astype(np.float32) / 32768.0
+            return audio
+        except Exception:
+            return None
+
     def _reconstruct_audio_from_bins(self, bins):
         """
         Reconstruct audio waveform from magnitude spectrum bins using inverse FFT.
