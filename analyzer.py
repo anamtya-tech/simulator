@@ -314,7 +314,7 @@ class ResultAnalyzer:
                         if html_size_kb < 2048:  # <2MB safe to embed
                             import streamlit.components.v1 as components
                             st.info(f"⚡ Fully interactive ({html_size_kb:.0f} KB) — rotate 3D plots, zoom timeline, hover for details")
-                            components.html(html_content, width=None, height=2000, scrolling=True)
+                            components.html(html_content, width=None, height=1400, scrolling=True)
                         else:
                             st.warning(
                                 f"📁 Report is **{html_size_kb:.0f} KB** — too large to embed safely.  \n"
@@ -546,8 +546,35 @@ class ResultAnalyzer:
                         detections.append(detection)
                 except json.JSONDecodeError:
                     continue
-        
-        return detections
+
+        # ── Deduplication ──────────────────────────────────────────────────────
+        # The SST JSON is emitted every ROLLING_HOPS frames (~48 ms) and every
+        # src entry carries the *most-recent* YAMNet hop result (event_votes,
+        # spectra_file, topk_history) persistently until the next hop fires.
+        # Without deduplication every SST line produces a separate "detection"
+        # for the same hop event, inflating a 70-second file to 15 000+
+        # detections and poisoning GT matching.
+        #
+        # Key:   (track_id, hop_id)
+        # hop_id = spectra_file path when non-empty (sim_mode=1, uniquely
+        #          identifies one 96-frame patch per track), otherwise the
+        #          frame-number timestamp of the first topk_history entry
+        #          (field 'timestamp' is the ODAS hop frame counter which only
+        #          changes when a new hop fires).
+        # We keep the LAST occurrence of each hop so we get the most-accumulated
+        # spectral_count / frame_count for that hop window.
+        hop_index: dict = {}
+        for d in detections:
+            sf = d.get('spectra_file', '')
+            if sf:
+                hop_id = sf
+            else:
+                th = d.get('topk_history', [])
+                hop_id = str(th[0]['timestamp']) if th else str(d.get('odas_timestamp', 0))
+            key = (d['track_id'], hop_id)
+            hop_index[key] = d          # overwrite → keep last (highest frame_count)
+
+        return list(hop_index.values())
     
     def _resolve_spectra_path(self, spectra_file, base_dir):
         """Resolve spectra_file path to an absolute path that actually exists.
@@ -1447,40 +1474,21 @@ class ResultAnalyzer:
             # Create time axis
             time_axis = [i / sample_rate for i in range(len(normalized_samples))]
             
-            # Downsample for plotting if too many samples
-            max_plot_points = 10000
+            # Downsample for plotting — keep max 2000 points for small report size
+            max_plot_points = 2000
             if len(time_axis) > max_plot_points:
                 step = len(time_axis) // max_plot_points
                 time_axis = time_axis[::step]
                 normalized_samples = normalized_samples[::step]
             
-            # Create WAV file in memory for audio player
-            wav_buffer = io.BytesIO()
-            with wave.open(wav_buffer, 'wb') as wav_file:
-                wav_file.setnchannels(1)  # Mono
-                wav_file.setsampwidth(2)  # 16-bit
-                wav_file.setframerate(sample_rate)
-                # Convert back to 16-bit integers
-                wav_data = struct.pack(f'<{len(channel_samples)}h', *channel_samples)
-                wav_file.writeframes(wav_data)
-            
-            # Encode WAV to base64
-            wav_buffer.seek(0)
-            wav_base64 = base64.b64encode(wav_buffer.read()).decode('utf-8')
-            
-            # Add HTML section
+            # Add HTML section (no embedded audio — base64 audio adds ~2MB to report)
             html_parts.append(f"""
     <div class="section">
         <h2>🎵 Audio Waveform (Channel {channel_to_plot + 1})</h2>
         <p style="color: #666; margin-bottom: 15px;">
-            Waveform of the recorded audio aligned with the timeline above. Use the audio player to listen while viewing the timeline.
+            Waveform of the raw capture aligned with the timeline above.
+            Raw audio file: <code>{raw_audio_file}</code>
         </p>
-        <div style="margin-bottom: 20px;">
-            <audio controls style="width: 100%;">
-                <source src="data:audio/wav;base64,{wav_base64}" type="audio/wav">
-                Your browser does not support the audio element.
-            </audio>
-        </div>
         <div id="waveform"></div>
     </div>
 """)
@@ -1659,37 +1667,6 @@ class ResultAnalyzer:
                 <div class="stat-value">{summary['time_span_seconds']:.1f}s</div>
             </div>
         </div>
-    </div>
-""")
-        
-        # Model prediction statistics if available
-        if 'model_stats' in results and results['model_stats']:
-            model_stats = results['model_stats']
-            html_parts.append(f"""
-    <div class="section">
-        <h2>🤖 Model Prediction Statistics</h2>
-        <div class="stats-grid">
-            <div class="stat-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
-                <div class="stat-label">Total Predictions</div>
-                <div class="stat-value">{model_stats['total_predictions']}</div>
-            </div>
-            <div class="stat-card" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
-                <div class="stat-label">Model Predicted</div>
-                <div class="stat-value">{model_stats['model_predicted']}</div>
-            </div>
-            <div class="stat-card" style="background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);">
-                <div class="stat-label">Needs Training</div>
-                <div class="stat-value">{model_stats['needs_training']}</div>
-            </div>
-            <div class="stat-card" style="background: linear-gradient(135deg, #30cfd0 0%, #330867 100%);">
-                <div class="stat-label">Avg Model Confidence</div>
-                <div class="stat-value">{model_stats['avg_model_confidence']:.3f}</div>
-            </div>
-        </div>
-        <p style="color: #666; font-size: 14px; margin-top: 10px;">
-            <strong>Model Predicted:</strong> High-confidence predictions used directly<br>
-            <strong>Needs Training:</strong> Mismatches or low-confidence predictions flagged for retraining
-        </p>
     </div>
 """)
         
@@ -2337,83 +2314,6 @@ class ResultAnalyzer:
         Plotly.newPlot('votes_chart', votesData, votesLayout);
     </script>
 """)
-        # ─────────────────────────────────────────────────────────────────────
-        # TOP-K HISTORY HEATMAP
-        # For every confirmed event that has topk_history, show a heatmap of
-        # top-1 confidence over time (one row per YAMNet class seen in top-5,
-        # one column per hop 1-6).  Each event gets its own Plotly chart.
-        topk_events = [m for m in matches
-                       if m['detection'].get('topk_history')
-                       and len(m['detection']['topk_history']) > 0]
-        if topk_events:
-            html_parts.append("""
-    <div class="section">
-        <h2>📊 Top-K Classification History per Event</h2>
-        <p style="color:#666;margin-bottom:15px;">
-            Heatmap of top-5 class confidences across the 6-hop rolling window
-            for each confirmed event.  Brighter = higher confidence.
-        </p>
-""")
-            for ei, m in enumerate(topk_events[:20]):   # cap at 20 events
-                det    = m['detection']
-                hops   = det['topk_history']
-                ev_cls = det.get('event_class_name', det.get('yamnet_class', '?'))
-                ev_ts  = det.get('timestamp', 0)
-                votes  = det.get('event_votes', 0)
-
-                # Collect all unique class names across all hops (top-5 each)
-                all_classes = []
-                for hop in hops:
-                    for cn in hop.get('class_names', []):
-                        if cn not in all_classes:
-                            all_classes.append(cn)
-
-                # Build (class × hop) confidence matrix
-                n_cls  = len(all_classes)
-                n_hops = len(hops)
-                matrix = [[0.0]*n_hops for _ in range(n_cls)]
-                for hi, hop in enumerate(hops):
-                    for ki, cn in enumerate(hop.get('class_names', [])):
-                        ci = all_classes.index(cn)
-                        matrix[ci][hi] = hop.get('confidences', [0]*5)[ki]
-
-                # Highlight row of the winning event class
-                win_idx = all_classes.index(ev_cls) if ev_cls in all_classes else -1
-                row_colors = ['rgba(255,193,7,0.25)' if i == win_idx else 'rgba(0,0,0,0)'
-                              for i in range(n_cls)]
-
-                chart_id = f'topk_heatmap_{ei}'
-                html_parts.append(f'        <div id="{chart_id}" style="margin-bottom:8px;"></div>\n')
-                html_parts.append(f"""    <script>
-        (function() {{
-            var z    = {json.dumps(matrix)};
-            var text = z.map(function(row) {{
-                return row.map(function(v) {{ return v.toFixed(3); }});
-            }});
-            var data = [{{
-                z: z, text: text, type: 'heatmap',
-                colorscale: 'YlOrRd', zmin: 0, zmax: 1,
-                x: {json.dumps([f'hop {h+1}' for h in range(n_hops)])},
-                y: {json.dumps(list(reversed(all_classes)))},
-                hovertemplate: '<b>%{{y}}</b><br>%{{x}}: conf %{{text}}<extra></extra>',
-                texttemplate: '%{{text}}'
-            }}];
-            var layout = {{
-                title: {{ text: 'Event @ {ev_ts:.2f}s &nbsp;·&nbsp; <b>{ev_cls}</b> &nbsp;·&nbsp; votes {votes}/6',
-                          font: {{ size: 13 }} }},
-                height: {max(180, n_cls * 28 + 80)},
-                margin: {{ l: 160, r: 40, t: 40, b: 50 }},
-                xaxis: {{ side: 'bottom' }},
-                plot_bgcolor: '#fafafa', paper_bgcolor: 'white'
-            }};
-            Plotly.newPlot('{chart_id}', data, layout, {{responsive: true}});
-        }})();
-    </script>
-""")
-            html_parts.append("    </div>\n")  # close section
-
-        # ─────────────────────────────────────────────────────────────────────
-
         self._add_audio_waveform_section(html_parts, results)
         
         html_parts.append("""

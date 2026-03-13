@@ -145,3 +145,147 @@ Running the same scene (`For_Training_Ele_Bird`, 600s, 6 species, continuous amb
 | `spectra_file` in labels.csv | ❌ | ✅ |
 | Training domain | Raw PCM ❌ | ODAS-beamformed ✅ |
 | Track fragmentation | Many 0.77s per animal | One long sample per GT window |
+
+
+---
+
+---
+
+# Changes — March 12, 2026
+
+> Investigation of 15 K+ spurious detections, DMVDR crash, and short sample durations.
+
+---
+
+## Bug: 15 000+ Spurious Detections in Analyzer
+
+### Symptom
+Run `wolf_frog_wolf_mon_20260312_055822_run_20260312_055833` reported 15 424 matches and 15 389 unmatched detections. All unmatched entries had position `[0,0,0]`, activity 0, and all pointed to the same stale `.bin` file `patch_1_1900.bin`.
+
+### Root Cause — Two Compounding Issues
+
+**Issue A — Stale session file silently consumed:**
+ODAS crashed immediately (see DMVDR section below) without writing a new session file. `simulator.py` selected the most-recent session file by mtime, which was a 43 MB file from a run 2+ hours earlier (March 11 05:16 AM) containing 17 988 SST entries for a completely different scene.
+
+**Issue B — Per-frame duplication in the parser:**
+`_parse_odas_output` emitted one `detection` dict per SST source line. The ODAS SST JSON is written every `ROLLING_HOPS` frames (~48 ms) and each source entry carries the *same* `spectra_file` / `topk_history` persistently until the next hop fires. A single YAMNet hop event therefore repeated ~16 times (one per SST frame) across the ~768 ms hop window. With 17 988 SST entries over a 485-second session, this inflated to 15 000+ duplicates.
+
+### Fix A — Stale session file guard (`simulator.py`)
+1. Record `run_start_time = time.time()` before ODAS is launched.
+2. After the session file is located, compare its `os.path.getmtime()` against `run_start_time`. If the file predates the run, log an error and set `session_live_file = None` rather than silently using it.
+3. Add an early-crash check: poll the ODAS process after 3 seconds; if it has already exited, show the last 800 characters of the log and abort analysis.
+
+### Fix B — Hop-level deduplication (`analyzer.py`)
+After the main parse loop, deduplicate by `(track_id, hop_id)` key where:
+- `hop_id = spectra_file` path when non-empty (unique per 96-frame patch, sim_mode=1)
+- `hop_id = topk_history[0]['timestamp']` otherwise (ODAS hop frame counter only changes when a new hop fires)
+
+Keep the **last** occurrence of each key (highest accumulated `frame_count` / `spectral_count`). Verified: 17 988 raw entries → 2 176 after deduplication on the stale 43 MB file.
+
+---
+
+## Bug: ODAS Crash — "Invalid separation method" (DMVDR Never Implemented)
+
+### Symptom
+Both the March 11 07:51 run and the March 12 05:58 run crashed immediately with:
+```
+Invalid separation method.
+```
+
+### Root Cause
+The prior `changes.md` entry recommended switching `mode_sep` to `"dmvdr"`. That config change was made. However, `dmvdr` was **never implemented** in ODAS — neither in the local fork nor in the upstream `introlab/odas` repository:
+
+```c
+// src/module/mod_sss.c
+steer2demixing_mvdr_construct_zero(obj->steer2demixing_mvdr)  // body: // Not implemented yet
+typedef struct steer2demixing_mvdr_obj { } steer2demixing_mvdr_obj;  // empty struct
+```
+
+The positive results cited in the prior entry ("Mean sample duration 27.3s") came from earlier runs at 03:43, 04:56, and 05:16 AM on March 11 that were using `mode_sep = "dds"`. The DMVDR recommendation was written based on documentation that does not reflect the actual C code.
+
+### Fix
+`mode_sep` set to `"dgss"` (Geometric Source Separation — adaptive, fully implemented).
+
+```
+mode_sep = "dds"   →   mode_sep = "dgss"
+```
+
+**GSS vs DDS:**
+- **DDS (Delay-and-Sum):** steers a fixed beam toward the tracked direction. No interference rejection. All sources leak into all tracks equally.
+- **GSS (Geometric Source Separation):** adaptive gradient-descent beamformer. Updates per-frequency complex weight vectors every hop via `W ← W − μ·∇ − λ·W`. Builds nulls toward competing sources over time. Controlled by `mu` (adaptation step, currently 0.01) and `lambda` (weight decay/leakage, currently 0.5).
+
+**Prior entry's DMVDR claims are retracted.** The DMVDR section of the prior entry should be understood as a description of the *intended* beamformer; the actual beamformer in use throughout all tested runs was DDS (before March 12) and now GSS.
+
+---
+
+## ODAS Config: Clarification of All Separation Parameters
+
+| Field | Meaning |
+|-------|---------|
+| `mode_sep = "dds"` | Delay-and-Sum — fixed beam, no interference rejection |
+| `mode_sep = "dgss"` | Geometric Source Separation — adaptive, currently active |
+| `mode_sep = "dmvdr"` | MVDR — **not implemented**, causes immediate crash |
+| `mode_pf = "ms"` | Multi-Source Post-Filter: MCRA noise estimator + Wiener gain per frequency bin. Applied after separation. |
+| `mode_pf = "ss"` | Single-Source Post-Filter: simpler energy-ratio gain, less effective in multi-source scenes |
+| `dds: {}` | Empty — DDS has no tunable parameters (purely geometric: mic positions + speed of sound) |
+| `dgss: { mu = 0.01; lambda = 0.5; }` | `mu`: gradient step size (larger = faster convergence, more instability). `lambda`: weight decay (prevents divergence) |
+| `ms: { alphaPmin, eta, alphaZ, ... }` | MCRA noise tracker and Wiener suppression parameters |
+| `separated` output | Beamformer output **before** post-filtering. Written to `separated.raw` |
+| `postfiltered` output | Post-filter output **after** noise suppression. Written to `postfiltered.raw`, boosted by `gain_pf = 10.0` |
+
+---
+
+## Investigation: Short Sample Durations (~1 s for 5 s Sources)
+
+### Symptom
+Scene `wolf_frog_wolf_mon` has 5-second GT windows per animal. The yamnet_train dataset produced:
+- Wolf howl 1: ~1.5 s (2 patches)
+- Wolf howl 2: ~1.1 s (2 patches)
+- Frog: ~5.7 s (14 patches) ✅
+- Monkey: ~1.5 s (3 patches)
+
+### Track Lifetime Analysis
+
+Parsing `sst_session_live.json_20260312_111758.json` (1316 JSONL lines, 519 with sources):
+
+| Track | Animal | Born | Died | Duration | Max activity |
+|-------|--------|------|------|----------|-------------|
+| 5 | Wolf 1 | 5.17 s | 6.42 s | **1.25 s** | 0.336 |
+| 31 | Wolf 2 | 30.27 s | 31.42 s | **1.15 s** | ~0 |
+| 14 | Frog | 16.93 s | 23.41 s | **6.48 s** | 1.0 |
+| 48 | Monkey | 40.74 s | 48.27 s | **7.54 s** | 1.0 |
+
+The `N_inactive = (150, 150, 150, 150)` Kalman parameter kills a track after `150 × 8 ms = 1.2 s` of sustained `activity < theta_inactive (0.40)`. Wolf track 5 is born with activity 0.336 — just below threshold — so its inactive countdown starts at birth and it dies in exactly 1.2 s.
+
+### Root Cause: GSS Requires Interference to Adapt
+
+**GSS is an adaptive beamformer.** It estimates the spatial covariance of interfering signals and steers nulls toward them. In a **completely silent background scene**, there is no interference for GSS to estimate. The adaptive weights never converge away from identity; the filter degenerates to near-DAS. DAS at these source distances produces very low separated output power → activity falls below `theta_inactive = 0.40` → track is immediately "inactive".
+
+**Why does Frog get activity = 1.0 in the same silent scene?**
+The scene is sequential. When frog plays (t = 15–20 s), the wolf GT window (t = 5–10 s) has ended and its room reverb is still decaying. GSS can use this residual acoustic energy as "interference" to estimate suppression weights. Each later source benefits from the reverb tails of all prior sources. The first source (wolf at t = 5 s) plays in **absolute silence** — GSS has nothing to work with.
+
+**The audio file is not at fault.** `wolfhowl01.wav` is continuously active for all 5 seconds (48/49 energy windows above 5% of peak RMS). The wolf signal is loud and physically present at the microphones. The problem is entirely in the GSS adaptive filter failing to initialise without a noise floor.
+
+**Increasing `N_inactive` would not fix this.** The `spec_at_peak` mechanism only writes `.bin` data when the SSL assigns a new energy peak to an active track. In the silent scene, no new SSL peaks are generated in the wolf direction after the first 1.2 s — so no bins would be written even if the track were kept alive indefinitely. The bins would remain near-silent.
+
+### Correct Fix: Add Ambient Noise Floor to Every Scene Render
+
+The simulation must model deployment conditions. In the field there is always ambient acoustic energy (wind, insects, leaf rustle). Even **−40 dBFS pink noise** (100× below the wolf signal, inaudible to humans) gives GSS enough covariance to estimate suppression weights and produce non-zero output at all directions throughout the full GT window.
+
+This is not contaminating the training data — it is making the simulation physically valid. The `.bin` files would then contain the actual beamformed animal audio that ODAS produces in the field, which is precisely what YAMNet sees during deployment.
+
+**Recommended implementation:** Add an optional `ambient_noise_db` field (e.g. `−40`) to the scene JSON. The renderer injects full-duration broadband pink noise at that level before rendering directional sources. The curator already ignores non-GT-matched detections, so the ambient floor produces no spurious training samples.
+
+---
+
+## HTML Report Cleanup (`analyzer.py`)
+
+Two sections removed from `_generate_html_report`:
+
+1. **"🤖 Model Prediction Statistics"** — four stat cards duplicating the Per-Source Statistics table.
+2. **"📊 Top-K Classification History per Event"** — up to 20 individual Plotly heatmaps (one per confirmed event), the primary cause of excessive report length. The same information is captured in the YAMNet Classification Timeline chart.
+
+The embedded report iframe height reduced from 2 000 px → 1 400 px.
+
+**Report section order after cleanup:**
+Summary → Per-Source Stats → YAMNet Classification Stats → Detection Comparison (slider) → 3D Spatial → Angular Error → YAMNet Timeline → Event Votes → Audio Waveform

@@ -263,6 +263,9 @@ class AudioRenderer:
             # Ensure audio is exactly the right length
             audio = audio[:duration_samples]
             
+            # Apply per-source volume gain (default 1.0)
+            audio *= source_config.get('volume', 1.0)
+
             # Create full-length signal with silence
             full_signal = np.zeros(n_samples)
             actual_end = min(start_sample + len(audio), n_samples)

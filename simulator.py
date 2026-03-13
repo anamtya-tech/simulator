@@ -120,6 +120,7 @@ class SimulationRunner:
 
             # Start socket server in background
             st.write("🔌 Starting socket server...")
+
             socket_cmd = [
                 "python3",
                 self.socket_emit_script,
@@ -147,6 +148,12 @@ class SimulationRunner:
             
             st.write("✅ Socket server started")
             
+            # Record wall-clock time just before ODAS launches so we can
+            # later validate that the session file it produced is newer than
+            # this moment (guards against silently picking up a stale file
+            # from a previous run when ODAS crashes before writing anything).
+            run_start_time = time.time()
+
             # Start ODAS
             st.write("🎵 Starting ODAS...")
             log_file_path = str(self.runs_dir / f"odas_log_{run_timestamp}.txt")
@@ -171,7 +178,18 @@ class SimulationRunner:
             
             st.write("✅ ODAS started")
             st.write(f"📝 Logs: {log_file_path}")
-            
+
+            # Early crash detection: give ODAS 3 s to initialise, then check
+            # whether it is still alive.  A crash here (e.g. "Invalid
+            # separation method") means no session file will ever be written.
+            time.sleep(3)
+            if self.odas_process.poll() is not None:
+                with open(log_file_path) as _lf:
+                    tail = _lf.read()[-800:]
+                st.error("❌ ODAS crashed during initialisation. Check the log below.")
+                st.code(tail)
+                return
+
             # Monitor processes
             st.write("⏳ Waiting for simulation to complete...")
             progress_bar = st.progress(0)
@@ -239,7 +257,23 @@ class SimulationRunner:
             
             classify_events_file = str(classify_events_files[0]) if classify_events_files else None
             session_live_file = str(session_live_files[0]) if session_live_files else None
-            
+
+            # Staleness guard: the session file must have been written AFTER
+            # ODAS was launched for this run.  If its mtime pre-dates
+            # run_start_time we have picked up a leftover from a previous run
+            # (which happens when ODAS crashes before writing anything).
+            if session_live_file and os.path.getmtime(session_live_file) < run_start_time:
+                with open(log_file_path) as _lf:
+                    tail = _lf.read()[-800:]
+                st.error(
+                    f"❌ Session file is stale (from a previous run, not this one).\n"
+                    f"Most-recent file: {Path(session_live_file).name}\n"
+                    f"Run started at: {run_start_time:.0f}  File mtime: {os.path.getmtime(session_live_file):.0f}\n"
+                    f"ODAS likely crashed — see log below."
+                )
+                st.code(tail)
+                session_live_file = None  # Don't save a wrong path into the run file
+
             if not session_live_file:
                 st.warning("⚠️ Could not find session output file")
             else:

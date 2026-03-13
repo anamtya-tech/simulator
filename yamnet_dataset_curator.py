@@ -472,15 +472,17 @@ class YAMNetDatasetCurator:
 
                 # ── Audio reconstruction ─────────────────────────────────
                 # Priority 1: ODAS .bin spectral reconstruction (Griffin-Lim)
-                #   → this is the DEPLOYMENT path: in the field ODAS beamforms
-                #     the mic array and passes the resulting spectral bins to
-                #     YAMNet.  Training data MUST go through the same pipeline
-                #     so the model learns the ODAS-beamformed audio domain
-                #     (spatial filtering, SNR characteristics, freq shaping).
+                #   → DEPLOYMENT PATH: in the field, ODAS beamforms the mic
+                #     array and sends spectral bins to YAMNet.  Training data
+                #     MUST come from this same pipeline so the model learns the
+                #     ODAS-beamformed distribution (spatial filtering, SNR
+                #     characteristics, freq shaping).  Raw render audio is a
+                #     completely different distribution — YAMNet never sees it
+                #     in deployment, so it must not appear in training either.
                 # Priority 2 (fallback): raw render PCM extraction
-                #   → only used when NO .bin data exists (e.g. weak/tonal sources
-                #     where ODAS rarely wins the pot-coherence competition, sc=1).
-                #     One file per GT window saved via saved_render_windows dedup.
+                #   → Only used when NO .bin data exists (e.g. weak/tonal
+                #     sources where ODAS rarely wins the coherence competition,
+                #     sc=0/1, empty buffer).  One file per GT window (deduped).
                 audio_waveform = None
                 used_spectra_file = sf_ordered[0] if sf_ordered else None
 
@@ -850,22 +852,57 @@ class YAMNetDatasetCurator:
         if data.ndim == 1:
             data = data.reshape(1, -1)
 
-        plt.figure(figsize=(10, 4))
-        if data.shape[0] > 1:
-            # Multi-frame patch — show as heatmap (time × freq)
-            plt.imshow(data.T, aspect='auto', origin='lower',
-                       interpolation='nearest', cmap='magma')
-            plt.colorbar(label='Magnitude')
-            plt.xlabel('Frame')
-            plt.ylabel('Frequency Bin')
+        # Convert to dB scale for visibility
+        db = 20.0 * np.log10(np.maximum(data, 1e-6))
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        fig.patch.set_facecolor('#0e1117')
+        ax.set_facecolor('#0e1117')
+
+        if db.shape[0] > 1:
+            # Multi-frame patch — heatmap (freq × time)
+            vmin = np.percentile(db, 5)
+            vmax = np.percentile(db, 99)
+            im = ax.imshow(
+                db.T, aspect='auto', origin='lower',
+                interpolation='nearest', cmap='turbo',
+                vmin=vmin, vmax=vmax
+            )
+            cbar = fig.colorbar(im, ax=ax, pad=0.01)
+            cbar.set_label('dB', color='white')
+            cbar.ax.yaxis.set_tick_params(color='white')
+            plt.setp(cbar.ax.yaxis.get_ticklabels(), color='white')
+
+            # Frequency axis: 257 bins = 0–8 kHz at 16 kHz sample rate
+            n_bins = db.shape[1]
+            freq_max = 8000
+            tick_freqs = [0, 1000, 2000, 4000, 6000, 8000]
+            tick_bins = [int(f / freq_max * (n_bins - 1)) for f in tick_freqs]
+            ax.set_yticks(tick_bins)
+            ax.set_yticklabels([f'{f//1000}k' if f >= 1000 else '0' for f in tick_freqs], color='white')
+
+            # Time axis: each frame = 128/16000 s = 8 ms
+            n_frames = db.shape[0]
+            dur_s = n_frames * 128 / 16000
+            tick_frames = np.linspace(0, n_frames - 1, min(6, n_frames)).astype(int)
+            ax.set_xticks(tick_frames)
+            ax.set_xticklabels([f'{t * 128 / 16000:.2f}s' for t in tick_frames], color='white')
+
+            ax.set_xlabel('Time', color='white')
+            ax.set_ylabel('Frequency', color='white')
         else:
-            plt.plot(data[0])
-            plt.xlabel('Frequency Bin')
-            plt.ylabel('Magnitude')
-            plt.grid(True, alpha=0.3)
-        plt.title(f'Spectrogram — {label}')
+            ax.plot(db[0], color='#00d4ff', linewidth=1.2)
+            ax.set_xlabel('Frequency Bin', color='white')
+            ax.set_ylabel('dB', color='white')
+            ax.tick_params(colors='white')
+            ax.grid(True, alpha=0.2, color='#444')
+            ax.set_facecolor('#0e1117')
+
+        ax.spines[:].set_color('#444')
+        ax.tick_params(colors='white')
+        ax.set_title(f'Spectrogram — {label}', color='white', pad=8)
         plt.tight_layout()
-        plt.savefig(filepath, dpi=100, bbox_inches='tight')
+        plt.savefig(filepath, dpi=100, bbox_inches='tight', facecolor=fig.get_facecolor())
         plt.close()
     
     def get_dataset_stats(self, dataset_name=None):

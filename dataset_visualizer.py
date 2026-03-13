@@ -344,25 +344,40 @@ class DatasetVisualizer:
                             actual_frames = raw.size // 257
                             if actual_frames > 0:
                                 spectra = raw[:actual_frames * 257].reshape(actual_frames, 257)
-                                # Transpose: y=freq (257 bins), x=time frames
+                                # Convert to dB for visibility
+                                db = 20.0 * np.log10(np.maximum(spectra, 1e-6))
+                                vmin = float(np.percentile(db, 5))
+                                vmax = float(np.percentile(db, 99))
+                                time_s = (np.arange(actual_frames) * 128 / 16000).tolist()
+                                freq_hz = np.linspace(0, 8000, 257).tolist()
                                 fig = go.Figure(go.Heatmap(
-                                    z=spectra.T,
-                                    colorscale='Viridis',
+                                    z=db.T,
+                                    x=time_s,
+                                    y=freq_hz,
+                                    colorscale='Turbo',
+                                    zmin=vmin,
+                                    zmax=vmax,
                                     showscale=True,
-                                    colorbar=dict(title='Magnitude'),
+                                    colorbar=dict(title='dB'),
                                 ))
                                 fig.update_layout(
-                                    title=f'Linear Magnitude Spectra — {actual_frames} frames × 257 bins',
-                                    xaxis_title='Time Frame',
-                                    yaxis_title='Frequency Bin (0–8 kHz)',
-                                    height=300,
-                                    margin=dict(l=50, r=20, t=40, b=40),
+                                    title=f'Spectrogram (dB) — {actual_frames} frames × 257 bins',
+                                    xaxis_title='Time (s)',
+                                    yaxis_title='Frequency (Hz)',
+                                    height=320,
+                                    margin=dict(l=60, r=20, t=40, b=50),
+                                    paper_bgcolor='#0e1117',
+                                    plot_bgcolor='#0e1117',
+                                    font=dict(color='white'),
+                                    xaxis=dict(gridcolor='#333'),
+                                    yaxis=dict(gridcolor='#333'),
                                 )
                                 st.plotly_chart(fig, use_container_width=True)
                                 st.caption(
                                     f"Shape: {actual_frames}×257 | "
                                     f"Duration: ~{actual_frames * 128 / 16000:.2f}s | "
-                                    "Linear magnitude (pre-mel, pre-log) — same input ODAS feeds to YAMNet"
+                                    f"Range: {vmin:.0f}–{vmax:.0f} dB | "
+                                    "dB magnitude (pre-mel) — same input ODAS feeds to YAMNet"
                                 )
                         except Exception as e:
                             st.warning(f"Could not render .bin: {e}")
