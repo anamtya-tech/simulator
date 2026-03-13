@@ -18,16 +18,21 @@ import streamlit as st
 import pandas as pd
 import json
 import os
+import shutil
 import numpy as np
 from datetime import datetime
 from pathlib import Path
 import random
 
+AUDIO_CACHE_DIR  = Path('/home/azureuser/audio_cache/forest/audio')
+CAPTURES_DIR     = Path('/home/azureuser/audio_cache/ambient_captures')
+SOURCES_CSV_PATH = Path('/home/azureuser/config/sources.csv')
+
 class SceneConfigurator:
     def __init__(self, sources_csv_path, scenes_dir):
-        self.sources_csv_path = sources_csv_path
+        self.sources_csv_path = Path(sources_csv_path)
         self.scenes_dir = scenes_dir
-        self.sources_df = pd.read_csv(sources_csv_path)
+        self._reload_sources()
         
         # Initialize session state for scene configuration
         if 'scene_config' not in st.session_state:
@@ -66,6 +71,82 @@ class SceneConfigurator:
             (self.sources_df['source_type'] == source_type)
         ]
         return filtered['wav_path'].tolist()
+
+    def _reload_sources(self):
+        """Read sources.csv; auto-register any new .wav files found in AUDIO_CACHE_DIR."""
+        self.sources_df = pd.read_csv(self.sources_csv_path)
+        known = set(self.sources_df['wav_path'].tolist())
+        new_rows = []
+        if AUDIO_CACHE_DIR.exists():
+            for wav in sorted(AUDIO_CACHE_DIR.glob('*.wav')):
+                if str(wav) not in known:
+                    # Try to infer label from filename stem (strip trailing digits)
+                    stem = wav.stem.rstrip('0123456789')
+                    new_rows.append({'wav_path': str(wav), 'source_type': 'directional', 'label': stem.capitalize()})
+        if new_rows:
+            new_df = pd.DataFrame(new_rows)
+            self.sources_df = pd.concat([self.sources_df, new_df], ignore_index=True)
+            self.sources_df.to_csv(self.sources_csv_path, index=False)
+
+    def _list_captures(self):
+        """Return list of .raw files in CAPTURES_DIR with basic metadata."""
+        CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
+        captures = []
+        for f in sorted(CAPTURES_DIR.glob('*.raw')):
+            size_mb = f.stat().st_size / 1e6
+            # Duration: S16_LE 6ch 16kHz → bytes_per_sample=2
+            n_samples = f.stat().st_size // (2 * 6)
+            dur_s = n_samples / 16000
+            captures.append({'path': str(f), 'name': f.name, 'size_mb': size_mb, 'dur_s': dur_s})
+        return captures
+
+    def _render_add_custom_sound(self, source_type_hint='directional'):
+        """Collapsible panel to upload a new sound or find where to drop files."""
+        ns = source_type_hint  # namespace suffix keeps keys unique across tabs
+        with st.expander('➕ Add Custom Sound to Library', expanded=False):
+            tab_upload, tab_folder = st.tabs(['⬆️ Upload File', '📂 Drop File Folder'])
+
+            with tab_upload:
+                label_in = st.text_input('Label (e.g. Bear, Gunshot)', key=f'custom_label_in_{ns}')
+                stype_in = st.radio('Source type', ['directional', 'ambient'],
+                                    index=0 if source_type_hint == 'directional' else 1,
+                                    horizontal=True, key=f'custom_stype_in_{ns}')
+                uploaded = st.file_uploader('WAV file (mono or stereo, any sample rate)',
+                                            type=['wav'], key=f'custom_wav_upload_{ns}')
+                if st.button('Save to library', key=f'custom_save_btn_{ns}'):
+                    if not label_in.strip():
+                        st.error('Please enter a label.')
+                    elif uploaded is None:
+                        st.error('Please select a file to upload.')
+                    else:
+                        # Find next available filename: Label01.wav, Label02.wav ...
+                        stem = label_in.strip().lower().replace(' ', '_')
+                        idx = 1
+                        while (AUDIO_CACHE_DIR / f'{stem}{idx:02d}.wav').exists():
+                            idx += 1
+                        dest = AUDIO_CACHE_DIR / f'{stem}{idx:02d}.wav'
+                        dest.write_bytes(uploaded.read())
+                        # Append to sources.csv
+                        new_row = pd.DataFrame([{'wav_path': str(dest),
+                                                  'source_type': stype_in,
+                                                  'label': label_in.strip().capitalize()}])
+                        updated = pd.concat([self.sources_df, new_row], ignore_index=True)
+                        updated.to_csv(self.sources_csv_path, index=False)
+                        self._reload_sources()
+                        st.success(f'Saved as `{dest.name}` and added to sources library.')
+                        st.rerun()
+
+            with tab_folder:
+                st.markdown('**Drop .wav files directly into this folder:**')
+                st.code(str(AUDIO_CACHE_DIR))
+                st.markdown(
+                    'Name them `{Label}{NN}.wav` — e.g. `Bear01.wav`, `Bear02.wav`.  \n'
+                    'Use the button below to re-scan and register new files.'
+                )
+                if st.button('🔄 Refresh Sources', key=f'refresh_sources_btn_{ns}'):
+                    self._reload_sources()
+                    st.success(f'Sources refreshed — {len(self.sources_df)} files in library.')
+                    st.rerun()
     
     def render(self):
         """Render the scene configurator interface"""
@@ -266,31 +347,136 @@ class SceneConfigurator:
             value=source.get('repeat', False),
             key=f"dir_repeat_{idx}"
         )
+
+        # Per-source volume
+        source['volume'] = st.slider(
+            'Volume (gain)', 0.1, 10.0,
+            float(source.get('volume', 1.0)),
+            step=0.1, key=f'dir_volume_{idx}',
+            help='Multiply signal amplitude. Use >1 to compensate range attenuation.'
+        )
+
+        self._render_add_custom_sound(source_type_hint='directional')
     
     def _render_ambient_sources(self, scene):
-        """Render ambient sources configuration"""
-        st.markdown("### Ambient Sources")
-        
-        # Add/Generate sources
+        """Render ambient sources configuration — synthetic or real capture."""
+        st.markdown('### Ambient Background')
+
+        # ── Mode toggle ────────────────────────────────────────────────────
+        mode = st.radio(
+            'Background mode',
+            ['🔬 Synthetic (simulated)', '🎙️ Real Capture (.raw)'],
+            index=0 if scene.get('ambient_mode', 'synthetic') == 'synthetic' else 1,
+            horizontal=True, key='ambient_mode_radio'
+        )
+        scene['ambient_mode'] = 'synthetic' if mode.startswith('🔬') else 'capture'
+
+        # ── Real Capture mode ──────────────────────────────────────────────
+        if scene['ambient_mode'] == 'capture':
+            st.info(
+                '🎙️ **Real Capture mode** — the simulator will mix your '
+                'directional sources on top of the real 6-channel background. '
+                'Synthetic ambient sources below are ignored.'
+            )
+            captures = self._list_captures()
+
+            # Upload a new capture
+            with st.expander('⬆️ Upload Capture File', expanded=not captures):
+                up_file = st.file_uploader(
+                    '6-channel 16 kHz S16_LE .raw file',
+                    type=['raw'], key='capture_upload'
+                )
+                up_tag  = st.text_input('Optional tag (e.g. midday-clear, dawn-windy)', key='capture_tag')
+                if st.button('Save capture', key='save_capture_btn'):
+                    if up_file is None:
+                        st.error('Select a file first.')
+                    else:
+                        tag_part = f'_{up_tag.strip().replace(" ","-")}' if up_tag.strip() else ''
+                        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        dest = CAPTURES_DIR / f'capture_{ts}{tag_part}.raw'
+                        dest.write_bytes(up_file.read())
+                        st.success(f'Saved as `{dest.name}`.')
+                        st.rerun()
+
+            # Capture drop folder guide
+            with st.expander('📂 Drop files manually', expanded=False):
+                st.markdown('Place `.raw` files here (6-ch 16 kHz S16_LE):')
+                st.code(str(CAPTURES_DIR))
+                st.markdown('Name them anything — shown by filename in the picker below.')
+
+            if not captures:
+                st.warning('No capture files found in `ambient_captures/`. Upload one above or drop files into the folder.')
+                scene.pop('ambient_capture', None)
+                return
+
+            # Capture picker
+            cap_names = [f"{c['name']}  ({c['dur_s']:.0f}s  {c['size_mb']:.1f} MB)" for c in captures]
+            cap_idx = 0
+            current_path = scene.get('ambient_capture', {}).get('path', '')
+            for i, c in enumerate(captures):
+                if c['path'] == current_path:
+                    cap_idx = i
+                    break
+
+            chosen_idx = st.selectbox('Capture file', range(len(cap_names)),
+                                      format_func=lambda i: cap_names[i],
+                                      index=cap_idx, key='capture_picker')
+            chosen = captures[chosen_idx]
+            cap_dur = chosen['dur_s']
+
+            # Trim controls
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                start_off = st.number_input(
+                    'Start offset (s)', min_value=0.0,
+                    max_value=max(0.0, cap_dur - 1.0),
+                    value=float(scene.get('ambient_capture', {}).get('start_offset', 0.0)),
+                    step=1.0, key='cap_start_off'
+                )
+            with col2:
+                cap_volume = st.slider(
+                    'Volume', 0.1, 3.0,
+                    float(scene.get('ambient_capture', {}).get('volume', 1.0)),
+                    step=0.05, key='cap_volume'
+                )
+            with col3:
+                avail = cap_dur - start_off
+                st.metric('Available from offset', f'{avail:.0f}s')
+                if avail < scene['duration']:
+                    st.caption('⚠️ Shorter than scene — will loop.')
+
+            scene['ambient_capture'] = {
+                'path': chosen['path'],
+                'start_offset': start_off,
+                'volume': cap_volume,
+            }
+
+        # ── Synthetic mode ─────────────────────────────────────────────────
+        st.markdown('---')
+        synth_label = '### Synthetic Ambient Sources'
+        if scene['ambient_mode'] == 'capture':
+            synth_label += '  *(ignored in Real Capture mode)*'
+        st.markdown(synth_label)
+
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("➕ Add Ambient"):
+            if st.button('➕ Add Ambient'):
                 self._add_ambient_source(scene)
         with col2:
-            num_random = st.number_input("Number to generate", 1, 10, 1, key="num_random_amb")
+            num_random = st.number_input('Number to generate', 1, 10, 1, key='num_random_amb')
         with col3:
-            if st.button("🎲 Generate Random", key="gen_random_amb"):
+            if st.button('🎲 Generate Random', key='gen_random_amb'):
                 for _ in range(num_random):
                     self._add_ambient_source(scene, randomize=True)
-        
-        # Display and edit existing sources
+
         if not scene['ambient_sources']:
-            st.info("No ambient sources added.")
-            return
-        
-        for idx, source in enumerate(scene['ambient_sources']):
-            with st.expander(f"🌊 Ambient {idx + 1}: {source['label']}", expanded=False):
-                self._render_ambient_source_editor(scene, idx)
+            st.info('No synthetic ambient sources added.')
+        else:
+            for idx, source in enumerate(scene['ambient_sources']):
+                with st.expander(f"🌊 Ambient {idx + 1}: {source['label']}", expanded=False):
+                    self._render_ambient_source_editor(scene, idx)
+
+        self._render_add_custom_sound(source_type_hint='ambient')
     
     def _render_ambient_source_editor(self, scene, idx):
         """Render editor for a single ambient source"""

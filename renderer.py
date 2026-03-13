@@ -299,34 +299,65 @@ class AudioRenderer:
                 mic_signals = np.concatenate([mic_signals, padding], axis=1)
             actual_samples = n_samples
         
-        # Process ambient sources (add equally to all mics)
-        if scene['ambient_sources']:
-            status_text.text("Adding ambient sources...")
-            ambient_mix = np.zeros(actual_samples)
-            
-            for amb_source in scene['ambient_sources']:
-                audio_path = amb_source['wav_path']
-                if not os.path.exists(audio_path):
-                    st.warning(f"Ambient audio not found: {audio_path}")
-                    continue
-                
-                audio, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True)
-                
-                # Loop ambient to fill duration
-                if len(audio) < actual_samples:
-                    n_repeats = int(np.ceil(actual_samples / len(audio)))
-                    audio = np.tile(audio, n_repeats)
-                
-                # Ensure exact length
-                audio = audio[:actual_samples]
-                
-                # Apply volume
-                audio *= amb_source.get('volume', 0.5)
-                ambient_mix += audio
-            
-            # Add ambient to all mics
-            for i in range(mic_signals.shape[0]):
-                mic_signals[i, :] += ambient_mix
+        # ── Ambient background ───────────────────────────────────────────────
+        ambient_mode = scene.get('ambient_mode', 'synthetic')
+
+        if ambient_mode == 'capture':
+            # ── Real Capture mode ─────────────────────────────────────────────
+            # Mix real 6-channel .raw background directly onto mic_signals.
+            # Channels are 0-indexed; mics are on ch1-ch4 (same layout as
+            # the 6-channel output and ODAS config map).
+            cap_cfg = scene.get('ambient_capture', {})
+            cap_path = cap_cfg.get('path', '')
+            if cap_path and os.path.exists(cap_path):
+                status_text.text("Mixing real capture background...")
+                cap_volume = float(cap_cfg.get('volume', 1.0))
+                start_off  = int(float(cap_cfg.get('start_offset', 0.0)) * self.sample_rate)
+
+                # Load entire raw file: S16_LE interleaved, 6 channels
+                raw_int16 = np.frombuffer(
+                    open(cap_path, 'rb').read(), dtype=np.int16
+                ).astype(np.float32) / 32768.0          # normalise to [-1, +1]
+                total_cap_frames = raw_int16.size // 6
+                raw_6ch = raw_int16[:total_cap_frames * 6].reshape(total_cap_frames, 6)
+
+                # Slice from start_offset, then loop/trim to actual_samples
+                raw_6ch = raw_6ch[start_off:]
+                if len(raw_6ch) < actual_samples:
+                    n_repeats = int(np.ceil(actual_samples / max(len(raw_6ch), 1)))
+                    raw_6ch = np.tile(raw_6ch, (n_repeats, 1))
+                raw_6ch = raw_6ch[:actual_samples]        # (actual_samples, 6)
+
+                # Channels 1-4 (0-indexed) are the 4 mics
+                cap_mics = raw_6ch[:, 1:5].T             # (4, actual_samples)
+                mic_signals += cap_mics * cap_volume
+            else:
+                st.warning('Real Capture mode selected but no valid capture file found. Continuing without ambient background.')
+
+        else:
+            # ── Synthetic ambient mode ────────────────────────────────────────
+            if scene.get('ambient_sources'):
+                status_text.text("Adding ambient sources...")
+                ambient_mix = np.zeros(actual_samples)
+
+                for amb_source in scene['ambient_sources']:
+                    audio_path = amb_source['wav_path']
+                    if not os.path.exists(audio_path):
+                        st.warning(f"Ambient audio not found: {audio_path}")
+                        continue
+
+                    audio, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True)
+
+                    # Loop to fill duration
+                    if len(audio) < actual_samples:
+                        n_repeats = int(np.ceil(actual_samples / len(audio)))
+                        audio = np.tile(audio, n_repeats)
+                    audio = audio[:actual_samples]
+                    audio *= amb_source.get('volume', 0.5)
+                    ambient_mix += audio
+
+                for i in range(mic_signals.shape[0]):
+                    mic_signals[i, :] += ambient_mix
         
         # Add noise if requested
         if add_noise:

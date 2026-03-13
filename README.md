@@ -32,6 +32,10 @@ This pipeline creates labelled datasets for fine-tuning YAMNet by:
   - Channels 1,6: Zeros (no mic)
   - Channels 2-5: 4 microphone signals
 - Handles directional sources (point sources) and ambient sources (omnidirectional overlay)
+- **Per-source volume:** Both directional and ambient sources support an optional `volume` field in the scene JSON (default `1.0`). Use this to compensate for range attenuation or to balance SNR between sources:
+  ```json
+  { "label": "Wolfhowl", "wav_path": "...", "volume": 5.0, ... }
+  ```
 - Output: `.raw` files in `simulator/outputs/`
 
 ### 4. ODAS Simulator (`simulator.py`)

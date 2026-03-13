@@ -289,3 +289,147 @@ The embedded report iframe height reduced from 2 000 px → 1 400 px.
 
 **Report section order after cleanup:**
 Summary → Per-Source Stats → YAMNet Classification Stats → Detection Comparison (slider) → 3D Spatial → Angular Error → YAMNet Timeline → Event Votes → Audio Waveform
+
+---
+
+---
+
+# Changes — March 13, 2026
+
+> Wolf detection, tracker tuning, renderer volume support, and spectrogram visualisation improvements.
+
+---
+
+## Root Cause: wolfhowl01.wav Unlocalizable by 4-Mic Array
+
+### Physics
+The ReSpeaker USB 4-mic array has a square layout with ±32 mm spacing (64 mm diagonal). The GCC-PHAT spatial aliasing limit is:
+
+$$f_{\text{alias}} = \frac{c}{2d} = \frac{343}{2 \times 0.064} \approx 2680 \text{ Hz}$$
+
+SRP-PHAT cross-correlation peaks are only sharp when the source has energy above this limit. `wolfhowl01.wav` has 96.3% of its energy below 1 kHz and **0% above 2680 Hz** — the SRP surface is completely flat, producing no localizable peak regardless of SNR.
+
+`wolfhowl48.wav` has 62% of its energy above 2680 Hz and is localizable. Both wolf sources in `wolf_frog_wolf_mon.json` now use `wolfhowl48.wav`.
+
+---
+
+## ODAS C Code — `src/module/mod_ssl.c`
+
+### HPF Mask (Option 3) — Active
+
+A high-pass mask is applied to the cross-spectrum after `freq2freq_product_process()` and before `freq2freq_interpolate_process()`. All cross-spectrum bins below 1200 Hz are zeroed for all 6 mic pairs:
+
+```c
+float freqMinSSL = 1200.0f;
+unsigned int freqMinBin = (unsigned int)(freqMinSSL * (float)obj->halfFrameSize
+                          / ((float)obj->fS / 2.0f));
+for (iSSLSig = 0; ...) {
+    for (iSSLBin = 0; iSSLBin < freqMinBin; iSSLBin++) {
+        obj->products->array[iSSLSig][iSSLBin * 2 + 0] = 0.0f;
+        obj->products->array[iSSLSig][iSSLBin * 2 + 1] = 0.0f;
+    }
+}
+```
+
+**Effect:** Wind noise and low-frequency room rumble (concentrated below 1200 Hz) no longer contribute to SRP-PHAT cross-correlation. Localisation SNR improves for sources with mid-to-high frequency content.
+
+**Why not a fix for wolfhowl01:** After HPF, wolfhowl01 retains only 0.7% of its energy (1200–2680 Hz band). Insufficient to form an SRP peak above `probMin = 0.25`. The correct fix is using a source with content above 2680 Hz.
+
+---
+
+## ODAS C Code — SSB Frequency Shift (Attempted, Reverted)
+
+### What Was Attempted
+To make low-frequency sources (wolfhowl01) localizable, a single-sideband (SSB) forward shift of +2000 Hz was added in `mod_stft.c` after the STFT — mapping bin $k$ → bin $k + B$ ($B = 64$ for 2000 Hz at 16 kHz/512-pt FFT). A reverse shift was added in `mod_sss.c` before `yamnet_classify_patch()`.
+
+### Why It Was Reverted
+`freq2xcorr.c` uses `fft_c2r` (inverse FFT assuming Hermitian symmetry). After a bin-shift of $B$, the cross-correlation becomes:
+
+$$R(\tau) \cdot \cos\!\left(\frac{2\pi B \tau_0}{N}\right)$$
+
+At $B = 64$, $N = 512$, $\tau_0 = 4$ samples (64 mm / 343 m·s⁻¹ × 16000 Hz):
+
+$$\cos\!\left(\frac{2\pi \times 64 \times 4}{512}\right) = \cos(90°) = 0$$
+
+Complete SRP peak cancellation. The approach would require replacing the `fft_c2r` in `freq2xcorr.c` with a complex IFFT + magnitude — too invasive. **All SSB C code was removed from `mod_stft.c` and `mod_stft.h`.** The `ssbShiftHz` field was left harmlessly in `mod_sss.h/c` but set to `0` in config.
+
+---
+
+## ODAS Config — `config/runtime/local_socket.cfg`
+
+### Tracker Parameter Changes
+
+| Parameter | Before | After | Reason |
+|-----------|--------|-------|--------|
+| `theta_new` | `0.50` | `0.40` | Wolf SSL pots only marginally exceeded 0.50; lowering allows a track to spawn earlier in the GT window |
+| `N_inactive` | `(150, 150, 150, 150)` | `(30, 30, 30, 30)` | 150 frames = 2.5 s of quiet needed to kill a track. Room reverb echoes spiked activity every ~1 s, resetting the countdown. 30 frames = 0.5 s — dead tracks die before occupying slots needed by the next real source |
+| `theta_inactive` | `0.40` | `0.60` | Reverb ghost tracks had average activity 0.15–0.43 — just above the old 0.40 threshold. Raising to 0.60 ensures these low-activity ghosts immediately begin their death countdown |
+| `ssbShiftHz` | `2000` | `0` | Forward SSB shift removed; reverse shift in `mod_sss.c` is now a no-op. Leaving it at 2000 was corrupting YAMNet patches by shifting bins down 64 positions before inference |
+
+### Effect of Reverb Ghost Tracks (Diagnosed)
+With old parameters, false tracks from frog room reverb were alive during Wolf2's GT window (session t ≈ 31–40 s), filling all 4 tracker slots. Wolf2 was completely undetected. With `N_inactive = 30` and `theta_inactive = 0.60`, these tracks die in < 0.5 s after the source stops, freeing slots in time.
+
+---
+
+## Simulator — `renderer.py`
+
+### Per-Source Volume Support for Directional Sources
+
+**Before:** Directional sources had no volume parameter — all rendered at raw amplitude regardless of scene distance.
+
+**After:** The renderer now reads an optional `volume` field from each directional source config (default `1.0`) and scales the audio before adding it to the room:
+
+```python
+audio *= source_config.get('volume', 1.0)
+```
+
+This is consistent with existing ambient source handling (ambient sources already had `volume` support).
+
+**Why needed:** A wolf at 41 m range has significant geometric attenuation after pyroomacoustics propagation. Even though the simulation models the correct attenuation physically, the beamformer SNR was too low for GSS to converge — the wolf was drowned by residual wind noise in the postfiltered output. Setting `volume: 5.0` in the scene lifts the SNR to a realistic field equivalent.
+
+---
+
+## Scene File — `config/scenes/wolf_frog_wolf_mon.json`
+
+| Field | Before | After | Reason |
+|-------|--------|-------|--------|
+| Wolf1 `wav_path` | `wolfhowl01.wav` | `wolfhowl48.wav` | 0% vs 62% energy above 2680 Hz aliasing limit |
+| Wolf2 `wav_path` | `wolfhowl01.wav` | `wolfhowl48.wav` | Same |
+| Wolf1 `volume` | *(absent)* | `5.0` | Compensate range attenuation for GSS convergence |
+| Wolf2 `volume` | *(absent)* | `5.0` | Same |
+| Wind `volume` | `0.05` | `0.02` | Reduce wind contribution so it does not dominate the beamformed wolf output |
+
+---
+
+## Simulator — `yamnet_dataset_curator.py`
+
+### Spectrogram Visualisation Overhaul (`_save_spectrogram_plot`)
+
+**Before:** Linear magnitude heatmap with `magma` colormap. Most energy clustered near zero → image appeared almost entirely black.
+
+**After:**
+- **dB scale:** `20·log₁₀(max(magnitude, 1e-6))` — expands the perceptual dynamic range across the full display
+- **Colormap:** `turbo` (blue→cyan→green→yellow→red) — high contrast, perceptually uniform, dark-theme compatible
+- **Clip range:** 5th–99th percentile of dB values — focuses colour range on meaningful signal, avoids noise floor and peak crushing
+- **Frequency axis:** Bin indices → labelled Hz ticks (0, 1k, 2k, 4k, 6k, 8k)
+- **Time axis:** Frame indices → seconds (`frame × 128/16000`)
+- **Background:** Dark (`#0e1117`) matching Streamlit default dark theme
+- **Colour bar label:** `Magnitude` → `dB`
+
+All existing spectrogram PNGs were regenerated immediately after the change.
+
+---
+
+## Simulator — `dataset_visualizer.py`
+
+### Interactive Spectral Heatmap Overhaul
+
+Same improvements applied to the interactive Plotly heatmap in the **🔬 Raw Spectral Heatmap (.bin)** expander:
+
+- **Scale:** Linear magnitude → dB
+- **Colorscale:** `Viridis` → `Turbo`
+- **Z range:** Full min/max → 5th–99th percentile clip
+- **X axis:** Frame numbers → time in seconds
+- **Y axis:** Bin numbers → frequency in Hz (0–8000)
+- **Theme:** White background → dark (`#0e1117`) with white font and `#333` grid lines
+- **Caption:** Now includes the actual dB range (e.g. `Range: -82–-14 dB`)

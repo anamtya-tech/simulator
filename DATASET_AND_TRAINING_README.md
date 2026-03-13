@@ -198,6 +198,51 @@ Stitching yields longer audio, improving YAMNet fine-tuning quality
 
 ---
 
+---
+
+## Spectrogram Visualisation (March 13, 2026)
+
+All spectrogram displays — both the static PNG (saved by `yamnet_dataset_curator.py`) and the interactive Plotly heatmap (in `dataset_visualizer.py`) — were updated from linear magnitude to **dB scale** with the **Turbo** colormap.
+
+### Why the Change
+The ODAS beamformer outputs linear magnitude spectra. In a typical frame the dynamic range spans 60–80 dB. Displaying raw linear values compresses all meaningful structure into the top 1% of the colour scale — the image appears almost entirely black.
+
+### What Changed
+
+| Property | Before | After |
+|----------|--------|-------|
+| Scale | Linear magnitude | dB: `20·log₁₀(max(v, 1e-6))` |
+| Colormap | `magma` / `Viridis` | `Turbo` |
+| Clip range | Full min/max | 5th–99th percentile |
+| X axis | Frame index | Time in seconds (`frame × 128/16000`) |
+| Y axis | Bin index 0–256 | Frequency in Hz (0–8000) |
+| Background | White | Dark (`#0e1117`) — matches Streamlit dark theme |
+| Color bar | `Magnitude` | `dB` |
+
+### Regenerating Existing PNGs
+To re-render the PNG spectrograms for an existing dataset without re-running a full simulation:
+
+```python
+import sys, types, importlib, numpy as np, matplotlib
+matplotlib.use('Agg')
+from pathlib import Path
+sys.path.insert(0, '/home/azureuser/simulator')
+mod = importlib.import_module('yamnet_dataset_curator')
+Curator = mod.YAMNetDatasetCurator
+curator = Curator.__new__(Curator)
+curator._save_spectrogram_plot = types.MethodType(Curator._save_spectrogram_plot, curator)
+
+for bin_file in Path('outputs/yamnet_datasets/yamnet_train_001/bins').glob('*.bin'):
+    raw = np.fromfile(bin_file, dtype=np.float32)
+    frames = raw.size // 257
+    data = raw[:frames*257].reshape(frames, 257)
+    label = bin_file.stem.rsplit('_', 1)[-1]
+    spec_path = bin_file.parent.parent / 'spectrograms' / (bin_file.stem + '.png')
+    curator._save_spectrogram_plot(data, spec_path, label)
+```
+
+---
+
 ## Troubleshooting
 
 **No samples curated after analysis**
