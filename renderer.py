@@ -314,10 +314,19 @@ class AudioRenderer:
                 cap_volume = float(cap_cfg.get('volume', 1.0))
                 start_off  = int(float(cap_cfg.get('start_offset', 0.0)) * self.sample_rate)
 
-                # Load entire raw file: S16_LE interleaved, 6 channels
-                raw_int16 = np.frombuffer(
-                    open(cap_path, 'rb').read(), dtype=np.int16
-                ).astype(np.float32) / 32768.0          # normalise to [-1, +1]
+                # Load entire raw file: S16_LE interleaved, 6 channels.
+                # Supports both bare PCM and WAV-wrapped (RIFF header) files.
+                with open(cap_path, 'rb') as _fh:
+                    _magic = _fh.read(4)
+                if _magic == b'RIFF':
+                    import wave as _wave
+                    with _wave.open(cap_path, 'rb') as _w:
+                        _raw_bytes = _w.readframes(_w.getnframes())
+                else:
+                    with open(cap_path, 'rb') as _fh:
+                        _raw_bytes = _fh.read()
+                raw_int16 = np.frombuffer(_raw_bytes, dtype=np.int16
+                                          ).astype(np.float32) / 32768.0  # normalise to [-1, +1]
                 total_cap_frames = raw_int16.size // 6
                 raw_6ch = raw_int16[:total_cap_frames * 6].reshape(total_cap_frames, 6)
 
@@ -328,8 +337,33 @@ class AudioRenderer:
                     raw_6ch = np.tile(raw_6ch, (n_repeats, 1))
                 raw_6ch = raw_6ch[:actual_samples]        # (actual_samples, 6)
 
-                # Channels 1-4 (0-indexed) are the 4 mics
+                # Channels 1-4 (0-indexed) are the 4 mics.
                 cap_mics = raw_6ch[:, 1:5].T             # (4, actual_samples)
+
+                # ── Step 1: de-spike ─────────────────────────────────────────
+                # Field recordings often contain brief impulse artifacts
+                # (mic handling, static discharge, clipping events) that are
+                # only 1-2 samples wide but orders of magnitude above the
+                # ambient floor.  If left in, these spikes dominate the global
+                # normaliser and crush the directional animal signals.
+                # We hard-clip each channel at ±6σ (covers >99.9999% of a
+                # Gaussian; any sample beyond that is an artifact, not signal).
+                for _ch in range(cap_mics.shape[0]):
+                    _sigma = cap_mics[_ch].std()
+                    if _sigma > 0:
+                        _limit = 6.0 * _sigma
+                        cap_mics[_ch] = np.clip(cap_mics[_ch], -_limit, _limit)
+
+                # ── Step 2: per-channel RMS-normalise ────────────────────────
+                # Scale each mic channel to the same mean RMS so that
+                # physical mic-to-mic sensitivity differences in the capture
+                # don't cause one mic to dominate the ambient background.
+                ch_rms = np.sqrt(np.mean(cap_mics ** 2, axis=1, keepdims=True))  # (4, 1)
+                mean_rms = ch_rms.mean()
+                if mean_rms > 0:
+                    ch_rms = np.where(ch_rms > 0, ch_rms, mean_rms)  # avoid /0
+                    cap_mics = cap_mics / ch_rms * mean_rms
+
                 mic_signals += cap_mics * cap_volume
             else:
                 st.warning('Real Capture mode selected but no valid capture file found. Continuing without ambient background.')

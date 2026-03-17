@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import numpy as np
+import wave
 from datetime import datetime
 from pathlib import Path
 import random
@@ -89,14 +90,30 @@ class SceneConfigurator:
             self.sources_df.to_csv(self.sources_csv_path, index=False)
 
     def _list_captures(self):
-        """Return list of .raw files in CAPTURES_DIR with basic metadata."""
+        """Return list of .raw files in CAPTURES_DIR with basic metadata.
+        Handles both bare S16_LE PCM and WAV-wrapped (RIFF header) files.
+        """
+        import wave as _wave
         CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
         captures = []
         for f in sorted(CAPTURES_DIR.glob('*.raw')):
             size_mb = f.stat().st_size / 1e6
-            # Duration: S16_LE 6ch 16kHz → bytes_per_sample=2
-            n_samples = f.stat().st_size // (2 * 6)
-            dur_s = n_samples / 16000
+            # Detect WAV-wrapped vs bare S16_LE 6ch 16kHz
+            with open(f, 'rb') as fh:
+                magic = fh.read(4)
+            if magic == b'RIFF':
+                try:
+                    with _wave.open(str(f), 'rb') as w:
+                        n_samples = w.getnframes()
+                        sr = w.getframerate()
+                except Exception:
+                    n_samples = f.stat().st_size // (2 * 6)
+                    sr = 16000
+            else:
+                # Bare PCM: S16_LE 6ch 16kHz
+                n_samples = f.stat().st_size // (2 * 6)
+                sr = 16000
+            dur_s = n_samples / sr
             captures.append({'path': str(f), 'name': f.name, 'size_mb': size_mb, 'dur_s': dur_s})
         return captures
 
@@ -243,7 +260,9 @@ class SceneConfigurator:
         for idx, source in enumerate(scene['directional_sources']):
             with st.expander(f"🎯 Source {idx + 1}: {source['label']}", expanded=False):
                 self._render_directional_source_editor(scene, idx)
-    
+
+        self._render_add_custom_sound(source_type_hint='directional')
+
     def _render_directional_source_editor(self, scene, idx):
         """Render editor for a single directional source"""
         source = scene['directional_sources'][idx]
@@ -355,9 +374,117 @@ class SceneConfigurator:
             step=0.1, key=f'dir_volume_{idx}',
             help='Multiply signal amplitude. Use >1 to compensate range attenuation.'
         )
-
-        self._render_add_custom_sound(source_type_hint='directional')
     
+    def _visualize_capture(self, path, start_offset_s=0.0, preview_s=10.0):
+        """Show per-channel waveform + RMS bar chart for a .raw capture file.
+        Handles both WAV-wrapped (RIFF) and bare S16_LE 6-ch 16kHz files.
+        """
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        SR = 16000
+        N_CH = 6
+
+        # ── Load samples ────────────────────────────────────────────────────
+        try:
+            with open(path, 'rb') as fh:
+                magic = fh.read(4)
+            if magic == b'RIFF':
+                with wave.open(path, 'rb') as w:
+                    SR = w.getframerate()
+                    N_CH = w.getnchannels()
+                    start_frame = int(start_offset_s * SR)
+                    w.setpos(min(start_frame, w.getnframes()))
+                    n_preview = int(preview_s * SR)
+                    raw_bytes = w.readframes(n_preview)
+            else:
+                bytes_per_frame = 2 * N_CH
+                start_byte = int(start_offset_s * SR) * bytes_per_frame
+                n_bytes = int(preview_s * SR) * bytes_per_frame
+                with open(path, 'rb') as fh:
+                    fh.seek(start_byte)
+                    raw_bytes = fh.read(n_bytes)
+
+            data = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32)
+            n_frames = len(data) // N_CH
+            data = data[:n_frames * N_CH].reshape(n_frames, N_CH)  # (frames, 6)
+        except Exception as e:
+            st.error(f'Could not read capture file: {e}')
+            return
+
+        t = np.linspace(start_offset_s, start_offset_s + n_frames / SR, n_frames)
+
+        CH_LABELS = [
+            'Ch 1 (DSP/processed)',
+            'Ch 2 (mic 1)',
+            'Ch 3 (mic 2)',
+            'Ch 4 (mic 3)',
+            'Ch 5 (mic 4)',
+            'Ch 6 (unused/silent)',
+        ]
+        COLORS = ['#e74c3c', '#2ecc71', '#3498db', '#9b59b6', '#f39c12', '#95a5a6']
+        # Channels currently used by the renderer (0-indexed 1–4)
+        USED = {1, 2, 3, 4}
+
+        rms_vals = np.sqrt(np.mean(data ** 2, axis=0))
+        max_vals = np.abs(data).max(axis=0)
+
+        # ── Waveform subplots ────────────────────────────────────────────────
+        fig_wave = make_subplots(
+            rows=N_CH, cols=1,
+            shared_xaxes=True,
+            subplot_titles=[f'{CH_LABELS[i]}  |  RMS={rms_vals[i]:.0f}  MAX={max_vals[i]:.0f}'
+                            + ('  ✅ used' if i in USED else '  ⛔ skipped')
+                            for i in range(N_CH)],
+            vertical_spacing=0.04,
+        )
+        # Downsample for display (max ~4000 points per channel)
+        step = max(1, n_frames // 4000)
+        for i in range(N_CH):
+            fig_wave.add_trace(
+                go.Scatter(
+                    x=t[::step], y=data[::step, i],
+                    mode='lines', line=dict(color=COLORS[i], width=0.8),
+                    name=CH_LABELS[i], showlegend=False,
+                ),
+                row=i + 1, col=1,
+            )
+        fig_wave.update_layout(
+            height=120 * N_CH,
+            margin=dict(l=10, r=10, t=30, b=10),
+            title_text=f'Waveforms — {preview_s:.0f}s from offset {start_offset_s:.0f}s',
+        )
+        fig_wave.update_xaxes(title_text='Time (s)', row=N_CH, col=1)
+        st.plotly_chart(fig_wave, use_container_width=True)
+
+        # ── RMS bar chart ────────────────────────────────────────────────────
+        fig_rms = go.Figure(go.Bar(
+            x=[f'Ch {i+1}' for i in range(N_CH)],
+            y=rms_vals,
+            marker_color=[COLORS[i] if i in USED else '#bdc3c7' for i in range(N_CH)],
+            text=[f'{v:.0f}' for v in rms_vals],
+            textposition='outside',
+        ))
+        fig_rms.update_layout(
+            title='RMS per channel  (green/blue = used as mic input, grey = skipped)',
+            height=300, margin=dict(l=10, r=10, t=40, b=10),
+            yaxis_title='RMS (int16 units)',
+        )
+        st.plotly_chart(fig_rms, use_container_width=True)
+
+        # ── Summary table ────────────────────────────────────────────────────
+        rows = []
+        for i in range(N_CH):
+            rows.append({
+                'Channel': f'Ch {i+1}',
+                'Role': CH_LABELS[i],
+                'RMS': f'{rms_vals[i]:.1f}',
+                'Max': f'{max_vals[i]:.0f}',
+                'Used by renderer': '✅' if i in USED else '⛔',
+                'Has signal': '✅' if rms_vals[i] > 5 else '❌ silent',
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
     def _render_ambient_sources(self, scene):
         """Render ambient sources configuration — synthetic or real capture."""
         st.markdown('### Ambient Background')
@@ -450,6 +577,19 @@ class SceneConfigurator:
                 'start_offset': start_off,
                 'volume': cap_volume,
             }
+
+            # ── Per-channel visualizer ─────────────────────────────────────
+            with st.expander('📊 Inspect capture channels', expanded=False):
+                prev_s = st.slider(
+                    'Preview duration (s)', 2.0, 30.0, 10.0, step=1.0,
+                    key='cap_preview_dur',
+                    help='How many seconds to show in the waveform preview'
+                )
+                st.caption(
+                    'Ch 2–5 (0-indexed 1–4) are used as the 4 mic inputs. '
+                    'Ch 1 (DSP/processed) and Ch 6 (silent) are skipped.'
+                )
+                self._visualize_capture(chosen['path'], start_offset_s=start_off, preview_s=prev_s)
 
         # ── Synthetic mode ─────────────────────────────────────────────────
         st.markdown('---')
