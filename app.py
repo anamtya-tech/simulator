@@ -11,7 +11,6 @@ We will add more modules later for training and evaluation
 """
 
 import streamlit as st
-import pandas as pd
 import os
 import json
 from pathlib import Path
@@ -28,9 +27,9 @@ from custom_simulator import CustomSimulator
 from odas_simulator import ODASSimulator
 
 # Configuration
-SOURCES_CSV_PATH = "/home/azureuser/config/sources.csv"
-SCENES_DIR = "/home/azureuser/config/scenes"
-OUTPUT_DIR = "/home/azureuser/simulator/outputs"
+SOUNDS_DIR       = "/home/azureuser/sounds"
+SCENES_DIR       = "/home/azureuser/config/scenes"
+OUTPUT_DIR       = "/home/azureuser/simulator/outputs"
 # Classifier logs directory - matches classifier_log_dir = "./ClassifierLogs" in config
 # Since odaslive runs from z_odas_newbeamform/build, the actual path is:
 ODAS_LOGS_DIR = "/home/azureuser/z_odas_newbeamform/build/ClassifierLogs"
@@ -47,23 +46,10 @@ st.set_page_config(
 )
 
 # Initialize session state
-if 'sources_df' not in st.session_state:
-    st.session_state.sources_df = None
 if 'current_scene' not in st.session_state:
     st.session_state.current_scene = None
 if 'rendered_audio_path' not in st.session_state:
     st.session_state.rendered_audio_path = None
-
-def load_sources():
-    """Load the sources CSV file"""
-    try:
-        df = pd.read_csv(SOURCES_CSV_PATH)
-        # Validate paths
-        df['exists'] = df['wav_path'].apply(os.path.exists)
-        return df
-    except Exception as e:
-        st.error(f"Error loading sources: {e}")
-        return None
 
 def load_audio(path, sr=16000):
     """Load audio file"""
@@ -82,21 +68,13 @@ def main():
     st.sidebar.title("Navigation")
     page = st.sidebar.radio(
         "Select Module",
-        ["📁 Sources Library", "🎨 Scene Configurator", "🔊 Audio Renderer", 
-         "⚙️ ODAS Simulator", "🔬 Custom DOA Processor", 
+        ["🎨 Scene Configurator", "🔊 Audio Renderer",
+         "⚙️ ODAS Simulator", "🔬 Custom DOA Processor",
          "📊 Results Analyzer", "🎯 YAMNet Datasets"]
-         # Removed "🤖 Model Training" - using YAMNet instead
     )
-    
-    # Load sources if not already loaded
-    if st.session_state.sources_df is None:
-        with st.spinner("Loading audio sources..."):
-            st.session_state.sources_df = load_sources()
-    
+
     # Route to appropriate page
-    if page == "📁 Sources Library":
-        show_sources_library()
-    elif page == "🎨 Scene Configurator":
+    if page == "🎨 Scene Configurator":
         show_scene_configurator()
     elif page == "🔊 Audio Renderer":
         show_audio_renderer()
@@ -114,85 +92,11 @@ def main():
     # elif page == "🤖 Model Training":
     #     show_model_training()
 
-def show_sources_library():
-    """Display the sources library"""
-    st.header("📁 Audio Sources Library")
-    
-    if st.session_state.sources_df is None:
-        st.error("Failed to load sources CSV")
-        return
-    
-    df = st.session_state.sources_df
-    
-    # Display statistics
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total Sources", len(df))
-    with col2:
-        st.metric("Directional", len(df[df['source_type'] == 'directional']))
-    with col3:
-        st.metric("Ambient", len(df[df['source_type'] == 'ambient']))
-    
-    # Filter options
-    st.subheader("Filters")
-    col1, col2 = st.columns(2)
-    with col1:
-        source_type_filter = st.multiselect(
-            "Source Type",
-            options=df['source_type'].unique(),
-            default=df['source_type'].unique()
-        )
-    with col2:
-        label_filter = st.multiselect(
-            "Label",
-            options=sorted(df['label'].unique()),
-            default=[]
-        )
-    
-    # Apply filters
-    filtered_df = df[df['source_type'].isin(source_type_filter)]
-    if label_filter:
-        filtered_df = filtered_df[filtered_df['label'].isin(label_filter)]
-    
-    # Display table
-    st.subheader("Sources")
-    st.dataframe(
-        filtered_df[['label', 'source_type', 'wav_path', 'exists']],
-        width='stretch'
-    )
-    
-    # Audio preview
-    st.subheader("Audio Preview")
-    if len(filtered_df) > 0:
-        selected_idx = st.selectbox(
-            "Select audio to preview",
-            options=range(len(filtered_df)),
-            format_func=lambda i: f"{filtered_df.iloc[i]['label']} - {filtered_df.iloc[i]['wav_path']}"
-        )
-        
-        if st.button("Load & Play"):
-            audio_path = filtered_df.iloc[selected_idx]['wav_path']
-            if os.path.exists(audio_path):
-                audio = load_audio(audio_path)
-                if audio is not None:
-                    st.audio(audio, sample_rate=16000)
-                    
-                    # Show waveform
-                    import matplotlib.pyplot as plt
-                    fig, ax = plt.subplots(figsize=(10, 3))
-                    ax.plot(audio)
-                    ax.set_title(f"Waveform: {filtered_df.iloc[selected_idx]['label']}")
-                    ax.set_xlabel("Sample")
-                    ax.set_ylabel("Amplitude")
-                    st.pyplot(fig)
-            else:
-                st.error("Audio file not found!")
-
 def show_scene_configurator():
     """Scene configuration interface"""
     st.header("🎨 Scene Configurator")
     
-    configurator = SceneConfigurator(SOURCES_CSV_PATH, SCENES_DIR)
+    configurator = SceneConfigurator(SCENES_DIR, SOUNDS_DIR)
     configurator.render()
 
 def show_audio_renderer():

@@ -25,16 +25,18 @@ from datetime import datetime
 from pathlib import Path
 import random
 
-AUDIO_CACHE_DIR  = Path('/home/azureuser/audio_cache/forest/audio')
-CAPTURES_DIR     = Path('/home/azureuser/audio_cache/ambient_captures')
-SOURCES_CSV_PATH = Path('/home/azureuser/config/sources.csv')
+DEFAULT_SOUNDS_DIR = Path('/home/azureuser/sounds')
+CAPTURES_DIR       = Path('/home/azureuser/audio_cache/ambient_captures')
 
 class SceneConfigurator:
-    def __init__(self, sources_csv_path, scenes_dir):
-        self.sources_csv_path = Path(sources_csv_path)
+    def __init__(self, scenes_dir, sounds_dir=None):
         self.scenes_dir = scenes_dir
-        self._reload_sources()
-        
+        # Use provided path or default; persist across Streamlit reruns via session state
+        initial_path = str(sounds_dir or DEFAULT_SOUNDS_DIR)
+        if 'library_path' not in st.session_state:
+            st.session_state.library_path = initial_path
+        self._load_library(st.session_state.library_path)
+
         # Initialize session state for scene configuration
         if 'scene_config' not in st.session_state:
             st.session_state.scene_config = self._create_default_scene()
@@ -65,29 +67,69 @@ class SceneConfigurator:
         azimuth_deg = np.rad2deg(np.arctan2(y, x))
         return azimuth_deg, distance, z
     
-    def _get_available_files_for_label(self, label, source_type):
-        """Get all available files for a given label"""
-        filtered = self.sources_df[
-            (self.sources_df['label'] == label) & 
-            (self.sources_df['source_type'] == source_type)
-        ]
-        return filtered['wav_path'].tolist()
+    def _get_available_files_for_label(self, label, source_type=None):
+        """Return all audio files for a label from the scanned library."""
+        entry = self.library.get(label)
+        if entry is None:
+            return []
+        return list(entry['files'])
 
-    def _reload_sources(self):
-        """Read sources.csv; auto-register any new .wav files found in AUDIO_CACHE_DIR."""
-        self.sources_df = pd.read_csv(self.sources_csv_path)
-        known = set(self.sources_df['wav_path'].tolist())
-        new_rows = []
-        if AUDIO_CACHE_DIR.exists():
-            for wav in sorted(AUDIO_CACHE_DIR.glob('*.wav')):
-                if str(wav) not in known:
-                    # Try to infer label from filename stem (strip trailing digits)
-                    stem = wav.stem.rstrip('0123456789')
-                    new_rows.append({'wav_path': str(wav), 'source_type': 'directional', 'label': stem.capitalize()})
-        if new_rows:
-            new_df = pd.DataFrame(new_rows)
-            self.sources_df = pd.concat([self.sources_df, new_df], ignore_index=True)
-            self.sources_df.to_csv(self.sources_csv_path, index=False)
+    def _scan_library(self, root: Path) -> tuple:
+        """Walk a directory tree and build a label→{source_type, files} lookup.
+
+        Rules:
+          - For each .wav, walk up toward root to find nearest ancestor label.txt
+          - label.txt line 1 = label name; line 2 (optional) = directional|ambient
+          - A deeper label.txt always overrides an ancestor's for its sub-tree
+          - Files with no ancestor label.txt are silently skipped
+          - Same label name in multiple branches → files merged under one key
+        """
+        label_cache: dict = {}  # folder Path → (label, source_type) | None
+
+        def find_label(folder: Path):
+            current = folder
+            while True:
+                if current in label_cache:
+                    return label_cache[current]
+                txt = current / 'label.txt'
+                if txt.exists():
+                    lines = txt.read_text().strip().splitlines()
+                    lbl   = lines[0].strip() if lines else ''
+                    stype = lines[1].strip() if len(lines) > 1 else 'directional'
+                    if stype not in ('directional', 'ambient'):
+                        stype = 'directional'
+                    result = (lbl, stype) if lbl else None
+                    label_cache[current] = result
+                    return result
+                if current == root or current.parent == current:
+                    label_cache[current] = None
+                    return None
+                current = current.parent
+
+        library: dict = {}
+        skipped: list = []
+        for wav in sorted(root.rglob('*.wav')):
+            entry = find_label(wav.parent)
+            if entry is None:
+                skipped.append(wav.name)
+                continue
+            lbl, stype = entry
+            if lbl not in library:
+                library[lbl] = {'source_type': stype, 'files': []}
+            library[lbl]['files'].append(str(wav))
+        return library, skipped
+
+    def _load_library(self, path: str) -> str | None:
+        """Scan the given sounds directory and store results in self.library.
+        Returns an error string on failure, or None on success.
+        """
+        p = Path(path).expanduser().resolve()
+        self.library_path = str(p)
+        if not p.exists():
+            self.library = {}
+            return f'Path not found: {p}'
+        self.library, skipped = self._scan_library(p)
+        return None
 
     def _list_captures(self):
         """Return list of .raw files in CAPTURES_DIR with basic metadata.
@@ -117,54 +159,6 @@ class SceneConfigurator:
             captures.append({'path': str(f), 'name': f.name, 'size_mb': size_mb, 'dur_s': dur_s})
         return captures
 
-    def _render_add_custom_sound(self, source_type_hint='directional'):
-        """Collapsible panel to upload a new sound or find where to drop files."""
-        ns = source_type_hint  # namespace suffix keeps keys unique across tabs
-        with st.expander('➕ Add Custom Sound to Library', expanded=False):
-            tab_upload, tab_folder = st.tabs(['⬆️ Upload File', '📂 Drop File Folder'])
-
-            with tab_upload:
-                label_in = st.text_input('Label (e.g. Bear, Gunshot)', key=f'custom_label_in_{ns}')
-                stype_in = st.radio('Source type', ['directional', 'ambient'],
-                                    index=0 if source_type_hint == 'directional' else 1,
-                                    horizontal=True, key=f'custom_stype_in_{ns}')
-                uploaded = st.file_uploader('WAV file (mono or stereo, any sample rate)',
-                                            type=['wav'], key=f'custom_wav_upload_{ns}')
-                if st.button('Save to library', key=f'custom_save_btn_{ns}'):
-                    if not label_in.strip():
-                        st.error('Please enter a label.')
-                    elif uploaded is None:
-                        st.error('Please select a file to upload.')
-                    else:
-                        # Find next available filename: Label01.wav, Label02.wav ...
-                        stem = label_in.strip().lower().replace(' ', '_')
-                        idx = 1
-                        while (AUDIO_CACHE_DIR / f'{stem}{idx:02d}.wav').exists():
-                            idx += 1
-                        dest = AUDIO_CACHE_DIR / f'{stem}{idx:02d}.wav'
-                        dest.write_bytes(uploaded.read())
-                        # Append to sources.csv
-                        new_row = pd.DataFrame([{'wav_path': str(dest),
-                                                  'source_type': stype_in,
-                                                  'label': label_in.strip().capitalize()}])
-                        updated = pd.concat([self.sources_df, new_row], ignore_index=True)
-                        updated.to_csv(self.sources_csv_path, index=False)
-                        self._reload_sources()
-                        st.success(f'Saved as `{dest.name}` and added to sources library.')
-                        st.rerun()
-
-            with tab_folder:
-                st.markdown('**Drop .wav files directly into this folder:**')
-                st.code(str(AUDIO_CACHE_DIR))
-                st.markdown(
-                    'Name them `{Label}{NN}.wav` — e.g. `Bear01.wav`, `Bear02.wav`.  \n'
-                    'Use the button below to re-scan and register new files.'
-                )
-                if st.button('🔄 Refresh Sources', key=f'refresh_sources_btn_{ns}'):
-                    self._reload_sources()
-                    st.success(f'Sources refreshed — {len(self.sources_df)} files in library.')
-                    st.rerun()
-    
     def render(self):
         """Render the scene configurator interface"""
         scene = st.session_state.scene_config
@@ -188,7 +182,34 @@ class SceneConfigurator:
         if st.session_state.get('show_load_dialog', False):
             with st.expander("📂 Load Scene", expanded=True):
                 self._show_load_scene_dialog()
-        
+
+        # ── Sound Library ────────────────────────────────────────────────────
+        with st.expander('🔊 Sound Library', expanded=False):
+            col_path, col_btn = st.columns([4, 1])
+            with col_path:
+                st.text_input(
+                    'Library path',
+                    value=st.session_state.library_path,
+                    key='library_path_input',
+                    help='Point to any folder organised with label.txt sub-folders'
+                )
+            with col_btn:
+                st.write('')  # vertical align
+                reload_clicked = st.button('🔄 Reload', key='reload_library_btn')
+            if reload_clicked:
+                err = self._load_library(st.session_state.library_path_input)
+                st.session_state.library_path = self.library_path
+                if err:
+                    st.error(err)
+                else:
+                    st.rerun()
+            dir_count = sum(1 for e in self.library.values() if e['source_type'] == 'directional')
+            amb_count = sum(1 for e in self.library.values() if e['source_type'] == 'ambient')
+            st.caption(
+                f'📂 `{self.library_path}` — **{len(self.library)}** labels '
+                f'({dir_count} directional, {amb_count} ambient)'
+            )
+
         # Scene parameters
         st.subheader("Scene Parameters")
         col1, col2 = st.columns(2)
@@ -239,29 +260,111 @@ class SceneConfigurator:
     def _render_directional_sources(self, scene):
         """Render directional sources configuration"""
         st.markdown("### Directional Sources")
-        
-        # Add/Generate sources
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button("➕ Add Source"):
+
+        directional_labels = sorted(
+            lbl for lbl, e in self.library.items() if e['source_type'] == 'directional'
+        )
+
+        col_add, col_clear = st.columns([1, 1])
+        with col_add:
+            if st.button('➕ Add Source', key='add_dir_btn'):
                 self._add_directional_source(scene)
-        with col2:
-            num_random = st.number_input("Number to generate", 1, 20, 1, key="num_random_dir")
-        with col3:
-            if st.button("🎲 Generate Random"):
-                for _ in range(num_random):
-                    self._add_directional_source(scene, randomize=True)
-        
-        # Display and edit existing sources
+                st.rerun()
+        with col_clear:
+            if scene['directional_sources'] and st.button('🗑️ Clear All', key='clear_dir_btn'):
+                scene['directional_sources'].clear()
+                st.rerun()
+
+        # ── Random generation panel ────────────────────────────────────────
+        with st.expander('🎲 Generate Random Sources', expanded=False):
+            st.markdown('Select which labels to include and set spatial / timing constraints.')
+
+            # Label picker
+            chosen_labels = st.multiselect(
+                'Labels to include',
+                options=directional_labels,
+                default=directional_labels[:min(3, len(directional_labels))],
+                key='rand_labels'
+            )
+
+            col1, col2 = st.columns(2)
+            with col1:
+                rand_n = st.number_input(
+                    'Number of sources to generate', 1, 50, 5, key='rand_n'
+                )
+                rand_min_dist = st.number_input(
+                    'Min distance (m)', 0.5, float(scene['max_radius']),
+                    1.0, step=0.5, key='rand_min_dist'
+                )
+                rand_max_dist = st.number_input(
+                    'Max distance (m)', 0.5, float(scene['max_radius']),
+                    float(scene['max_radius']), step=0.5, key='rand_max_dist'
+                )
+            with col2:
+                rand_min_height = st.number_input(
+                    'Min height (m)', float(scene['min_height']), float(scene['max_height']),
+                    float(scene['min_height']), step=0.5, key='rand_min_height'
+                )
+                rand_max_height = st.number_input(
+                    'Max height (m)', float(scene['min_height']), float(scene['max_height']),
+                    float(scene['max_height']), step=0.5, key='rand_max_height'
+                )
+
+            # ── Timing mode (mutually exclusive) ─────────────────────────
+            timing_mode = st.radio(
+                'Timing mode',
+                options=['🔁 Repeat to fill window', '✂️ Limit window to file duration'],
+                index=0,
+                key='rand_timing_mode',
+                horizontal=True,
+                help='Repeat: clip loops for the whole random time window. '
+                     'Limit: window is sized to match the actual WAV file length.'
+            )
+            rand_repeat        = (timing_mode == '🔁 Repeat to fill window')
+            rand_limit_to_file = not rand_repeat
+
+            # Duration sliders only matter when not limiting to file
+            if not rand_limit_to_file:
+                dcol1, dcol2 = st.columns(2)
+                with dcol1:
+                    rand_min_dur = st.number_input(
+                        'Min instance duration (s)', 0.5, float(scene['duration']),
+                        2.0, step=0.5, key='rand_min_dur'
+                    )
+                with dcol2:
+                    rand_max_dur = st.number_input(
+                        'Max instance duration (s)', 0.5, float(scene['duration']),
+                        min(10.0, float(scene['duration'])), step=0.5, key='rand_max_dur'
+                    )
+            else:
+                rand_min_dur = rand_max_dur = None
+                st.caption('⏱ Window duration will be read from each chosen WAV file.')
+
+            if st.button('🎲 Generate', key='rand_gen_btn', type='primary'):
+                if not chosen_labels:
+                    st.warning('Pick at least one label.')
+                else:
+                    constraints = dict(
+                        labels=chosen_labels,
+                        min_dist=rand_min_dist, max_dist=rand_max_dist,
+                        min_height=rand_min_height, max_height=rand_max_height,
+                        min_dur=rand_min_dur, max_dur=rand_max_dur,
+                        repeat=rand_repeat,
+                        limit_to_file=rand_limit_to_file,
+                    )
+                    for _ in range(int(rand_n)):
+                        self._add_directional_source(scene, randomize=True,
+                                                     constraints=constraints)
+                    st.rerun()
+
+        # ── Existing sources list ──────────────────────────────────────────
         if not scene['directional_sources']:
-            st.info("No directional sources added. Click '➕ Add Source' to begin.")
+            st.info("No directional sources added yet.")
             return
-        
+
         for idx, source in enumerate(scene['directional_sources']):
             with st.expander(f"🎯 Source {idx + 1}: {source['label']}", expanded=False):
                 self._render_directional_source_editor(scene, idx)
-
-        self._render_add_custom_sound(source_type_hint='directional')
 
     def _render_directional_source_editor(self, scene, idx):
         """Render editor for a single directional source"""
@@ -271,10 +374,10 @@ class SceneConfigurator:
         with col1:
             # Label selection
             directional_labels = sorted(
-                self.sources_df[self.sources_df['source_type'] == 'directional']['label'].unique()
+                lbl for lbl, e in self.library.items() if e['source_type'] == 'directional'
             )
             source['label'] = st.selectbox(
-                "Label", 
+                "Label",
                 directional_labels,
                 index=directional_labels.index(source['label']) if source['label'] in directional_labels else 0,
                 key=f"dir_label_{idx}"
@@ -615,8 +718,6 @@ class SceneConfigurator:
             for idx, source in enumerate(scene['ambient_sources']):
                 with st.expander(f"🌊 Ambient {idx + 1}: {source['label']}", expanded=False):
                     self._render_ambient_source_editor(scene, idx)
-
-        self._render_add_custom_sound(source_type_hint='ambient')
     
     def _render_ambient_source_editor(self, scene, idx):
         """Render editor for a single ambient source"""
@@ -626,7 +727,7 @@ class SceneConfigurator:
         with col1:
             # Label selection
             ambient_labels = sorted(
-                self.sources_df[self.sources_df['source_type'] == 'ambient']['label'].unique()
+                lbl for lbl, e in self.library.items() if e['source_type'] == 'ambient'
             )
             source['label'] = st.selectbox(
                 "Label",
@@ -663,48 +764,85 @@ class SceneConfigurator:
             key=f"amb_volume_{idx}"
         )
     
-    def _add_directional_source(self, scene, randomize=False):
-        """Add a new directional source"""
-        directional_labels = self.sources_df[
-            self.sources_df['source_type'] == 'directional'
-        ]['label'].unique()
-        
+    def _add_directional_source(self, scene, randomize=False, constraints=None):
+        """Add a new directional source.
+
+        When randomize=True, constraints dict can supply:
+          labels          – list of labels to pick from
+          min_dist / max_dist   – distance range in metres
+          min_height / max_height
+          min_dur / max_dur     – duration of the time window (ignored when limit_to_file=True)
+          repeat          – bool, whether to loop the clip to fill the window
+          limit_to_file   – bool, size the window to the actual WAV duration
+        """
+        directional_labels = [
+            lbl for lbl, e in self.library.items() if e['source_type'] == 'directional'
+        ]
+
         if randomize:
-            label = random.choice(directional_labels)
-            azimuth = random.uniform(-180, 180)
-            distance = random.uniform(1, scene['max_radius'])
-            height = random.uniform(scene['min_height'], scene['max_height'])
-            start_time = random.uniform(0, scene['duration'] * 0.7)
-            duration = random.uniform(1, scene['duration'] - start_time)
-            end_time = min(start_time + duration, scene['duration'])
+            c = constraints or {}
+            pool            = c.get('labels', directional_labels) or directional_labels
+            min_dist        = float(c.get('min_dist',   1.0))
+            max_dist        = float(c.get('max_dist',   scene['max_radius']))
+            min_h           = float(c.get('min_height', scene['min_height']))
+            max_h           = float(c.get('max_height', scene['max_height']))
+            do_repeat       = bool(c.get('repeat',        False))
+            limit_to_file   = bool(c.get('limit_to_file', False))
+
+            label    = random.choice(pool)
+            azimuth  = random.uniform(-180, 180)
+            distance = random.uniform(min_dist, max(min_dist, max_dist))
+            height   = random.uniform(min_h,    max(min_h, max_h))
+
+            # Pick the wav file now so we can read its duration if needed
+            files    = self._get_available_files_for_label(label)
+            wav_path = random.choice(files) if files else 'Random'
+
+            if limit_to_file and wav_path != 'Random':
+                # Read actual duration of the chosen file
+                try:
+                    with wave.open(wav_path, 'rb') as wf:
+                        file_dur = wf.getnframes() / wf.getframerate()
+                except Exception:
+                    file_dur = float(c.get('min_dur') or 2.0)
+                max_start  = max(0.0, scene['duration'] - file_dur)
+                start_time = random.uniform(0, max_start) if max_start > 0 else 0.0
+                end_time   = min(start_time + file_dur, scene['duration'])
+            else:
+                min_dur    = float(c.get('min_dur') or 1.0)
+                max_dur    = float(c.get('max_dur') or scene['duration'])
+                max_start  = max(0.0, scene['duration'] - min_dur)
+                start_time = random.uniform(0, max_start)
+                dur        = random.uniform(min_dur, min(max_dur, scene['duration'] - start_time))
+                end_time   = min(start_time + dur, scene['duration'])
         else:
-            label = directional_labels[0]
-            azimuth = 0
-            distance = scene['max_radius'] / 2
-            height = 0
+            label      = directional_labels[0] if directional_labels else 'Unknown'
+            azimuth    = 0
+            distance   = scene['max_radius'] / 2
+            height     = 0
             start_time = 0
-            end_time = scene['duration']
-        
+            end_time   = scene['duration']
+            wav_path   = 'Random'
+            do_repeat  = False
+
         x, y, z = self._azimuth_elevation_to_cartesian(azimuth, distance, height)
-        
+
         source = {
-            'label': label,
-            'wav_path': 'Random',
-            'x': x,
-            'y': y,
-            'z': z,
-            'start_time': start_time,
-            'end_time': end_time,
-            'repeat': False
+            'label':      label,
+            'wav_path':   wav_path,
+            'x': x, 'y': y, 'z': z,
+            'start_time': round(start_time, 2),
+            'end_time':   round(end_time,   2),
+            'repeat':     do_repeat,
         }
         
         scene['directional_sources'].append(source)
     
     def _add_ambient_source(self, scene, randomize=False):
         """Add a new ambient source"""
-        ambient_labels = self.sources_df[
-            self.sources_df['source_type'] == 'ambient'
-        ]['label'].unique()
+        ambient_labels = [
+            lbl for lbl, e in self.library.items() if e['source_type'] == 'ambient'
+        ]
         
         if randomize:
             label = random.choice(ambient_labels)
@@ -722,60 +860,144 @@ class SceneConfigurator:
         scene['ambient_sources'].append(source)
     
     def _visualize_scene(self, scene):
-        """Visualize the scene configuration"""
+        """Visualize the scene: top-down spatial map + timeline Gantt."""
         try:
             import matplotlib.pyplot as plt
-            from mpl_toolkits.mplot3d import Axes3D
-            
-            fig = plt.figure(figsize=(12, 5))
-            
-            # Top view (XY plane)
-            ax1 = fig.add_subplot(121)
-            ax1.set_xlim(-scene['max_radius'], scene['max_radius'])
-            ax1.set_ylim(-scene['max_radius'], scene['max_radius'])
-            ax1.set_xlabel('X (meters)')
-            ax1.set_ylabel('Y (meters)')
-            ax1.set_title('Top View (XY Plane)')
-            ax1.grid(True, alpha=0.3)
-            ax1.axhline(0, color='k', linewidth=0.5)
-            ax1.axvline(0, color='k', linewidth=0.5)
-            
-            # Draw mic array at origin
-            ax1.plot(0, 0, 'r*', markersize=15, label='Mic Array')
-            
-            # Draw directional sources
-            for idx, source in enumerate(scene['directional_sources']):
-                ax1.plot(source['x'], source['y'], 'bo', markersize=8)
-                ax1.annotate(
-                    f"{idx+1}: {source['label']}\n({source['start_time']:.1f}s-{source['end_time']:.1f}s)",
-                    (source['x'], source['y']),
-                    fontsize=8,
-                    ha='center'
+            import matplotlib.patches as mpatches
+            import matplotlib.cm as cm
+
+            sources   = scene['directional_sources']
+            ambients  = scene['ambient_sources']
+            duration  = scene['duration']
+            radius    = scene['max_radius']
+
+            # ── colour palette – one colour per unique label ──────────────
+            all_labels = sorted({s['label'] for s in sources})
+            cmap       = cm.get_cmap('tab20', max(len(all_labels), 1))
+            label_colour = {lbl: cmap(i) for i, lbl in enumerate(all_labels)}
+
+            # ── figure: spatial map (left) + timeline (right) ─────────────
+            # Timeline height scales with number of sources (min 3 rows)
+            n_rows    = max(3, len(sources) + len(ambients))
+            fig_h     = max(5, 0.45 * n_rows + 2)
+            fig, (ax_map, ax_time) = plt.subplots(
+                1, 2,
+                figsize=(14, fig_h),
+                gridspec_kw={'width_ratios': [1, 1.6]}
+            )
+
+            # ── LEFT: top-down spatial map ────────────────────────────────
+            ax_map.set_xlim(-radius, radius)
+            ax_map.set_ylim(-radius, radius)
+            ax_map.set_aspect('equal')
+            ax_map.set_xlabel('X (m)')
+            ax_map.set_ylabel('Y (m)')
+            ax_map.set_title('Top View (XY)')
+            ax_map.grid(True, alpha=0.25)
+            ax_map.axhline(0, color='k', linewidth=0.4)
+            ax_map.axvline(0, color='k', linewidth=0.4)
+
+            # range rings
+            for r in [radius * 0.25, radius * 0.5, radius * 0.75, radius]:
+                circle = plt.Circle((0, 0), r, fill=False,
+                                    color='grey', linewidth=0.4, linestyle='--')
+                ax_map.add_patch(circle)
+                ax_map.text(0, r, f'{r:.0f}m', fontsize=6,
+                            ha='center', va='bottom', color='grey')
+
+            ax_map.plot(0, 0, 'r*', markersize=14, zorder=5, label='Mic Array')
+
+            for idx, src in enumerate(sources):
+                c = label_colour[src['label']]
+                ax_map.plot(src['x'], src['y'], 'o', color=c,
+                            markersize=9, zorder=4)
+                ax_map.annotate(
+                    f"{idx+1}",
+                    (src['x'], src['y']),
+                    fontsize=7, fontweight='bold',
+                    ha='center', va='center', color='white', zorder=5
                 )
-            
-            # 3D view
-            ax2 = fig.add_subplot(122, projection='3d')
-            ax2.set_xlim(-scene['max_radius'], scene['max_radius'])
-            ax2.set_ylim(-scene['max_radius'], scene['max_radius'])
-            ax2.set_zlim(scene['min_height'], scene['max_height'])
-            ax2.set_xlabel('X (meters)')
-            ax2.set_ylabel('Y (meters)')
-            ax2.set_zlabel('Z (meters)')
-            ax2.set_title('3D View')
-            
-            # Draw mic array at origin
-            ax2.plot([0], [0], [0], 'r*', markersize=15, label='Mic Array')
-            
-            # Draw directional sources
-            for idx, source in enumerate(scene['directional_sources']):
-                ax2.plot([source['x']], [source['y']], [source['z']], 'bo', markersize=8)
-                ax2.text(source['x'], source['y'], source['z'], f"{idx+1}", fontsize=8)
-            
-            ax1.legend()
-            ax2.legend()
+                ax_map.annotate(
+                    f" {src['label']}",
+                    (src['x'], src['y']),
+                    xytext=(6, 6), textcoords='offset points',
+                    fontsize=7, color=c
+                )
+
+            # legend for labels
+            legend_patches = [
+                mpatches.Patch(color=label_colour[lbl], label=lbl)
+                for lbl in all_labels
+            ]
+            if legend_patches:
+                ax_map.legend(handles=legend_patches, fontsize=7,
+                              loc='lower right', framealpha=0.7)
+            else:
+                ax_map.legend(fontsize=7)
+
+            # ── RIGHT: timeline (Gantt) ───────────────────────────────────
+            ax_time.set_xlim(0, duration)
+            ax_time.set_xlabel('Time (s)')
+            ax_time.set_title('Timeline')
+            ax_time.grid(axis='x', alpha=0.3)
+            ax_time.axvline(0,        color='k', linewidth=0.5)
+            ax_time.axvline(duration, color='k', linewidth=0.5)
+
+            row_labels = []
+
+            # directional sources
+            for idx, src in enumerate(sources):
+                y    = idx
+                c    = label_colour[src['label']]
+                t0   = src['start_time']
+                t1   = src['end_time']
+                ax_time.barh(y, t1 - t0, left=t0, height=0.6,
+                             color=c, alpha=0.85, edgecolor='white', linewidth=0.5)
+                ax_time.text(
+                    t0 + (t1 - t0) / 2, y,
+                    f"{src['label']}  {t0:.1f}–{t1:.1f}s",
+                    ha='center', va='center',
+                    fontsize=7, fontweight='bold', color='white'
+                )
+                row_labels.append(f"#{idx+1}")
+
+            # ambient sources (shown as full-width faded bars below)
+            n_dir = len(sources)
+            for idx, amb in enumerate(ambients):
+                y  = n_dir + idx
+                vol = amb.get('volume', 0.5)
+                ax_time.barh(y, duration, left=0, height=0.6,
+                             color='steelblue', alpha=max(0.15, vol * 0.6),
+                             edgecolor='steelblue', linewidth=0.5,
+                             linestyle='--')
+                ax_time.text(
+                    duration / 2, y,
+                    f"[ambient] {amb['label']}  vol={vol:.2f}",
+                    ha='center', va='center', fontsize=7, color='steelblue'
+                )
+                row_labels.append(f"~{amb['label']}")
+
+            total_rows = n_dir + len(ambients)
+            if total_rows == 0:
+                ax_time.set_yticks([])
+                ax_time.text(duration / 2, 0, 'No sources',
+                             ha='center', va='center',
+                             fontsize=10, color='grey')
+            else:
+                ax_time.set_ylim(-0.6, total_rows - 0.4)
+                ax_time.set_yticks(range(total_rows))
+                ax_time.set_yticklabels(row_labels, fontsize=8)
+
+            # second x-axis tick every 5 s for longer scenes
+            tick_step = 5 if duration > 30 else (2 if duration > 10 else 1)
+            ax_time.set_xticks(
+                list(range(0, int(duration) + 1, tick_step)) + [duration]
+            )
+
             plt.tight_layout()
             st.pyplot(fig)
-            
+            plt.close(fig)
+
         except Exception as e:
             st.error(f"Error visualizing scene: {e}")
     
