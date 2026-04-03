@@ -217,9 +217,10 @@ class SceneConfigurator:
             scene['duration'] = st.number_input(
                 "Duration (seconds)", 
                 min_value=1.0, 
-                max_value=600.0, 
-                value=scene['duration'],
-                step=1.0
+                max_value=3600.0,  # Limit to 1 hour for practical rendering
+                value=min(scene['duration'], 3600.0),  # Cap existing values
+                step=1.0,
+                help="Maximum 3600 seconds (1 hour) for practical rendering times"
             )
             scene['max_radius'] = st.number_input(
                 "Max Radius (meters)", 
@@ -290,7 +291,7 @@ class SceneConfigurator:
             col1, col2 = st.columns(2)
             with col1:
                 rand_n = st.number_input(
-                    'Number of sources to generate', 1, 50, 5, key='rand_n'
+                    'Number of sources to generate', 1, 200, 5, key='rand_n'
                 )
                 rand_min_dist = st.number_input(
                     'Min distance (m)', 0.5, float(scene['max_radius']),
@@ -706,7 +707,7 @@ class SceneConfigurator:
             if st.button('➕ Add Ambient'):
                 self._add_ambient_source(scene)
         with col2:
-            num_random = st.number_input('Number to generate', 1, 10, 1, key='num_random_amb')
+            num_random = st.number_input('Number to generate', 1, 50, 1, key='num_random_amb')
         with col3:
             if st.button('🎲 Generate Random', key='gen_random_amb'):
                 for _ in range(num_random):

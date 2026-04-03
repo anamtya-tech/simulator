@@ -186,6 +186,25 @@ class AudioRenderer:
         
         # Render button
         if st.button("🎨 Render Audio", type="primary"):
+            # Memory usage estimation
+            estimated_gb = (scene['duration'] * self.sample_rate * 4 * 4) / (1024**3)  # 4 bytes per float32, 4 mic channels
+            estimated_gb += (len(scene['directional_sources']) * scene['duration'] * self.sample_rate * 4) / (1024**3)  # source signals
+            
+            if estimated_gb > 8:  # Warn if over 8GB
+                st.warning(f"⚠️ Estimated memory usage: {estimated_gb:.1f} GB. This may cause the process to be killed on systems with limited RAM.")
+                if not st.checkbox("I understand the risk and want to continue"):
+                    st.stop()
+            
+            if scene['duration'] > 3600:  # 1 hour
+                st.warning(f"⚠️ Scene duration is {scene['duration']} seconds ({scene['duration']/3600:.1f} hours). Rendering may take a very long time.")
+                if not st.checkbox("I understand this will take a long time"):
+                    st.stop()
+            
+            if len(scene['directional_sources']) > 100:
+                st.warning(f"⚠️ {len(scene['directional_sources'])} directional sources may cause memory issues or very long render times.")
+                if not st.checkbox("I understand the risk"):
+                    st.stop()
+            
             with st.spinner("Rendering audio..."):
                 try:
                     output_path = self._render_scene(
@@ -217,39 +236,49 @@ class AudioRenderer:
         duration = scene['duration']
         n_samples = int(duration * self.sample_rate)
         
-        # Create room
-        room = pra.ShoeBox(
-            [room_x, room_y, room_z],
-            fs=self.sample_rate,
-            materials=pra.Material(absorption),
-            max_order=max_order
-        )
+        # Memory safety check
+        estimated_memory_gb = (n_samples * 4 * 4) / (1024**3)  # 4 bytes per float32, 4 mic channels
+        estimated_memory_gb += (len(scene['directional_sources']) * n_samples * 4) / (1024**3)  # source signals
         
-        # Add microphone array at origin (shifted to room center)
+        if estimated_memory_gb > 12:  # Conservative limit
+            raise MemoryError(f"Estimated memory usage ({estimated_memory_gb:.1f} GB) exceeds safe limit. "
+                            f"Try reducing scene duration or number of sources.")
+        
+        actual_samples = n_samples
+
+        # Mic array position (shifted to room center)
         mic_center = np.array([room_x / 2, room_y / 2, 1.5])  # 1.5m height
         mic_array_pos = self.mic_positions + mic_center[:, np.newaxis]
-        room.add_microphone_array(mic_array_pos)
-        
+
+        # Use float32 throughout to halve memory vs float64.
+        # Each source is simulated in its own Room that is freed immediately
+        # after accumulation so we never hold all N source signals at once.
+        # With 25 sources × 600 s × 16 kHz this would otherwise allocate
+        # ~1.9 GB of source signals before simulation even begins.
+        mic_signals = np.zeros((4, n_samples), dtype=np.float32)
+
         # Process directional sources
         progress_bar = st.progress(0)
         status_text = st.empty()
-        
+
+        n_directional = len(scene['directional_sources'])
+
         for idx, source_config in enumerate(scene['directional_sources']):
-            status_text.text(f"Processing directional source {idx + 1}/{len(scene['directional_sources'])}...")
-            
+            status_text.text(f"Processing directional source {idx + 1}/{n_directional}...")
+
             # Load audio
             audio_path = source_config['wav_path']
             if not os.path.exists(audio_path):
                 st.warning(f"Audio file not found: {audio_path}")
                 continue
-            
+
             audio, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True)
-            
+
             # Handle timing
             start_sample = int(source_config['start_time'] * self.sample_rate)
             end_sample = int(source_config['end_time'] * self.sample_rate)
             duration_samples = end_sample - start_sample
-            
+
             # Repeat or trim audio to fit time window
             if source_config.get('repeat', False) and len(audio) < duration_samples:
                 n_repeats = int(np.ceil(duration_samples / len(audio)))
@@ -259,45 +288,45 @@ class AudioRenderer:
             else:
                 # Pad if needed
                 audio = np.pad(audio, (0, max(0, duration_samples - len(audio))))
-            
+
             # Ensure audio is exactly the right length
             audio = audio[:duration_samples]
-            
+
             # Apply per-source volume gain (default 1.0)
             audio *= source_config.get('volume', 1.0)
 
-            # Create full-length signal with silence
-            full_signal = np.zeros(n_samples)
+            # Create full-length signal with silence (float32 to save memory)
+            full_signal = np.zeros(n_samples, dtype=np.float32)
             actual_end = min(start_sample + len(audio), n_samples)
             full_signal[start_sample:actual_end] = audio[:actual_end - start_sample]
-            
-            # Add source to room
+            del audio  # free trimmed clip before FFT temporaries are allocated
+
+            # Simulate this one source in its own room, then discard the room
+            # immediately.  Peak RAM = 1 source signal + FFT temps + mic_signals
+            # accumulator, not N source signals all at once.
+            src_room = pra.ShoeBox(
+                [room_x, room_y, room_z],
+                fs=self.sample_rate,
+                materials=pra.Material(absorption),
+                max_order=max_order
+            )
+            src_room.add_microphone_array(mic_array_pos)
+
             source_pos = np.array([
                 source_config['x'] + room_x / 2,
                 source_config['y'] + room_y / 2,
                 source_config['z'] + room_z / 2
             ])
-            room.add_source(source_pos, signal=full_signal)
-            
-            progress_bar.progress((idx + 1) / (len(scene['directional_sources']) + 1))
-        
-        # Simulate
-        status_text.text("Running room simulation...")
-        room.simulate()
-        
-        # Get mic signals (shape: [n_mics, n_samples])
-        mic_signals = room.mic_array.signals
-        
-        # Ensure mic_signals matches expected length (pyroomacoustics may produce slightly different length)
-        actual_samples = mic_signals.shape[1]
-        if actual_samples != n_samples:
-            if actual_samples > n_samples:
-                mic_signals = mic_signals[:, :n_samples]
-            else:
-                # Pad with zeros if shorter
-                padding = np.zeros((mic_signals.shape[0], n_samples - actual_samples))
-                mic_signals = np.concatenate([mic_signals, padding], axis=1)
-            actual_samples = n_samples
+            src_room.add_source(source_pos, signal=full_signal)
+            src_room.simulate()
+
+            partial = src_room.mic_array.signals  # (4, sim_samples)
+            copy_len = min(partial.shape[1], n_samples)
+            mic_signals[:, :copy_len] += partial[:, :copy_len].astype(np.float32)
+
+            del src_room  # releases RIRs, FFT buffers, source signal, everything
+
+            progress_bar.progress((idx + 1) / max(n_directional, 1))
         
         # ── Ambient background ───────────────────────────────────────────────
         ambient_mode = scene.get('ambient_mode', 'synthetic')
@@ -316,17 +345,24 @@ class AudioRenderer:
 
                 # Load entire raw file: S16_LE interleaved, 6 channels.
                 # Supports both bare PCM and WAV-wrapped (RIFF header) files.
+                # Only read the frames we actually need (start_offset + scene
+                # duration) so a multi-hour capture file doesn't get loaded
+                # entirely into RAM, which could trigger an OOM kill.
+                _frames_needed = start_off + actual_samples
+                _bytes_per_frame = 6 * 2  # 6 channels × int16
+
                 with open(cap_path, 'rb') as _fh:
                     _magic = _fh.read(4)
                 if _magic == b'RIFF':
                     import wave as _wave
                     with _wave.open(cap_path, 'rb') as _w:
-                        _raw_bytes = _w.readframes(_w.getnframes())
+                        _raw_bytes = _w.readframes(min(_frames_needed, _w.getnframes()))
                 else:
                     with open(cap_path, 'rb') as _fh:
-                        _raw_bytes = _fh.read()
+                        _raw_bytes = _fh.read(_frames_needed * _bytes_per_frame)
                 raw_int16 = np.frombuffer(_raw_bytes, dtype=np.int16
                                           ).astype(np.float32) / 32768.0  # normalise to [-1, +1]
+                del _raw_bytes  # astype() made an independent copy; free the raw bytes now
                 total_cap_frames = raw_int16.size // 6
                 raw_6ch = raw_int16[:total_cap_frames * 6].reshape(total_cap_frames, 6)
 
