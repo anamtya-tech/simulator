@@ -276,86 +276,231 @@ class SceneConfigurator:
                 scene['directional_sources'].clear()
                 st.rerun()
 
-        # ── Random generation panel ────────────────────────────────────────
-        with st.expander('🎲 Generate Random Sources', expanded=False):
-            st.markdown('Select which labels to include and set spatial / timing constraints.')
+        # ── Rich Scene Generator ──────────────────────────────────────────
+        with st.expander('🎲 Rich Scene Generator', expanded=False):
+            st.markdown(
+                'Automatically schedule **Z** directional source instances using '
+                '**X** unique clips per label and up to **Y** simultaneous sources.'
+            )
 
-            # Label picker
-            chosen_labels = st.multiselect(
+            # ── Core parameters ──────────────────────────────────────────
+            rsg_col1, rsg_col2, rsg_col3 = st.columns(3)
+            with rsg_col1:
+                rsg_X = int(st.number_input(
+                    'X – unique clips per label', 1, 50, 5, key='rsg_X',
+                    help='How many distinct WAV files to pre-select per label. '
+                         'Instances cycle through these to maximise audio variety.'
+                ))
+            with rsg_col2:
+                rsg_Y = int(st.number_input(
+                    'Y – max simultaneous sources', 1, 5, 3, key='rsg_Y',
+                    help='Maximum number of sources playing at the same time.'
+                ))
+            with rsg_col3:
+                rsg_Z = int(st.number_input(
+                    'Z – total insertions', 1, 10000, 100, key='rsg_Z',
+                    help='Total individual directional source instances to place across the scene.'
+                ))
+
+            # ── Labels ───────────────────────────────────────────────────
+            rsg_labels = st.multiselect(
                 'Labels to include',
                 options=directional_labels,
                 default=directional_labels[:min(3, len(directional_labels))],
-                key='rand_labels'
+                key='rsg_labels'
             )
 
-            col1, col2 = st.columns(2)
-            with col1:
-                rand_n = st.number_input(
-                    'Number of sources to generate', 1, 200, 5, key='rand_n'
-                )
-                rand_min_dist = st.number_input(
-                    'Min distance (m)', 0.5, float(scene['max_radius']),
-                    1.0, step=0.5, key='rand_min_dist'
-                )
-                rand_max_dist = st.number_input(
-                    'Max distance (m)', 0.5, float(scene['max_radius']),
-                    float(scene['max_radius']), step=0.5, key='rand_max_dist'
-                )
-            with col2:
-                rand_min_height = st.number_input(
-                    'Min height (m)', float(scene['min_height']), float(scene['max_height']),
-                    float(scene['min_height']), step=0.5, key='rand_min_height'
-                )
-                rand_max_height = st.number_input(
-                    'Max height (m)', float(scene['min_height']), float(scene['max_height']),
-                    float(scene['max_height']), step=0.5, key='rand_max_height'
-                )
-
-            # ── Timing mode (mutually exclusive) ─────────────────────────
-            timing_mode = st.radio(
-                'Timing mode',
-                options=['🔁 Repeat to fill window', '✂️ Limit window to file duration'],
-                index=0,
-                key='rand_timing_mode',
-                horizontal=True,
-                help='Repeat: clip loops for the whole random time window. '
-                     'Limit: window is sized to match the actual WAV file length.'
-            )
-            rand_repeat        = (timing_mode == '🔁 Repeat to fill window')
-            rand_limit_to_file = not rand_repeat
-
-            # Duration sliders only matter when not limiting to file
-            if not rand_limit_to_file:
-                dcol1, dcol2 = st.columns(2)
-                with dcol1:
-                    rand_min_dur = st.number_input(
-                        'Min instance duration (s)', 0.5, float(scene['duration']),
-                        2.0, step=0.5, key='rand_min_dur'
-                    )
-                with dcol2:
-                    rand_max_dur = st.number_input(
-                        'Max instance duration (s)', 0.5, float(scene['duration']),
-                        min(10.0, float(scene['duration'])), step=0.5, key='rand_max_dur'
-                    )
+            if not rsg_labels:
+                st.warning('Select at least one label to use the rich generator.')
             else:
-                rand_min_dur = rand_max_dur = None
-                st.caption('⏱ Window duration will be read from each chosen WAV file.')
+                # ── Simultaneous distribution ─────────────────────────────
+                st.markdown(
+                    '**Simultaneous source distribution** '
+                    '(relative weights for k=1 … Y, will be normalised to 100%):'
+                )
+                _default_w = {1: 40, 2: 30, 3: 30, 4: 0, 5: 0}
+                sim_cols = st.columns(rsg_Y)
+                sim_raw = []
+                for ki in range(1, rsg_Y + 1):
+                    with sim_cols[ki - 1]:
+                        sim_raw.append(int(st.number_input(
+                            f'{ki}-src %', 0, 100, _default_w.get(ki, 0),
+                            key=f'rsg_sim_w_{ki}',
+                            help=f'Relative weight for groups of exactly {ki} simultaneous source(s).'
+                        )))
+                sim_total = sum(sim_raw) or 1
+                sim_weights = [w / sim_total for w in sim_raw]
 
-            if st.button('🎲 Generate', key='rand_gen_btn', type='primary'):
-                if not chosen_labels:
-                    st.warning('Pick at least one label.')
-                else:
-                    constraints = dict(
-                        labels=chosen_labels,
-                        min_dist=rand_min_dist, max_dist=rand_max_dist,
-                        min_height=rand_min_height, max_height=rand_max_height,
-                        min_dur=rand_min_dur, max_dur=rand_max_dur,
-                        repeat=rand_repeat,
-                        limit_to_file=rand_limit_to_file,
+                # ── Angular separation ────────────────────────────────────
+                st.markdown(
+                    '**Angular separation** (between simultaneously active sources):'
+                )
+                ang_c1, ang_c2, ang_c3, ang_c4 = st.columns(4)
+                with ang_c1:
+                    rsg_min_angle = int(st.slider(
+                        'Hard min angle (°)', 0, 90, 15, key='rsg_min_angle',
+                        help='All simultaneously active sources must be at least this many '
+                             'degrees apart (circular).'
+                    ))
+                with ang_c2:
+                    rsg_near_w = int(st.number_input(
+                        'Near 0–30° %', 0, 100, 20, key='rsg_near_w',
+                        help='Relative weight for simultaneous source pairs 0–30° apart '
+                             '(hard angular cases for ODAS).'
+                    ))
+                with ang_c3:
+                    rsg_mid_w = int(st.number_input(
+                        'Mid 30–120° %', 0, 100, 50, key='rsg_mid_w',
+                        help='Relative weight for simultaneous pairs 30–120° apart.'
+                    ))
+                with ang_c4:
+                    rsg_far_w = int(st.number_input(
+                        'Far 120–180° %', 0, 100, 30, key='rsg_far_w',
+                        help='Relative weight for simultaneous pairs 120–180° apart '
+                             '(easy well-separated cases).'
+                    ))
+                ang_total = (rsg_near_w + rsg_mid_w + rsg_far_w) or 1
+                ang_bucket_weights = [
+                    rsg_near_w / ang_total,
+                    rsg_mid_w  / ang_total,
+                    rsg_far_w  / ang_total,
+                ]
+
+                # ── Temporal constraints ──────────────────────────────────
+                st.markdown('**Temporal constraints:**')
+                tmp_c1, tmp_c2, tmp_c3 = st.columns(3)
+                with tmp_c1:
+                    rsg_min_gap = float(st.number_input(
+                        'Min gap between groups (s)', 0.0, float(scene['duration']),
+                        5.0, step=0.5, key='rsg_min_gap',
+                        help='Minimum silence from end of one group to start of the next.'
+                    ))
+                with tmp_c2:
+                    rsg_jitter = float(st.number_input(
+                        'Start-time jitter (s)', 0.0, 5.0, 1.0, step=0.5, key='rsg_jitter',
+                        help='Each source in a group starts within ±jitter seconds of the '
+                             'group\'s nominal start time.'
+                    ))
+                with tmp_c3:
+                    rsg_min_occ = int(st.number_input(
+                        'Min occurrences per clip', 1, 500, 5, key='rsg_min_occ',
+                        help='Each pre-selected clip should appear at least this many times.'
+                    ))
+
+                # ── Clip timing mode ──────────────────────────────────────
+                rsg_timing_mode = st.radio(
+                    'Clip timing mode',
+                    options=['🔁 Repeat to fill window', '✂️ Single play (file duration)'],
+                    index=0, horizontal=True, key='rsg_timing_mode',
+                    help='Repeat: clip loops for a random number of plays. '
+                         'Single: window equals one full clip duration.'
+                )
+                rsg_repeat        = (rsg_timing_mode == '🔁 Repeat to fill window')
+                rsg_limit_to_file = not rsg_repeat
+                rsg_min_dur = rsg_max_dur = None
+                if not rsg_limit_to_file:
+                    md_c1, md_c2 = st.columns(2)
+                    with md_c1:
+                        rsg_min_dur = float(st.number_input(
+                            'Min window (s)', 0.5, float(scene['duration']),
+                            2.0, step=0.5, key='rsg_min_dur'
+                        ))
+                    with md_c2:
+                        rsg_max_dur = float(st.number_input(
+                            'Max window (s)', 0.5, float(scene['duration']),
+                            min(15.0, float(scene['duration'])), step=0.5, key='rsg_max_dur'
+                        ))
+
+                # ── Spatial constraints ───────────────────────────────────
+                st.markdown('**Spatial constraints:**')
+                sp_c1, sp_c2, sp_c3, sp_c4 = st.columns(4)
+                with sp_c1:
+                    rsg_min_dist = float(st.number_input(
+                        'Min dist (m)', 0.5, float(scene['max_radius']),
+                        1.0, step=0.5, key='rsg_min_dist'
+                    ))
+                with sp_c2:
+                    rsg_max_dist = float(st.number_input(
+                        'Max dist (m)', 0.5, float(scene['max_radius']),
+                        float(scene['max_radius']), step=0.5, key='rsg_max_dist'
+                    ))
+                with sp_c3:
+                    rsg_min_height = float(st.number_input(
+                        'Min height (m)', float(scene['min_height']), float(scene['max_height']),
+                        float(scene['min_height']), step=0.5, key='rsg_min_height'
+                    ))
+                with sp_c4:
+                    rsg_max_height = float(st.number_input(
+                        'Max height (m)', float(scene['min_height']), float(scene['max_height']),
+                        float(scene['max_height']), step=0.5, key='rsg_max_height'
+                    ))
+
+                # ── Live feasibility estimate ─────────────────────────────
+                avg_clip_dur = self._estimate_avg_clip_duration(rsg_labels, rsg_X)
+                avg_k        = sum((i + 1) * w for i, w in enumerate(sim_weights))
+                slot_dur     = avg_clip_dur + rsg_min_gap
+                max_slots    = max(1.0, scene['duration'] / slot_dur)
+                max_z_est    = int(max_slots * avg_k)
+                min_z_needed = rsg_X * len(rsg_labels) * rsg_min_occ
+
+                fe_c1, fe_c2, fe_c3 = st.columns(3)
+                with fe_c1:
+                    st.metric('Est. avg clip duration', f'{avg_clip_dur:.1f} s')
+                with fe_c2:
+                    st.metric(
+                        'Max achievable Z', f'{max_z_est:,}',
+                        help=f'{max_slots:.0f} slots × {avg_k:.1f} avg sources/slot'
                     )
-                    for _ in range(int(rand_n)):
-                        self._add_directional_source(scene, randomize=True,
-                                                     constraints=constraints)
+                with fe_c3:
+                    st.metric(
+                        'Min Z for min occurrences', f'{min_z_needed:,}',
+                        help=f'{rsg_X} clips × {len(rsg_labels)} labels × {rsg_min_occ} min occ'
+                    )
+
+                if rsg_Z > max_z_est:
+                    st.warning(
+                        f'⚠️ Z={rsg_Z:,} exceeds the estimated maximum ({max_z_est:,}) for a '
+                        f'{scene["duration"]}s scene. The generator will stop early when the '
+                        f'timeline is exhausted — reduce min gap or increase scene duration.'
+                    )
+                if rsg_Z < min_z_needed:
+                    st.warning(
+                        f'⚠️ Z={rsg_Z:,} is less than the minimum needed ({min_z_needed:,}) to '
+                        f'give each of the {rsg_X * len(rsg_labels)} selected clips '
+                        f'{rsg_min_occ} occurrences. Some clips will fall short — '
+                        f'increase Z or reduce min occurrences.'
+                    )
+
+                rsg_replace = st.checkbox(
+                    'Replace existing directional sources', value=True, key='rsg_replace',
+                    help='Uncheck to append to the existing source list instead.'
+                )
+
+                if st.button('🎲 Generate Rich Scene', key='rsg_gen_btn', type='primary'):
+                    params = dict(
+                        labels=rsg_labels,
+                        X=rsg_X, Y=rsg_Y, Z=rsg_Z,
+                        sim_weights=sim_weights,
+                        min_angle_deg=float(rsg_min_angle),
+                        angle_bucket_weights=ang_bucket_weights,
+                        min_gap=rsg_min_gap,
+                        jitter=rsg_jitter,
+                        min_occurrences=rsg_min_occ,
+                        repeat=rsg_repeat,
+                        limit_to_file=rsg_limit_to_file,
+                        min_dur=rsg_min_dur if rsg_min_dur is not None else 2.0,
+                        max_dur=rsg_max_dur if rsg_max_dur is not None else 15.0,
+                        min_dist=rsg_min_dist, max_dist=rsg_max_dist,
+                        min_height=rsg_min_height, max_height=rsg_max_height,
+                        replace=rsg_replace,
+                    )
+                    with st.spinner('Generating scene…'):
+                        n_inserted, warnings = self._generate_rich_scene(scene, params)
+                    st.success(f'✅ Generated {n_inserted} source instances across {len(scene["directional_sources"])} total.')
+                    for w in warnings[:20]:   # cap warning spam
+                        st.warning(w)
+                    if len(warnings) > 20:
+                        st.warning(f'… and {len(warnings) - 20} more clip(s) below minimum occurrence.')
                     st.rerun()
 
         # ── Existing sources list ──────────────────────────────────────────
@@ -859,7 +1004,230 @@ class SceneConfigurator:
         }
         
         scene['ambient_sources'].append(source)
-    
+
+    # ── Rich scene generator helpers ─────────────────────────────────────────
+
+    def _estimate_avg_clip_duration(self, labels, X, max_probe=3):
+        """Estimate average clip duration (s) by sampling up to max_probe files per label."""
+        durations = []
+        for lbl in labels:
+            files = self._get_available_files_for_label(lbl)
+            for f in files[:max_probe]:
+                if f == 'Random' or not os.path.exists(f):
+                    continue
+                try:
+                    with wave.open(f, 'rb') as wf:
+                        durations.append(wf.getnframes() / wf.getframerate())
+                except Exception:
+                    try:
+                        import soundfile as _sf
+                        durations.append(_sf.info(f).duration)
+                    except Exception:
+                        durations.append(5.0)
+        return float(np.mean(durations)) if durations else 5.0
+
+    def _get_clip_duration(self, wav_path, min_dur=2.0, max_dur=15.0):
+        """Return the duration (s) of a WAV file, or a random estimate for 'Random'."""
+        if wav_path == 'Random' or not os.path.exists(wav_path):
+            return random.uniform(min_dur, max_dur)
+        try:
+            with wave.open(wav_path, 'rb') as wf:
+                return wf.getnframes() / wf.getframerate()
+        except Exception:
+            try:
+                import soundfile as _sf
+                return _sf.info(wav_path).duration
+            except Exception:
+                return random.uniform(min_dur, max_dur)
+
+    def _pick_azimuths(self, k, min_angle_deg, bucket_weights):
+        """Return k azimuths (degrees, −180…180) satisfying:
+        - Every pair is at least min_angle_deg apart (circular distance).
+        - The distribution of pairwise separations across three buckets
+          near [0,30°], mid [30,120°], far [120,180°] follows bucket_weights.
+          (Each new azimuth targets the bucket for its angle relative to
+           the first placed azimuth, which gives good coverage for k≤5.)
+        """
+        BUCKETS = [(0.0, 30.0), (30.0, 120.0), (120.0, 180.0)]
+        MAX_ATTEMPTS = 300
+
+        def circ_dist(a, b):
+            d = abs(a - b) % 360.0
+            return min(d, 360.0 - d)
+
+        if k <= 0:
+            return []
+        azimuths = [random.uniform(-180.0, 180.0)]
+        if k == 1:
+            return azimuths
+
+        bw_sum  = sum(bucket_weights) or 1.0
+        bw_norm = [w / bw_sum for w in bucket_weights]
+
+        for _ in range(1, k):
+            # Choose target angular bucket for separation from the first source
+            target_idx = random.choices(range(3), weights=bw_norm)[0]
+            b_lo, b_hi = BUCKETS[target_idx]
+            b_lo = max(b_lo, float(min_angle_deg))
+            if b_lo >= b_hi:          # min_angle constraint fills the bucket
+                b_lo, b_hi = float(min_angle_deg), 180.0
+
+            placed = False
+            for _attempt in range(MAX_ATTEMPTS):
+                sep       = random.uniform(b_lo, b_hi)
+                sign      = random.choice((-1, 1))
+                candidate = azimuths[0] + sign * sep
+                # Normalise to [−180, 180]
+                candidate = ((candidate + 180.0) % 360.0) - 180.0
+                if all(circ_dist(candidate, a) >= min_angle_deg for a in azimuths):
+                    azimuths.append(candidate)
+                    placed = True
+                    break
+
+            if not placed:
+                # Fallback: maximise minimum separation from all existing azimuths
+                best, best_score = random.uniform(-180.0, 180.0), -1.0
+                for _ in range(200):
+                    cand  = random.uniform(-180.0, 180.0)
+                    score = min(circ_dist(cand, a) for a in azimuths)
+                    if score > best_score:
+                        best_score, best = score, cand
+                azimuths.append(best)
+
+        return azimuths
+
+    def _generate_rich_scene(self, scene, p):
+        """Core rich-scene generator.
+
+        p keys:
+          labels, X, Y, Z           – core counts
+          sim_weights                – list[float] length Y, normalised to 1
+          min_angle_deg              – hard minimum angular separation (°)
+          angle_bucket_weights       – [near, mid, far] normalised weights
+          min_gap                    – seconds between group end and next start
+          jitter                     – ±seconds randomisation on each source start
+          min_occurrences            – minimum times each clip should appear
+          repeat, limit_to_file      – timing mode
+          min_dur, max_dur           – clip window bounds when not limit_to_file
+          min_dist, max_dist         – spatial distance range (m)
+          min_height, max_height     – spatial height range (m)
+          replace                    – bool, clear existing sources first
+
+        Returns (n_inserted: int, warnings: list[str]).
+        """
+        # 1. Pre-select X clips per label
+        clip_pool = {}
+        for lbl in p['labels']:
+            files = list(self._get_available_files_for_label(lbl))
+            random.shuffle(files)
+            picked = files[:p['X']] if len(files) >= p['X'] else files
+            clip_pool[lbl] = picked if picked else ['Random']
+
+        # Usage counters
+        clip_usage  = {lbl: {f: 0 for f in clips}
+                       for lbl, clips in clip_pool.items()}
+        label_usage = {lbl: 0 for lbl in p['labels']}
+
+        if p.get('replace', True):
+            scene['directional_sources'].clear()
+
+        n_inserted = 0
+        cursor     = 0.0
+
+        while cursor < scene['duration'] and n_inserted < p['Z']:
+            remaining_insertions = p['Z'] - n_inserted
+            if cursor >= scene['duration']:
+                break
+
+            # ── Choose simultaneous count k ───────────────────────────────
+            max_k   = min(p['Y'], remaining_insertions, len(p['labels']))
+            if max_k < 1:
+                break
+            w       = p['sim_weights'][:max_k]
+            w_sum   = sum(w) or 1.0
+            w_norm  = [wi / w_sum for wi in w]
+            k       = random.choices(range(1, max_k + 1), weights=w_norm)[0]
+
+            # ── Choose k labels, preferring under-represented ─────────────
+            chosen_labels = []
+            for _ in range(k):
+                lbl_w = [1.0 / (label_usage[l] + 1) for l in p['labels']]
+                chosen_labels.append(random.choices(p['labels'], weights=lbl_w)[0])
+
+            # ── Choose one clip per label, preferring under-represented ───
+            chosen_clips = []
+            for lbl in chosen_labels:
+                clips  = clip_pool[lbl]
+                cw     = [1.0 / (clip_usage[lbl][c] + 1) for c in clips]
+                chosen_clips.append(random.choices(clips, weights=cw)[0])
+
+            # ── Determine start & end times per source ────────────────────
+            group_starts, group_ends = [], []
+            for wav in chosen_clips:
+                jitter_offset = random.uniform(-p['jitter'], p['jitter'])
+                src_start     = max(0.0, min(
+                    cursor + jitter_offset,
+                    scene['duration'] - 0.1
+                ))
+                clip_dur = self._get_clip_duration(
+                    wav, min_dur=p['min_dur'], max_dur=p['max_dur']
+                )
+                if p['repeat']:
+                    max_window = scene['duration'] - src_start
+                    if clip_dur > 0:
+                        max_reps = max(1, int(max_window / clip_dur))
+                        cap_reps = max(1, int(p['max_dur'] / clip_dur))
+                        n_reps   = random.randint(1, min(max_reps, cap_reps))
+                    else:
+                        n_reps = 1
+                    src_end = min(src_start + clip_dur * n_reps, scene['duration'])
+                else:
+                    src_end = min(src_start + clip_dur, scene['duration'])
+                group_starts.append(src_start)
+                group_ends.append(src_end)
+
+            # ── Pick azimuths satisfying separation constraints ───────────
+            azimuths = self._pick_azimuths(
+                k, p['min_angle_deg'], p['angle_bucket_weights']
+            )
+
+            # ── Commit sources to scene ───────────────────────────────────
+            for i in range(k):
+                lbl  = chosen_labels[i]
+                wav  = chosen_clips[i]
+                az   = azimuths[i]
+                dist = random.uniform(p['min_dist'], p['max_dist'])
+                ht   = random.uniform(p['min_height'], p['max_height'])
+                x, y, z_coord = self._azimuth_elevation_to_cartesian(az, dist, ht)
+                scene['directional_sources'].append({
+                    'label':      lbl,
+                    'wav_path':   wav,
+                    'x':          x,
+                    'y':          y,
+                    'z':          z_coord,
+                    'start_time': round(group_starts[i], 2),
+                    'end_time':   round(group_ends[i],   2),
+                    'repeat':     p['repeat'],
+                })
+                clip_usage[lbl][wav] += 1
+                label_usage[lbl]     += 1
+                n_inserted           += 1
+
+            # Advance cursor to end of this group + mandatory gap
+            cursor = max(group_ends) + p['min_gap']
+
+        # ── Warn about clips that didn't reach min_occurrences ────────────
+        warnings = []
+        for lbl in p['labels']:
+            for clip_path, count in clip_usage[lbl].items():
+                if count < p['min_occurrences']:
+                    warnings.append(
+                        f"'{os.path.basename(clip_path)}' ({lbl}): "
+                        f"{count} occurrence(s) — target ≥{p['min_occurrences']}. "
+                        f"Increase Z or scene duration."
+                    )
+        return n_inserted, warnings
+
     def _visualize_scene(self, scene):
         """Visualize the scene: top-down spatial map + timeline Gantt."""
         try:

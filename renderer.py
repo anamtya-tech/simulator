@@ -21,6 +21,7 @@ import streamlit as st
 import numpy as np
 import json
 import os
+import tempfile
 from pathlib import Path
 import librosa
 import soundfile as sf
@@ -255,7 +256,13 @@ class AudioRenderer:
         # after accumulation so we never hold all N source signals at once.
         # With 25 sources × 600 s × 16 kHz this would otherwise allocate
         # ~1.9 GB of source signals before simulation even begins.
-        mic_signals = np.zeros((4, n_samples), dtype=np.float32)
+        #
+        # The accumulator is backed by a temp file via np.memmap so the OS
+        # can page it out between source iterations.  Only the pages being
+        # written/read at any moment need to reside in RAM.
+        _mic_tmp_fd, _mic_tmp_path = tempfile.mkstemp(suffix='_mic_acc.f32')
+        os.close(_mic_tmp_fd)
+        mic_signals = np.memmap(_mic_tmp_path, dtype=np.float32, mode='w+', shape=(4, n_samples))
 
         # Process directional sources
         progress_bar = st.progress(0)
@@ -295,15 +302,17 @@ class AudioRenderer:
             # Apply per-source volume gain (default 1.0)
             audio *= source_config.get('volume', 1.0)
 
-            # Create full-length signal with silence (float32 to save memory)
-            full_signal = np.zeros(n_samples, dtype=np.float32)
-            actual_end = min(start_sample + len(audio), n_samples)
-            full_signal[start_sample:actual_end] = audio[:actual_end - start_sample]
+            # Windowed signal: only allocate an array for the active window
+            # (duration_samples), not the full n_samples.  We pass this shorter
+            # signal to pyroomacoustics, then write the convolution result back
+            # into the right slice of the mmap accumulator.  For a 30-second
+            # bird call in a 2-hour scene this saves ~450 MB vs the old approach.
+            window_signal = audio.astype(np.float32)
             del audio  # free trimmed clip before FFT temporaries are allocated
 
             # Simulate this one source in its own room, then discard the room
-            # immediately.  Peak RAM = 1 source signal + FFT temps + mic_signals
-            # accumulator, not N source signals all at once.
+            # immediately.  Peak RAM = 1 source window + FFT temps + OS pages of
+            # the mmap accumulator, not the full-duration accumulator in RAM.
             src_room = pra.ShoeBox(
                 [room_x, room_y, room_z],
                 fs=self.sample_rate,
@@ -317,14 +326,18 @@ class AudioRenderer:
                 source_config['y'] + room_y / 2,
                 source_config['z'] + room_z / 2
             ])
-            src_room.add_source(source_pos, signal=full_signal)
+            src_room.add_source(source_pos, signal=window_signal)
             src_room.simulate()
 
-            partial = src_room.mic_array.signals  # (4, sim_samples)
-            copy_len = min(partial.shape[1], n_samples)
-            mic_signals[:, :copy_len] += partial[:, :copy_len].astype(np.float32)
+            # partial is (4, window_samples + rir_tail); write it at start_sample.
+            partial = src_room.mic_array.signals.astype(np.float32)  # (4, sim_samples)
+            p_len = partial.shape[1]
+            acc_start = start_sample
+            acc_end   = min(acc_start + p_len, n_samples)
+            mic_signals[:, acc_start:acc_end] += partial[:, :acc_end - acc_start]
 
-            del src_room  # releases RIRs, FFT buffers, source signal, everything
+            del src_room, window_signal, partial  # releases RIRs, FFT buffers, everything
+            mic_signals.flush()  # ensure written pages are pushed to disk
 
             progress_bar.progress((idx + 1) / max(n_directional, 1))
         
@@ -408,7 +421,7 @@ class AudioRenderer:
             # ── Synthetic ambient mode ────────────────────────────────────────
             if scene.get('ambient_sources'):
                 status_text.text("Adding ambient sources...")
-                ambient_mix = np.zeros(actual_samples)
+                ambient_mix = np.zeros(actual_samples, dtype=np.float32)
 
                 for amb_source in scene['ambient_sources']:
                     audio_path = amb_source['wav_path']
@@ -432,57 +445,79 @@ class AudioRenderer:
         # Add noise if requested
         if add_noise:
             noise_amplitude = 10 ** (noise_level / 20)
-            noise = np.random.randn(*mic_signals.shape) * noise_amplitude
+            noise = np.random.randn(*mic_signals.shape).astype(np.float32) * noise_amplitude
             mic_signals += noise
+            del noise
         
         # Normalize to prevent clipping
         max_val = np.abs(mic_signals).max()
         if max_val > 0:
-            mic_signals = mic_signals / max_val * 0.95
-        
-        # Create 6-channel output: ch0 and ch5 are silent (non-mic channels).
-        # Real mic signals go into 0-indexed channels 1,2,3,4 to match the
-        # ReSpeaker 4-Mic Array layout and ODAS config map: (1, 2, 3, 4).
-        six_channel = np.zeros((self.n_channels_output, actual_samples))
-        six_channel[1:5, :] = mic_signals  # 0-indexed ch1,ch2,ch3,ch4 = 4 mics
+            mic_signals /= max_val / 0.95  # in-place to avoid a copy
+        mic_signals.flush()
 
-        # ── ODAS warm-up silence prepend ─────────────────────────────────────
-        # ODAS's GCC-PHAT coherence estimator and PF noise-floor tracker need
-        # a few seconds of silence to converge before the first source starts.
-        # Without this, the very first source (e.g. Wolfhowl at t=5s) fires
-        # while ODAS is still initialising, causing spec_at_peak to rarely win
-        # the SSL vote → spectral_count=1 → near-silent reconstructed audio.
-        # We prepend WARMUP_SECONDS of zeros to every channel, store the offset
-        # in the metadata, and the analyser subtracts it back from timestamps.
+        # ── ODAS warm-up / tail constants ────────────────────────────────────
         WARMUP_SECONDS = 10
+        TAIL_SECONDS   = 10
         warmup_samples = int(WARMUP_SECONDS * self.sample_rate)
-        head_silence = np.zeros((self.n_channels_output, warmup_samples))
-        six_channel = np.concatenate([head_silence, six_channel], axis=1)
+        tail_samples   = int(TAIL_SECONDS   * self.sample_rate)
 
-        # ── ODAS tail-flush silence append ────────────────────────────────────
-        # ODAS Kalman filter may still be accumulating the last source when the
-        # audio ends.  Appending silence lets the tracker fully flush pending
-        # hop evaluations before the socket closes, ensuring the last animal
-        # (e.g. Elephant, the shortest GT window) gets its full sc count.
-        TAIL_SECONDS = 10
-        tail_samples = int(TAIL_SECONDS * self.sample_rate)
-        tail_silence = np.zeros((self.n_channels_output, tail_samples))
-        six_channel = np.concatenate([six_channel, tail_silence], axis=1)
-        # ─────────────────────────────────────────────────────────────────────
-
-        # Convert to int16
-        audio_int16 = (six_channel * 32767).astype(np.int16)
-        
-        # Interleave channels: [ch1_s1, ch2_s1, ..., ch6_s1, ch1_s2, ch2_s2, ...]
-        interleaved = audio_int16.T.flatten()
-        
-        # Save as raw PCM
+        # ── Chunked streaming file writer ─────────────────────────────────────
+        # Instead of:
+        #   1. Building a 6-ch float64 six_channel array (2-3× mic_signals size)
+        #   2. np.concatenate for warmup + tail (creates another full copy)
+        #   3. Converting to int16 array (another full copy)
+        #   4. .flatten() — yet another full copy
+        # We open the output file once and stream through it in CHUNK_FRAMES-frame
+        # blocks.  Peak working RAM = one chunk × 6 ch × 2 bytes ~ a few MB.
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         scene_name_clean = scene['name'].replace(' ', '_')
         output_filename = f"{scene_name_clean}_{timestamp}.raw"
         output_path = self.output_dir / output_filename
-        
-        interleaved.tofile(output_path)
+
+        CHUNK_FRAMES = 16000 * 30  # 30-second chunks
+        N_CH = self.n_channels_output
+
+        status_text.text("Writing output file...")
+
+        with open(output_path, 'wb') as out_fh:
+            # 1. Warmup silence
+            silence_chunk = np.zeros((CHUNK_FRAMES, N_CH), dtype=np.int16)
+            remaining = warmup_samples
+            while remaining > 0:
+                n = min(remaining, CHUNK_FRAMES)
+                out_fh.write(silence_chunk[:n].tobytes())
+                remaining -= n
+
+            # 2. Mic content — read mic_signals in row-chunks, build 6-ch frame
+            #    Channels 1-4 (0-indexed) get the mic data; 0 and 5 stay zero.
+            remaining = actual_samples
+            offset = 0
+            while remaining > 0:
+                n = min(remaining, CHUNK_FRAMES)
+                # mic_signals is (4, actual_samples) mmap; slice columns
+                chunk_mics = mic_signals[:, offset:offset + n]  # (4, n) float32
+                chunk_6ch  = np.zeros((n, N_CH), dtype=np.int16)
+                # Clip to [-1, 1] before int16 conversion
+                chunk_int16 = np.clip(chunk_mics, -1.0, 1.0)
+                chunk_int16 = (chunk_int16 * 32767).astype(np.int16)  # (4, n)
+                chunk_6ch[:, 1:5] = chunk_int16.T  # (n, 4) into cols 1-4
+                out_fh.write(chunk_6ch.tobytes())
+                offset    += n
+                remaining -= n
+
+            # 3. Tail silence
+            remaining = tail_samples
+            while remaining > 0:
+                n = min(remaining, CHUNK_FRAMES)
+                out_fh.write(silence_chunk[:n].tobytes())
+                remaining -= n
+
+        # Release the memmap and delete its temp file
+        del mic_signals
+        try:
+            os.unlink(_mic_tmp_path)
+        except OSError:
+            pass
         
         # Also save metadata
         metadata = {
@@ -512,62 +547,110 @@ class AudioRenderer:
         return output_path
     
     def _show_preview(self, raw_path):
-        """Show audio preview"""
+        """Scrubbing preview — fixed RAM cost (~8 MB) regardless of file size.
+
+        Architecture:
+        - Full-duration waveform plot via 16× downsampled mmap read  (tiny RAM)
+        - A scrub slider lets the user seek to any position in the file
+        - Only a WINDOW_S-second slice around the scrub point is decoded and
+          sent to the browser, so RAM stays constant for files of any length.
+        (Streamlit's st.audio() always sends bytes to the browser; true HTTP
+        range streaming isn't possible in Streamlit's model, so a fixed window
+        with a seek control is the correct low-RAM equivalent.)
+        """
         st.subheader("Preview")
-        
+
+        WINDOW_S    = 30   # seconds decoded per audio player render
+        PLOT_STRIDE = 16   # downsample factor for the waveform overview plot
+
         try:
-            # Read raw file
-            audio_int16 = np.fromfile(raw_path, dtype=np.int16)
-            
-            # Reshape to 6 channels
-            n_samples = len(audio_int16) // self.n_channels_output
-            audio_6ch = audio_int16.reshape(n_samples, self.n_channels_output).T
-            
-            # Convert to float
-            audio_float = audio_6ch.astype(np.float32) / 32767
-            
-            # Show waveforms
             import matplotlib.pyplot as plt
-            
-            fig, axes = plt.subplots(4, 1, figsize=(12, 8))
-            time_axis = np.arange(n_samples) / self.sample_rate
-            
-            mic_labels = ['Mic 1 (Left, Ch2)', 'Mic 2 (Back, Ch3)', 
+
+            file_size      = os.path.getsize(raw_path)
+            n_frames       = file_size // (self.n_channels_output * 2)  # int16 = 2 B
+            total_duration = n_frames / self.sample_rate
+
+            # ── Open mmap once; used for both plot and audio slice ────────────
+            audio_mmap = np.memmap(raw_path, dtype=np.int16, mode='r',
+                                   shape=(n_frames, self.n_channels_output))
+
+            # ── Full-duration waveform plot (downsampled, tiny RAM) ───────────
+            plot_data = audio_mmap[::PLOT_STRIDE, 1:5].astype(np.float32) / 32767
+            time_axis = np.arange(len(plot_data)) * PLOT_STRIDE / self.sample_rate
+
+            mic_labels = ['Mic 1 (Left, Ch2)', 'Mic 2 (Back, Ch3)',
                           'Mic 3 (Right, Ch4)', 'Mic 4 (Front, Ch5)']
-            
+            fig, axes = plt.subplots(4, 1, figsize=(12, 8))
             for i in range(4):
-                axes[i].plot(time_axis, audio_float[i + 1])  # Channels 2-5
+                axes[i].plot(time_axis, plot_data[:, i])
                 axes[i].set_ylabel(mic_labels[i])
                 axes[i].grid(True, alpha=0.3)
                 if i == 3:
                     axes[i].set_xlabel('Time (s)')
-            
-            plt.suptitle('Multi-channel Waveforms')
+            plt.suptitle(
+                f'Full waveform — {total_duration:.1f} s  '
+                f'(plot {PLOT_STRIDE}× downsampled, {len(plot_data):,} pts)'
+            )
             plt.tight_layout()
             st.pyplot(fig)
-            
-            # Audio playback for all 4 mics
+            plt.close(fig)
+            del plot_data
+
+            # ── Scrub slider ──────────────────────────────────────────────────
+            # The slider key is tied to the file path so each render gets its
+            # own independent scrub position in Streamlit session state.
+            slider_key  = f'scrub_{abs(hash(raw_path))}'
+            max_start_s = max(0.0, total_duration - WINDOW_S)
+
+            if max_start_s > 0:
+                scrub_s = st.slider(
+                    f'🎚️ Scrub position  (loads {WINDOW_S} s window)',
+                    min_value=0.0,
+                    max_value=float(max_start_s),
+                    value=float(st.session_state.get(slider_key, 0.0)),
+                    step=1.0,
+                    format='%.0f s',
+                    key=slider_key,
+                )
+            else:
+                scrub_s = 0.0
+                st.caption(
+                    f'ℹ️ File is {total_duration:.1f} s — shorter than the '
+                    f'{WINDOW_S} s window, playing in full.'
+                )
+
+            # ── Decode only the window slice ──────────────────────────────────
+            start_frame  = int(scrub_s * self.sample_rate)
+            end_frame    = min(int((scrub_s + WINDOW_S) * self.sample_rate), n_frames)
+            window_frames = end_frame - start_frame
+            ram_mb        = window_frames * 4 * 4 / 1e6   # 4 mics × float32
+
+            st.caption(
+                f'📍 {scrub_s:.0f} s → {scrub_s + window_frames / self.sample_rate:.0f} s  '
+                f'({window_frames:,} frames decoded, ~{ram_mb:.1f} MB in RAM)'
+            )
+
+            # Read the window (mmap pages, not whole file) then release mmap
+            play_slice = audio_mmap[start_frame:end_frame, 1:5].astype(np.float32) / 32767
+            del audio_mmap   # mmap released; play_slice is an independent copy
+
+            # ── Audio players ─────────────────────────────────────────────────
             st.markdown("**🎧 Listen to Individual Microphones**")
-            
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown("**Mic 1 (Left, Ch2)**")
-                st.audio(audio_float[1], sample_rate=self.sample_rate)
-                
+                st.audio(play_slice[:, 0], sample_rate=self.sample_rate)
                 st.markdown("**Mic 2 (Back, Ch3)**")
-                st.audio(audio_float[2], sample_rate=self.sample_rate)
-            
+                st.audio(play_slice[:, 1], sample_rate=self.sample_rate)
             with col2:
                 st.markdown("**Mic 3 (Right, Ch4)**")
-                st.audio(audio_float[3], sample_rate=self.sample_rate)
-                
+                st.audio(play_slice[:, 2], sample_rate=self.sample_rate)
                 st.markdown("**Mic 4 (Front, Ch5)**")
-                st.audio(audio_float[4], sample_rate=self.sample_rate)
-            
-            # Mixed mono for comparison
+                st.audio(play_slice[:, 3], sample_rate=self.sample_rate)
+
             st.markdown("**Mixed (All Mics Average)**")
-            mixed_audio = np.mean(audio_float[1:5], axis=0)
-            st.audio(mixed_audio, sample_rate=self.sample_rate)
-            
+            st.audio(np.mean(play_slice, axis=1), sample_rate=self.sample_rate)
+            del play_slice
+
         except Exception as e:
             st.error(f"Error previewing audio: {e}")
