@@ -25,6 +25,7 @@ from simulator import SimulationRunner
 from analyzer import ResultAnalyzer
 from custom_simulator import CustomSimulator
 from odas_simulator import ODASSimulator
+from gt_dataset_builder import GTDatasetBuilder
 
 # Configuration
 SOUNDS_DIR       = "/home/azureuser/sounds"
@@ -70,7 +71,8 @@ def main():
         "Select Module",
         ["🎨 Scene Configurator", "🔊 Audio Renderer",
          "⚙️ ODAS Simulator", "🔬 Custom DOA Processor",
-         "📊 Results Analyzer", "🎯 YAMNet Datasets"]
+         "📊 Results Analyzer", "🎯 YAMNet Datasets",
+         "🏷️ GT Dataset Builder", "🧠 Fine-Tune YAMNet"]
     )
 
     # Route to appropriate page
@@ -88,9 +90,10 @@ def main():
         show_analyzer()
     elif page == "🎯 YAMNet Datasets":
         show_dataset_manager()
-    # Removed Model Training - using YAMNet instead
-    # elif page == "🤖 Model Training":
-    #     show_model_training()
+    elif page == "🏷️ GT Dataset Builder":
+        show_gt_dataset_builder()
+    elif page == "🧠 Fine-Tune YAMNet":
+        show_yamnet_finetuner()
 
 def show_scene_configurator():
     """Scene configuration interface"""
@@ -141,6 +144,28 @@ def show_dataset_manager():
     
     dataset_config = DatasetConfigurator(OUTPUT_DIR)
     dataset_config.render()
+
+def show_gt_dataset_builder():
+    """Ground-truth dataset builder from rendered audio"""
+    st.header("🏷️ GT Dataset Builder")
+
+    renders_dir = Path(OUTPUT_DIR) / 'renders'
+    builder = GTDatasetBuilder(renders_dir, OUTPUT_DIR)
+    builder.render()
+
+
+def show_yamnet_finetuner():
+    """YAMNet fine-tuning pipeline: dataset prep → train → export → deploy"""
+    st.header("🧠 Fine-Tune YAMNet")
+    st.markdown(
+        "Train a custom YAMNet on your GT datasets, export to TFLite, "
+        "and deploy to the ODAS simulator or live firmware."
+    )
+
+    from yamnet_finetuner_ui import YAMNetFinetunerUI
+    ui = YAMNetFinetunerUI(OUTPUT_DIR)
+    ui.render()
+
 
 if __name__ == "__main__":
     main()

@@ -10,6 +10,10 @@ This orchestrates:
 Output files are saved in ~/sodas/ClassifierLogs/:
 - sst_classify_events_<timestamp>.json
 - sst_session_live.json_<timestamp>.json
+
+IMPORTANT: Simulation processes run in a background thread to survive
+Streamlit script re-runs (caused by fastReruns=true).  Process handles
+are stored in st.session_state['sim_state'] so they persist across reruns.
 """
 
 import streamlit as st
@@ -21,6 +25,26 @@ from pathlib import Path
 from datetime import datetime
 import threading
 import signal
+
+# ── session-state key used by the background thread ───────────────────────────
+_SIM_STATE_KEY = "sim_state"
+
+def _get_sim_state():
+    """Return the sim_state dict from session_state (creates it if absent)."""
+    if _SIM_STATE_KEY not in st.session_state:
+        st.session_state[_SIM_STATE_KEY] = {
+            "running": False,
+            "status": "idle",
+            "log_lines": [],
+            "socket_process": None,
+            "odas_process": None,
+            "run_name": None,
+            "log_file": None,
+            "start_time": None,
+            "duration": None,
+            "elapsed": 0.0,
+        }
+    return st.session_state[_SIM_STATE_KEY]
 
 class SimulationRunner:
     def __init__(self, output_dir, odas_logs_dir):
@@ -34,16 +58,40 @@ class SimulationRunner:
         self.socket_emit_script = "/home/azureuser/z_odas_newbeamform/vm_socket_emit.py"
         self.odas_config = "/home/azureuser/z_odas_newbeamform/config/runtime/local_socket.cfg"
         self.odaslive_bin = "/home/azureuser/z_odas_newbeamform/build/bin/odaslive"
-        
-        # Process handles
-        self.socket_process = None
-        self.odas_process = None
+
+    # ── convenience: pull live process handles from session state ────────────
+    @property
+    def socket_process(self):
+        return _get_sim_state().get("socket_process")
+
+    @property
+    def odas_process(self):
+        return _get_sim_state().get("odas_process")
         
     def render(self):
         """Render the simulation runner interface"""
         st.subheader("ODAS Simulation")
         st.markdown("Run ODAS on rendered audio to generate peak detection data")
-        
+
+        sim = _get_sim_state()
+
+        # ── If a simulation is currently running, show status and return ────
+        if sim["running"]:
+            self._render_running_status(sim)
+            return
+
+        # ── If the last run just finished, show a summary banner ────────────
+        if sim["status"] == "done":
+            st.success(f"✅ Simulation finished: **{sim['run_name']}**")
+            if sim.get("log_file"):
+                st.info(f"📝 Log: {sim['log_file']}")
+            if st.button("Clear status"):
+                sim.update({"status": "idle", "run_name": None, "log_lines": [],
+                            "log_file": None, "start_time": None,
+                            "duration": None, "elapsed": 0.0})
+                st.rerun()
+
+        # ── Normal launch UI ─────────────────────────────────────────────────
         # Select rendered audio
         raw_files = list(self.renders_dir.glob("*.raw"))
         
@@ -61,6 +109,7 @@ class SimulationRunner:
         )
         
         # Load metadata
+        metadata = {}
         metadata_path = str(selected_raw_file).replace('.raw', '.json')
         if os.path.exists(metadata_path):
             with open(metadata_path, 'r') as f:
@@ -85,263 +134,269 @@ class SimulationRunner:
             stop_button = st.button("⏹️ Stop Simulation", type="secondary")
         
         if run_button:
-            self._run_simulation(str(selected_raw_file), port, metadata if os.path.exists(metadata_path) else {})
-        
+            self._run_simulation(str(selected_raw_file), port, metadata)
+            st.rerun()  # switch to the status view immediately
+
         if stop_button:
             self._stop_simulation()
         
         # Show previous runs
         st.subheader("Previous Runs")
         self._show_previous_runs()
+
+    def _render_running_status(self, sim):
+        """Display live status while a simulation is running in the background."""
+        st.info(f"🔄 Simulation running: **{sim.get('run_name', '...')}**")
+
+        elapsed = sim.get("elapsed", 0.0)
+        audio_duration = sim.get("duration") or 1.0
+        # Wall-clock time is longer than audio duration:
+        #   socket streams at ~1.25× real-time + up to 90 s ODAS drain
+        expected_wallclock = audio_duration * 1.25 + 90
+        progress = min(elapsed / expected_wallclock, 1.0)
+
+        st.progress(progress)
+        st.caption(f"Elapsed: {elapsed:.0f}s / ~{expected_wallclock:.0f}s est.  "
+                   f"({progress * 100:.1f}%)  — audio: {audio_duration:.0f}s")
+
+        log_lines = sim.get("log_lines", [])
+        if log_lines:
+            st.text_area("Recent log", "\n".join(log_lines[-20:]), height=200)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("⏹️ Stop Simulation", type="secondary"):
+                self._stop_simulation()
+                st.rerun()
+        with col2:
+            if st.button("🔄 Refresh Status"):
+                st.rerun()
+
+        # Auto-refresh every 5 s while running
+        time.sleep(5)
+        st.rerun()
     
     def _run_simulation(self, raw_file_path, port, metadata):
-        """Run the ODAS simulation"""
-        st.info("Starting simulation...")
-        
-        # Get render_id from metadata, or create from filename
+        """Start the ODAS simulation — processes run in a background thread so
+        Streamlit re-runs cannot kill them prematurely."""
+
+        sim = _get_sim_state()
+        if sim["running"]:
+            st.warning("A simulation is already running.")
+            return
+
+        # ── derive names / durations ────────────────────────────────────────
         render_id = metadata.get('render_id', Path(raw_file_path).stem)
         scene_name = metadata.get('scene_name', 'unknown')
         run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_name = f"{render_id}_run_{run_timestamp}"
-        
+        warmup_seconds = metadata.get('warmup_seconds', 0)
+        tail_seconds   = metadata.get('tail_silence_seconds', 0)
+        duration = metadata.get('duration', 10) + warmup_seconds + tail_seconds
+        log_file_path = str(self.runs_dir / f"odas_log_{run_timestamp}.txt")
+
+        # ── release stale port ───────────────────────────────────────────────
         try:
-            # Kill any process already holding the port (leftover from a previous
-            # run that didn't clean up cleanly — prevents "Address already in use").
-            try:
-                result = subprocess.run(
-                    ["fuser", "-k", f"{port}/tcp"],
-                    capture_output=True, timeout=5
-                )
-                if result.returncode == 0:
-                    st.write(f"⚠️ Released stale process on port {port}")
-                    time.sleep(1)  # Give the OS time to free the port
-            except Exception:
-                pass  # fuser not available or no process on port — fine
+            subprocess.run(["fuser", "-k", f"{port}/tcp"],
+                           capture_output=True, timeout=5)
+            time.sleep(1)
+        except Exception:
+            pass
 
-            # Start socket server in background
-            st.write("🔌 Starting socket server...")
+        # ── start socket server ──────────────────────────────────────────────
+        socket_cmd = [
+            "python3",
+            self.socket_emit_script,
+            "--audio", raw_file_path,
+            "--port", str(port)
+        ]
+        socket_process = subprocess.Popen(
+            socket_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd="/home/azureuser/sodas"
+        )
+        time.sleep(2)
 
-            socket_cmd = [
-                "python3",
-                self.socket_emit_script,
-                "--audio", raw_file_path,
-                "--port", str(port)
-            ]
-            
-            # Start socket server
-            self.socket_process = subprocess.Popen(
-                socket_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd="/home/azureuser/sodas"
-            )
-            
-            # Wait a bit for socket to start
-            time.sleep(2)
-            
-            # Check if socket process is still running
-            if self.socket_process.poll() is not None:
-                stdout, stderr = self.socket_process.communicate()
-                st.error("Socket server failed to start!")
-                st.code(stderr.decode())
-                return
-            
-            st.write("✅ Socket server started")
-            
-            # Record wall-clock time just before ODAS launches so we can
-            # later validate that the session file it produced is newer than
-            # this moment (guards against silently picking up a stale file
-            # from a previous run when ODAS crashes before writing anything).
-            run_start_time = time.time()
+        if socket_process.poll() is not None:
+            stdout, stderr = socket_process.communicate()
+            st.error("Socket server failed to start!")
+            st.code(stderr.decode())
+            return
 
-            # Start ODAS
-            st.write("🎵 Starting ODAS...")
-            log_file_path = str(self.runs_dir / f"odas_log_{run_timestamp}.txt")
-            
-            odas_cmd = [
-                self.odaslive_bin,
-                "-v",  # Verbose mode
-                "-c", self.odas_config
-            ]
-            
-            with open(log_file_path, 'w') as log_file:
-                self.odas_process = subprocess.Popen(
-                    odas_cmd,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    cwd="/home/azureuser/z_odas_newbeamform/build",
-                    # Commented out: allows core dumps for debugging
-                    # preexec_fn=lambda: __import__('resource').setrlimit(
-                    #     __import__('resource').RLIMIT_CORE, (0, 0)
-                    # )  # Disable core dumps for this process
-                )
-            
-            st.write("✅ ODAS started")
-            st.write(f"📝 Logs: {log_file_path}")
+        # ── start ODAS ───────────────────────────────────────────────────────
+        run_start_time = time.time()
+        odas_cmd = [
+            self.odaslive_bin,
+            "-v",
+            "-c", self.odas_config
+        ]
+        log_fh = open(log_file_path, 'w')
+        odas_process = subprocess.Popen(
+            odas_cmd,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            cwd="/home/azureuser/z_odas_newbeamform/build",
+        )
 
-            # Early crash detection: give ODAS 3 s to initialise, then check
-            # whether it is still alive.  A crash here (e.g. "Invalid
-            # separation method") means no session file will ever be written.
-            time.sleep(3)
-            if self.odas_process.poll() is not None:
-                with open(log_file_path) as _lf:
-                    tail = _lf.read()[-800:]
-                st.error("❌ ODAS crashed during initialisation. Check the log below.")
-                st.code(tail)
-                return
+        # early crash check
+        time.sleep(3)
+        if odas_process.poll() is not None:
+            log_fh.close()
+            with open(log_file_path) as _lf:
+                tail = _lf.read()[-800:]
+            st.error("❌ ODAS crashed during initialisation.")
+            st.code(tail)
+            socket_process.terminate()
+            return
 
-            # Monitor processes
-            st.write("⏳ Waiting for simulation to complete...")
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            # Total audio duration = scene duration + warmup (head) + tail flush
-            # The renderer prepends warmup_seconds of silence and appends
-            # tail_silence_seconds so the Kalman filter fully flushes.
-            warmup_seconds = metadata.get('warmup_seconds', 0)
-            tail_seconds   = metadata.get('tail_silence_seconds', 0)
-            duration = metadata.get('duration', 10) + warmup_seconds + tail_seconds
-            start_time = time.time()
-            
+        # ── persist handles in session state ─────────────────────────────────
+        sim.update({
+            "running": True,
+            "status": "running",
+            "log_lines": ["✅ Socket server started", "✅ ODAS started"],
+            "socket_process": socket_process,
+            "odas_process": odas_process,
+            "run_name": run_name,
+            "log_file": log_file_path,
+            "start_time": run_start_time,
+            "duration": duration,
+            "elapsed": 0.0,
+        })
+
+        # ── launch background monitor thread ─────────────────────────────────
+        monitor_thread = threading.Thread(
+            target=self._monitor_background,
+            args=(sim, log_fh, run_name, render_id, scene_name,
+                  metadata, raw_file_path, log_file_path,
+                  run_start_time, run_timestamp, duration),
+            daemon=True,
+        )
+        monitor_thread.start()
+
+    # ── background monitor ────────────────────────────────────────────────────
+    def _monitor_background(self, sim, log_fh, run_name, render_id, scene_name,
+                             metadata, raw_file_path, log_file_path,
+                             run_start_time, run_timestamp, duration):
+        """Runs in a daemon thread — waits for socket to finish, then cleans up.
+        Updates sim dict in-place so the Streamlit polling loop can display
+        progress without touching the processes.
+        """
+        socket_process = sim["socket_process"]
+        odas_process   = sim["odas_process"]
+        start_time     = sim["start_time"]
+
+        try:
             while True:
                 elapsed = time.time() - start_time
-                progress = min(elapsed / duration, 1.0)
-                progress_bar.progress(progress)
-                status_text.text(f"Elapsed: {elapsed:.1f}s / {duration}s")
-                
-                # Check if socket process finished
-                if self.socket_process and self.socket_process.poll() is not None:
-                    st.write("✅ Socket server completed")
-                    # Give ODAS extra time to process buffered audio and write outputs
-                    st.write("⏳ Waiting for ODAS to process remaining audio (5 seconds)...")
-                    time.sleep(5)
-                    break
-                
-                if elapsed > duration + 5:  # Give 5 extra seconds
-                    st.write("⏱️ Timeout reached")
-                    break
-                
-                time.sleep(0.5)
-            
-            # Stop ODAS gracefully
-            st.write("⏹️ Stopping ODAS...")
-            if self.odas_process:
-                # Give ODAS extra time to flush final JSON outputs
-                st.write("💾 Flushing ODAS outputs (2 seconds)...")
-                time.sleep(2)
-                # Use terminate (SIGTERM) for graceful shutdown
-                self.odas_process.terminate()
-                try:
-                    self.odas_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    # If it doesn't stop gracefully, force kill
-                    st.write("⚠️ Force stopping ODAS...")
-                    self.odas_process.kill()
-                    self.odas_process.wait()
-            
-            # Find output files
-            st.write("🔍 Looking for output files...")
-            time.sleep(2)  # Wait for files to be written
-            
-            # Find the most recent classifier logs
-            classify_events_files = sorted(
-                Path(self.odas_logs_dir).glob("sst_classify_events_*.json"),
-                key=os.path.getmtime,
-                reverse=True
-            )
-            session_live_files = sorted(
-                Path(self.odas_logs_dir).glob("sst_session_live.json_*.json"),
-                key=os.path.getmtime,
-                reverse=True
-            )
-            
-            classify_events_file = str(classify_events_files[0]) if classify_events_files else None
-            session_live_file = str(session_live_files[0]) if session_live_files else None
+                sim["elapsed"] = elapsed
 
-            # Staleness guard: the session file must have been written AFTER
-            # ODAS was launched for this run.  If its mtime pre-dates
-            # run_start_time we have picked up a leftover from a previous run
-            # (which happens when ODAS crashes before writing anything).
-            if session_live_file and os.path.getmtime(session_live_file) < run_start_time:
-                with open(log_file_path) as _lf:
-                    tail = _lf.read()[-800:]
-                st.error(
-                    f"❌ Session file is stale (from a previous run, not this one).\n"
-                    f"Most-recent file: {Path(session_live_file).name}\n"
-                    f"Run started at: {run_start_time:.0f}  File mtime: {os.path.getmtime(session_live_file):.0f}\n"
-                    f"ODAS likely crashed — see log below."
-                )
-                st.code(tail)
-                session_live_file = None  # Don't save a wrong path into the run file
+                # Append a log heartbeat every ~10 s
+                if int(elapsed) % 10 == 0:
+                    expected = duration * 1.25 + 90
+                    sim["log_lines"].append(f"⏳ {elapsed:.0f}s elapsed / ~{expected:.0f}s est. (audio: {duration:.0f}s)")
 
-            if not session_live_file:
-                st.warning("⚠️ Could not find session output file")
-            else:
-                st.success("✅ Found output files!")
-                if classify_events_file:
-                    st.write(f"- Classify events: {Path(classify_events_file).name}")
-                st.write(f"- Session live: {Path(session_live_file).name}")
-            
-            # Create run file
-            run_data = {
-                'run_id': run_name,
-                'render_id': render_id,
-                'scene_name': scene_name,
-                'timestamp': run_timestamp,
-                'raw_audio_file': raw_file_path,
-                'scene_metadata': metadata,
-                'scene_file': metadata.get('scene_file', None),
-                'odas_log_file': log_file_path,
-                'classify_events_file': classify_events_file,
-                'session_live_file': session_live_file,
-                'port': port,
-                'odas_config': self.odas_config,
-                'warmup_seconds': metadata.get('warmup_seconds', 0),
-            }
-            
-            run_file_path = str(self.runs_dir / f"{run_name}.json")
-            with open(run_file_path, 'w') as f:
-                json.dump(run_data, f, indent=2)
-            
-            st.success(f"✅ Simulation complete!")
-            st.info(f"Run ID: {run_name}")
-            st.info(f"Run file: {run_file_path}")
-            
-            # Store in session state
-            st.session_state.last_run_file = run_file_path
-            
-        except Exception as e:
-            st.error(f"Error running simulation: {e}")
-            import traceback
-            st.code(traceback.format_exc())
+                # Check if socket finished (all audio sent)
+                if socket_process.poll() is not None:
+                    # ODAS processes at ~0.79× real-time, so when the socket
+                    # finishes there may still be tens of seconds of audio left
+                    # in ODAS's processing queue.  Give it up to 90 s to drain.
+                    sim["log_lines"].append("✅ Socket server completed — waiting up to 90 s for ODAS to drain...")
+                    for _ in range(90):
+                        if odas_process.poll() is not None:
+                            break
+                        time.sleep(1)
+                    break
+
+                # Hard timeout: the socket streams at 10 ms/frame so it takes
+                # ~1.25× the audio duration.  Add a generous margin on top.
+                if elapsed > duration * 2 + 60:
+                    sim["log_lines"].append("⏱️ Hard timeout reached")
+                    break
+
+                time.sleep(1)
+
+            # ── graceful ODAS shutdown ────────────────────────────────────
+            sim["log_lines"].append("⏹️ Stopping ODAS...")
+            time.sleep(2)
+            try:
+                odas_process.terminate()
+                odas_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                odas_process.kill()
+                odas_process.wait()
+
         finally:
-            # Cleanup
-            self._stop_simulation()
+            log_fh.close()
+
+        # ── collect output files ──────────────────────────────────────────
+        time.sleep(2)
+        classify_events_files = sorted(
+            Path(self.odas_logs_dir).glob("sst_classify_events_*.json"),
+            key=os.path.getmtime, reverse=True
+        )
+        session_live_files = sorted(
+            Path(self.odas_logs_dir).glob("sst_session_live.json_*.json"),
+            key=os.path.getmtime, reverse=True
+        )
+        classify_events_file = str(classify_events_files[0]) if classify_events_files else None
+        session_live_file    = str(session_live_files[0])    if session_live_files    else None
+
+        if session_live_file and os.path.getmtime(session_live_file) < run_start_time:
+            sim["log_lines"].append(
+                f"⚠️ Session file is stale (mtime predates run start). "
+                f"ODAS may have crashed."
+            )
+            session_live_file = None
+
+        # ── save run JSON ─────────────────────────────────────────────────
+        run_data = {
+            'run_id': run_name,
+            'render_id': render_id,
+            'scene_name': scene_name,
+            'timestamp': run_timestamp,
+            'raw_audio_file': raw_file_path,
+            'scene_metadata': metadata,
+            'scene_file': metadata.get('scene_file', None),
+            'odas_log_file': log_file_path,
+            'classify_events_file': classify_events_file,
+            'session_live_file': session_live_file,
+            'port': 10000,
+            'odas_config': self.odas_config,
+            'warmup_seconds': metadata.get('warmup_seconds', 0),
+        }
+        run_file_path = str(self.runs_dir / f"{run_name}.json")
+        with open(run_file_path, 'w') as f:
+            json.dump(run_data, f, indent=2)
+
+        sim["log_lines"].append(f"✅ Run file saved: {run_file_path}")
+        sim["log_lines"].append("✅ Simulation complete!")
+
+        # Mark as done so the UI shows the summary banner
+        sim.update({
+            "running": False,
+            "status": "done",
+            "socket_process": None,
+            "odas_process": None,
+        })
     
     def _stop_simulation(self):
-        """Stop running processes"""
-        if self.socket_process:
-            try:
-                self.socket_process.terminate()
-                self.socket_process.wait(timeout=2)
-            except:
+        """Stop running processes and clear session state."""
+        sim = _get_sim_state()
+        for key in ("socket_process", "odas_process"):
+            proc = sim.get(key)
+            if proc:
                 try:
-                    self.socket_process.kill()
-                except:
-                    pass
-            self.socket_process = None
-        
-        if self.odas_process:
-            try:
-                self.odas_process.terminate()
-                self.odas_process.wait(timeout=2)
-            except:
-                try:
-                    self.odas_process.kill()
-                except:
-                    pass
-            self.odas_process = None
-        
+                    proc.terminate()
+                    proc.wait(timeout=3)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+            sim[key] = None
+
+        sim.update({"running": False, "status": "idle"})
         st.info("Processes stopped")
 
     def _free_port(self, port):

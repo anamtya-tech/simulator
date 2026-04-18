@@ -20,18 +20,19 @@ class YAMNetSpectrumClassifier:
     """
     
     # Constants matching C++ implementation
-    SAMPLE_RATE = 16000
-    FRAME_LENGTH = 400
-    FRAME_STEP = 160
-    FFT_SIZE = 512
+    SAMPLE_RATE   = 16000
+    FRAME_LENGTH  = 400
+    FRAME_STEP    = 160
+    FFT_SIZE      = 512
     SPECTRUM_BINS = 257  # (FFT_SIZE // 2) + 1
-    MEL_BINS = 64
-    PATCH_FRAMES = 96
-    PATCH_HOP = 48  # 50% overlap
-    NUM_CLASSES = 521
-    MEL_MIN_HZ = 125.0
-    MEL_MAX_HZ = 7500.0
-    LOG_OFFSET = 0.001
+    MEL_BINS      = 64
+    PATCH_FRAMES  = 96
+    PATCH_HOP     = 48   # 50% overlap
+    # NUM_CLASSES is determined at load time from the class-map CSV so that
+    # fine-tuned models with N custom classes work without any code change.
+    MEL_MIN_HZ    = 125.0
+    MEL_MAX_HZ    = 7500.0
+    LOG_OFFSET    = 0.001
     
     def __init__(self, model_path: str, class_map_path: str):
         """
@@ -69,16 +70,26 @@ class YAMNetSpectrumClassifier:
         print(f"  Output shape: {self.output_details[0]['shape']}")
     
     def _load_class_names(self, csv_path: str) -> List[str]:
-        """Load class names from CSV file."""
+        """Load class names from CSV file.
+
+        Accepts both base-YAMNet format (columns: index, display_name) and
+        fine-tuned export format (columns: index, class_name  or  index, display_name).
+        The number of classes is inferred from the CSV — no hard-coded 521 limit.
+        """
         class_names = []
         with open(csv_path, 'r') as f:
             reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            # Prefer 'display_name', fall back to 'class_name'
+            name_col = 'display_name' if 'display_name' in fieldnames else 'class_name'
             for row in reader:
-                class_names.append(row['display_name'])
-        
-        assert len(class_names) == self.NUM_CLASSES, \
-            f"Expected {self.NUM_CLASSES} classes, got {len(class_names)}"
-        
+                class_names.append(row[name_col])
+
+        if not class_names:
+            raise ValueError(f"Class map CSV is empty: {csv_path}")
+
+        # Set NUM_CLASSES dynamically from the loaded CSV
+        self.NUM_CLASSES = len(class_names)
         return class_names
     
     def _hz_to_mel(self, hz: float) -> float:

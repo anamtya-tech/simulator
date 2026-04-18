@@ -122,8 +122,9 @@ class ResultAnalyzer:
                     "on the saved .bin sidecar patches. Useful after updating the model without re-running ODAS.\n\n"
                     "**Ground truth only** — label = scene ground truth from spatial alignment. "
                     "Ignores YAMNet entirely; unmatched detections are skipped.\n\n"
-                    "**Fine-tuned model** — re-classify .bin patches using the active fine-tuned .pth model "
-                    "(if available)."
+                    "**Fine-tuned model** — re-classify .bin patches using the active fine-tuned TFLite model "
+                    "set in the 🧠 Fine-Tune YAMNet page. Same mel pipeline as standard YAMNet, "
+                    "outputs your custom class labels instead of 521 AudioSet classes."
                 )
             )
             st.session_state['label_strategy'] = label_strategy
@@ -899,24 +900,43 @@ class ResultAnalyzer:
             return dict(class_id=-2, class_name='__ground_truth__', confidence=1.0,
                         votes=0, strategy_used='ground_truth')
 
-        # ── Strategy 4: fine-tuned model ─────────────────────────────────────
+        # ── Strategy 4: fine-tuned YAMNet TFLite ─────────────────────────────
         if strategy == 'Fine-tuned model':
             spectra_file = det.get('spectra_file', '')
             if spectra_file and os.path.exists(spectra_file):
                 try:
-                    import numpy as np, torch
-                    from model_trainer import load_finetuned_model  # if available
-                    if not hasattr(self, '_ft_model'):
-                        model_path = str(Path(self.base_output_dir) / 'models' / 'active_model.pth')
-                        self._ft_model = load_finetuned_model(model_path)
+                    import numpy as np
+                    from yamnet_helper.yamnet_spectrum_classifier import YAMNetSpectrumClassifier
+                    from yamnet_finetuner import YAMNetFinetuner
+
+                    # Resolve active model paths from registry
+                    finetuner = YAMNetFinetuner(str(self.base_output_dir))
+                    tflite_path, class_map_path = finetuner.get_active_model_paths()
+
+                    if tflite_path is None:
+                        return dict(class_id=-1, class_name='no_active_model',
+                                    confidence=0.0, votes=0,
+                                    strategy_used='finetuned_no_model')
+
+                    # Cache classifier in session_state; invalidate when model path changes
+                    cached_path = st.session_state.get('_ft_yamnet_path')
+                    if cached_path != tflite_path or '_ft_yamnet_obj' not in st.session_state:
+                        st.session_state['_ft_yamnet_obj']  = YAMNetSpectrumClassifier(
+                            tflite_path, class_map_path
+                        )
+                        st.session_state['_ft_yamnet_path'] = tflite_path
+
+                    classifier = st.session_state['_ft_yamnet_obj']
                     patch = np.fromfile(spectra_file, dtype=np.float32).reshape(96, 257)
-                    cid, cname, conf = self._ft_model.predict_patch(patch)
+                    cid, cname, conf = classifier.classify_patch(patch)
                     return dict(class_id=cid, class_name=cname, confidence=float(conf),
-                                votes=1, strategy_used='finetuned_model')
-                except Exception:
-                    pass
+                                votes=1, strategy_used='finetuned_yamnet_tflite')
+                except Exception as exc:
+                    return dict(class_id=-1, class_name=f'error:{exc}',
+                                confidence=0.0, votes=0,
+                                strategy_used='finetuned_error')
             return dict(class_id=-1, class_name='unclassified', confidence=0.0,
-                        votes=0, strategy_used='finetuned_missing')
+                        votes=0, strategy_used='finetuned_missing_bin')
 
         # Fallback
         return dict(class_id=-1, class_name='unclassified', confidence=0.0,
@@ -1339,6 +1359,354 @@ class ResultAnalyzer:
             'match_type':         str(m.get('match_type', 'ground_truth')),
         }
 
+    # ──────────────────────────────────────────────────────────────────────
+    # Concurrent-source analysis helpers
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _compute_concurrency_buckets(self, src_windows, matches):
+        """
+        For every detection frame, count how many GT source windows were
+        simultaneously active and group into buckets 0 / 1 / 2 / 3 / 4+.
+
+        Parameters
+        ----------
+        src_windows : list of (start_time, end_time) float tuples
+            One entry per unique GT source activation interval.
+        matches : list of match dicts (saved JSON format)
+        """
+        from collections import Counter
+
+        bucket_keys = ['0', '1', '2', '3', '4+']
+        buckets = {k: {'total': 0, 'matched': 0,
+                       'model_correct': 0, 'model_classified': 0,
+                       'gt_labels': Counter()}
+                   for k in bucket_keys}
+
+        for m in matches:
+            t = float(m.get('timestamp', 0.0))
+
+            # Count how many source windows contain t
+            active = sum(1 for (s, e) in src_windows if s <= t <= e)
+            key = '0' if active == 0 else ('4+' if active >= 4 else str(active))
+
+            b = buckets[key]
+            b['total'] += 1
+
+            if m.get('match_type') == 'ground_truth':
+                b['matched'] += 1
+                b['gt_labels'][m.get('source_label', 'unknown')] += 1
+
+            mp = m.get('model_prediction', '')
+            if mp and mp not in ('unclassified', ''):
+                b['model_classified'] += 1
+                if mp == m.get('source_label', ''):
+                    b['model_correct'] += 1
+
+        return buckets
+
+    def _add_concurrent_source_section(self, html_parts, results):
+        """
+        Append an HTML section to html_parts showing detection performance
+        broken down by how many GT sources were simultaneously active at each
+        detection timestamp (single / double / triple / 4+).
+        """
+        matches = results['matches']
+
+        # Build source windows from GT match records (gt_start / gt_end fields)
+        # Each unique (source_label, gt_start, gt_end) triple is one activation.
+        seen = set()
+        src_windows = []
+        for m in matches:
+            if m.get('match_type') == 'ground_truth' and m.get('gt_start') is not None:
+                key = (m.get('source_label'), round(m.get('gt_start', 0), 2),
+                       round(m.get('gt_end', 0), 2))
+                if key not in seen:
+                    seen.add(key)
+                    src_windows.append((float(m['gt_start']), float(m['gt_end'])))
+
+        # Also try render sidecar for windows not covered by matches
+        try:
+            render_path = (self.base_output_dir / 'renders'
+                           / f"{results.get('render_id', '')}.json")
+            import json as _j
+            for s in _j.loads(render_path.read_text()).get('source_sidecars', []):
+                w = (float(s.get('start_time', 0)), float(s.get('end_time', 0)))
+                src_windows.append(w)
+        except Exception:
+            pass
+
+        # Deduplicate and remove degenerate windows
+        src_windows = list(set((round(s, 2), round(e, 2))
+                               for s, e in src_windows if e > s))
+
+        if not src_windows:
+            return
+
+        buckets = self._compute_concurrency_buckets(src_windows, matches)
+
+        # Bucket metadata for display
+        bucket_meta = {
+            '0':  ('🔇 None (ambient)',     '#95a5a6'),
+            '1':  ('🔵 Single',              '#3498db'),
+            '2':  ('🟢 Double',              '#2ecc71'),
+            '3':  ('🟡 Triple',              '#f39c12'),
+            '4+': ('🔴 Quad+',               '#e74c3c'),
+        }
+
+        # Build table rows
+        rows_html = ''
+        bar_labels, bar_total, bar_matched, bar_unmatched = [], [], [], []
+        for key in ['0', '1', '2', '3', '4+']:
+            b    = buckets[key]
+            label, color = bucket_meta[key]
+            total      = b['total']
+            matched    = b['matched']
+            unmatched  = total - matched
+            match_rate = (matched / total * 100) if total else 0.0
+            yam_cls    = b['model_classified']
+            yam_corr   = b['model_correct']
+            yam_acc    = (yam_corr / yam_cls * 100) if yam_cls else 0.0
+
+            if total == 0:
+                continue   # skip empty buckets in table
+
+            top_gt = ', '.join(
+                f'{lbl}×{cnt}' for lbl, cnt in b['gt_labels'].most_common(3)
+            ) or '—'
+
+            rows_html += f"""
+            <tr>
+                <td><span style="color:{color};font-weight:bold;">{label}</span></td>
+                <td style="text-align:right;">{total}</td>
+                <td style="text-align:right;">{matched}</td>
+                <td style="text-align:right;">{unmatched}</td>
+                <td style="text-align:right;">{match_rate:.1f}%</td>
+                <td style="text-align:right;">{yam_cls}</td>
+                <td style="text-align:right;">{yam_acc:.1f}%</td>
+                <td style="font-size:12px;">{top_gt}</td>
+            </tr>"""
+
+            bar_labels.append(label)
+            bar_total.append(total)
+            bar_matched.append(matched)
+            bar_unmatched.append(unmatched)
+
+        import json as _json
+        chart_data = _json.dumps({
+            'labels':    bar_labels,
+            'matched':   bar_matched,
+            'unmatched': bar_unmatched,
+        })
+
+        html_parts.append(f"""
+    <div class="section">
+        <h2>🔢 Concurrent Source Analysis</h2>
+        <p style="color:#555;">For each detection event, shows how many GT sources
+        were <em>simultaneously active</em> at that moment.  A high false-positive
+        rate in busy scenes (Double / Triple) usually means the classifier confuses
+        overlapping sources rather than missing isolated ones.</p>
+
+        <table>
+            <tr>
+                <th>Concurrency</th>
+                <th style="text-align:right;">Total Events</th>
+                <th style="text-align:right;">Matched</th>
+                <th style="text-align:right;">Unmatched</th>
+                <th style="text-align:right;">Match Rate</th>
+                <th style="text-align:right;">Model Classified</th>
+                <th style="text-align:right;">Model Accuracy</th>
+                <th>Top GT Labels (matched)</th>
+            </tr>
+            {rows_html}
+        </table>
+
+        <div id="concurrency_chart" style="margin-top:20px;"></div>
+    </div>
+""")
+
+        # Plotly stacked bar chart
+        html_parts.append(f"""
+    <script>
+    (function() {{
+        var d = {chart_data};
+        Plotly.newPlot('concurrency_chart', [
+            {{
+                x: d.labels,
+                y: d.matched,
+                name: 'Matched (GT)',
+                type: 'bar',
+                marker: {{color: '#2ecc71'}}
+            }},
+            {{
+                x: d.labels,
+                y: d.unmatched,
+                name: 'Unmatched',
+                type: 'bar',
+                marker: {{color: '#e74c3c'}}
+            }}
+        ], {{
+            barmode: 'stack',
+            title: 'Detection Counts by Source Concurrency',
+            xaxis: {{title: 'Simultaneous Active GT Sources'}},
+            yaxis: {{title: 'Detection Events'}},
+            legend: {{orientation: 'h', y: -0.2}},
+            margin: {{t: 50, b: 100}}
+        }});
+    }})();
+    </script>
+""")
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Distance analysis helper
+    # ──────────────────────────────────────────────────────────────────────
+
+    _DIST_BUCKETS = [
+        (0,   10,  '< 10 m'),
+        (10,  25,  '10 – 25 m'),
+        (25,  50,  '25 – 50 m'),
+        (50,  100, '50 – 100 m'),
+        (100, 200, '100 – 200 m'),
+        (200, 9999,'> 200 m'),
+    ]
+
+    def _add_distance_analysis_section(self, html_parts, results):
+        """
+        Append an HTML section showing detection + accuracy stats broken down
+        by the physical distance of the GT source from the microphone array.
+        Only GT-matched detections have a known source position; unmatched
+        detections are shown as a separate total row.
+        """
+        import math
+        from collections import Counter
+
+        matches   = results['matches']
+        gt_matches = [m for m in matches if m.get('match_type') == 'ground_truth'
+                      and m.get('source_position') and len(m['source_position']) == 3]
+        if not gt_matches:
+            return
+
+        # Build per-bucket stats
+        bucket_stats = []
+        for lo, hi, label in self._DIST_BUCKETS:
+            bm = [m for m in gt_matches
+                  if lo <= math.sqrt(sum(x**2 for x in m['source_position'])) < hi]
+            if not bm:
+                continue
+            dists      = [math.sqrt(sum(x**2 for x in m['source_position'])) for m in bm]
+            errs       = [m.get('angular_error', 0) for m in bm]
+            # "classified" = has a non-empty model_prediction
+            classified = [m for m in bm if m.get('model_prediction') not in (None, 'unclassified', '')]
+            correct    = sum(1 for m in classified
+                             if m.get('model_prediction') == m.get('source_label'))
+            top_labels = Counter(m.get('source_label', '?') for m in bm).most_common(3)
+            bucket_stats.append({
+                'label'      : label,
+                'lo': lo, 'hi': hi,
+                'n'          : len(bm),
+                'avg_dist'   : sum(dists) / len(dists),
+                'avg_err'    : sum(errs) / len(errs),
+                'max_err'    : max(errs),
+                'classified' : len(classified),
+                'correct'    : correct,
+                'acc'        : correct / len(classified) * 100 if classified else 0.0,
+                'top_labels' : ', '.join(f'{l}×{c}' for l, c in top_labels),
+            })
+
+        if not bucket_stats:
+            return
+
+        # ── Table ─────────────────────────────────────────────────────────
+        rows_html = ''
+        # colour gradient: near=green, far=red
+        colours = ['#27ae60','#2ecc71','#f39c12','#e67e22','#e74c3c','#c0392b']
+        for i, b in enumerate(bucket_stats):
+            col = colours[min(i, len(colours)-1)]
+            rows_html += f"""
+            <tr>
+                <td><span style="color:{col};font-weight:bold;">{b['label']}</span></td>
+                <td style="text-align:right;">{b['n']}</td>
+                <td style="text-align:right;">{b['avg_dist']:.0f} m</td>
+                <td style="text-align:right;">{b['avg_err']:.1f}°</td>
+                <td style="text-align:right;">{b['max_err']:.1f}°</td>
+                <td style="text-align:right;">{b['classified']}</td>
+                <td style="text-align:right;">{b['acc']:.1f}%</td>
+                <td style="font-size:12px;">{b['top_labels']}</td>
+            </tr>"""
+
+        # ── Plotly data ────────────────────────────────────────────────────
+        import json as _json
+        labels    = [b['label']   for b in bucket_stats]
+        n_vals    = [b['n']       for b in bucket_stats]
+        err_vals  = [b['avg_err'] for b in bucket_stats]
+        acc_vals  = [b['acc']     for b in bucket_stats]
+        chart_data = _json.dumps({'labels': labels, 'n': n_vals,
+                                  'err': err_vals, 'acc': acc_vals})
+
+        html_parts.append(f"""
+    <div class="section">
+        <h2>📏 Distance Analysis</h2>
+        <p style="color:#555;">Detection and classification performance broken
+        down by the physical distance from the microphone array to the GT source.
+        Only spatially-matched (GT) events have a known distance.</p>
+
+        <table>
+            <tr>
+                <th>Distance Band</th>
+                <th style="text-align:right;">GT Events</th>
+                <th style="text-align:right;">Avg Dist</th>
+                <th style="text-align:right;">Avg Ang Err</th>
+                <th style="text-align:right;">Max Ang Err</th>
+                <th style="text-align:right;">Classified</th>
+                <th style="text-align:right;">Model Accuracy</th>
+                <th>Top GT Classes</th>
+            </tr>
+            {rows_html}
+        </table>
+
+        <div id="distance_chart" style="margin-top:20px;"></div>
+    </div>
+""")
+
+        html_parts.append(f"""
+    <script>
+    (function() {{
+        var d = {chart_data};
+        var t1 = {{
+            x: d.labels, y: d.n,
+            name: 'GT matched events',
+            type: 'bar',
+            marker: {{color: '#3498db'}},
+            yaxis: 'y'
+        }};
+        var t2 = {{
+            x: d.labels, y: d.err,
+            name: 'Avg angular error (°)',
+            type: 'scatter', mode: 'lines+markers',
+            marker: {{color: '#e74c3c', size: 8}},
+            line: {{width: 2}},
+            yaxis: 'y2'
+        }};
+        var t3 = {{
+            x: d.labels, y: d.acc,
+            name: 'Model accuracy (%)',
+            type: 'scatter', mode: 'lines+markers',
+            marker: {{color: '#2ecc71', size: 8}},
+            line: {{width: 2, dash: 'dash'}},
+            yaxis: 'y2'
+        }};
+        Plotly.newPlot('distance_chart', [t1, t2, t3], {{
+            title: 'Detection Count · Angular Error · YAMNet Accuracy vs Distance',
+            xaxis: {{title: 'Distance from microphone array'}},
+            yaxis: {{title: 'GT Matched Events', side: 'left'}},
+            yaxis2: {{title: 'Degrees / Accuracy %', overlaying: 'y', side: 'right',
+                      range: [0, 100]}},
+            legend: {{orientation: 'h', y: -0.25}},
+            margin: {{t: 50, b: 120}}
+        }});
+    }})();
+    </script>
+""")
+
     def _save_analysis(self, run_id, results, angle_threshold):
         """Save analysis results to JSON"""
         analysis_path = self._get_analysis_path(run_id)
@@ -1554,775 +1922,1096 @@ class ResultAnalyzer:
         
         st.success(f"📊 Generated interactive report: {report_path.name}")
     
-    def _create_plotly_report(self, results):
-        """Create comprehensive Plotly-based HTML report"""
-        
-        # Extract data
-        matches = results['matches']
-        unmatched = results['unmatched']
-        summary = results['summary']
-        by_source = results['by_source']
-        scene = results['scene']
-        sources = scene.get('directional_sources', [])
-        
-        # Create HTML structure
+    def _create_plotly_report(self, results):  # noqa: C901
+        """
+        Build a clean, comprehensive HTML analysis dashboard.
+
+        Sections
+        --------
+        0  Header  +  KPI cards
+        1  ODAS Detection Quality   – event-level detection rate, angular error
+        2  Distance Analysis        – detection / accuracy vs source distance
+        3  Simultaneous Sources     – existing concurrent-source section
+        4  Timing                   – latency + patch-quality breakdown
+        5  Model Classification     – confusion matrix, per-source accuracy
+        6  Detection Timeline       – scrollable frame-by-frame slider
+        """
+        import math as _math
+        from collections import Counter, defaultdict
+
+        # ── Normalise match records ───────────────────────────────────────────
+        # In-memory results (from _analyze_run) store the GT label as m['label'].
+        # Saved-JSON results (loaded from analysis_*.json) store it as
+        # m['source_label'] (written by _build_match_record).
+        # Similarly, the in-memory version nests the detection dict as
+        # m['detection'], while the saved version flattens it into top-level
+        # keys (timestamp, position, confidence, …).
+        # Normalise to the saved-JSON convention so the rest of the report only
+        # needs to look at one set of key names.
+        def _norm(m):
+            # ── source_label ─────────────────────────────────────────────────
+            # In-memory uses 'label'; saved JSON uses 'source_label'.
+            if 'source_label' not in m:
+                m['source_label'] = m.get('label', '')
+
+            # ── Flatten m['detection'] and m['source'] sub-dicts ─────────────
+            # In-memory records nest raw ODAS fields under m['detection'] and
+            # GT metadata under m['source'].  _build_match_record flattens all
+            # of these to top-level keys when saving to JSON.  We replicate
+            # that flattening here so the rest of the report only needs one
+            # set of key names.
+            if 'detection' in m and 'timestamp' not in m:
+                det = m['detection']
+                src = m.get('source') or {}
+
+                ts = float(det.get('timestamp', 0))
+                fc = int(det.get('frame_count', 0))
+
+                # ODAS detection fields
+                m['timestamp'] = ts
+                m['position']  = [det.get('x', 0), det.get('y', 0), det.get('z', 0)]
+                m['activity']  = det.get('activity', 0)
+                # 'confidence' is the spatial+temporal combined score already
+                # at top-level for in-memory records; don't overwrite it.
+                m.setdefault('confidence', 0.0)
+
+                # GT window bounds (critical for event-level detection rate)
+                gt_start = float(src.get('start_time', ts))
+                gt_end   = float(src.get('end_time',   ts))
+                m.setdefault('gt_start', gt_start)
+                m.setdefault('gt_end',   gt_end)
+
+                # Source 3-D position (needed for distance analysis)
+                if 'source_position' not in m and src:
+                    sp = src.get('position')
+                    if sp is None:
+                        sp = [src.get('x', 0), src.get('y', 0), src.get('z', 0)]
+                    m['source_position'] = [float(x) for x in sp]
+
+                # Detection latency & patch quality
+                if 'detection_latency' not in m:
+                    track_start = ts - fc * 0.008
+                    gt_dur = max(gt_end - gt_start, 1e-6)
+                    patch_overlap_s = max(0.0, min(ts, gt_end) - max(track_start, gt_start))
+                    m['track_start']       = round(track_start, 4)
+                    m['detection_latency'] = round(max(0.0, track_start - gt_end), 4)
+                    m['patch_gt_overlap']  = round(patch_overlap_s / gt_dur, 4)
+                    if track_start < gt_start:
+                        m['patch_quality'] = 'pre_gt'
+                    elif track_start <= gt_end:
+                        m['patch_quality'] = 'during_gt'
+                    else:
+                        m['patch_quality'] = 'post_gt'
+
+            # model_prediction — same key in both in-memory and saved JSON ✓
+            return m
+
+        for _m in results.get('matches', []):
+            _norm(_m)
+        for _m in results.get('unmatched', []):
+            _norm(_m)
+
+        # ── Unpack ───────────────────────────────────────────────────────────
+        run_id      = results.get('run_id', '')
+        scene_name  = results.get('scene_name', '')
+        render_id   = results.get('render_id', '')
+        timestamp   = results.get('created_at', results.get('timestamp', ''))
+        cfg         = results.get('config', {})
+        summary     = results.get('summary', {})
+        by_source   = results.get('by_source', {})
+        matches     = results['matches']
+
+        gt_matches  = [m for m in matches if m.get('match_type') == 'ground_truth']
+        fp_matches  = [m for m in matches if m.get('match_type') != 'ground_truth']
+
+        # ── Load render sidecar for GT event counts ───────────────────────────
+        render_path = self.base_output_dir / 'renders' / f'{render_id}.json'
+        total_gt_by_label = {}
+        total_gt = 0
+        scene_duration = summary.get('time_span_seconds', 60.0)
+        try:
+            rdata = json.loads(render_path.read_text())
+            scene_duration = rdata.get('duration', scene_duration)
+            for s in rdata.get('source_sidecars', []):
+                lbl = s.get('label', '?')
+                total_gt_by_label[lbl] = total_gt_by_label.get(lbl, 0) + 1
+            total_gt = sum(total_gt_by_label.values())
+        except Exception:
+            pass
+
+        # ── GT event-level detection rate ─────────────────────────────────────
+        det_windows = defaultdict(set)
+        for m in gt_matches:
+            det_windows[m['source_label']].add(
+                (m['source_label'], round(m.get('gt_start', 0), 1))
+            )
+        detected_event_count = sum(len(v) for v in det_windows.values())
+        missed_event_count   = max(total_gt - detected_event_count, 0)
+        odas_det_rate        = (detected_event_count / total_gt * 100
+                                if total_gt else 0.0)
+        fp_rate              = (len(fp_matches) / len(matches) * 100
+                                if matches else 0.0)
+
+        # ── Angular error stats ───────────────────────────────────────────────
+        errs      = [m['angular_error'] for m in gt_matches
+                     if m.get('angular_error') is not None]
+        avg_err   = sum(errs) / len(errs) if errs else 0.0
+        within_5  = (sum(1 for e in errs if e < 5)  / len(errs) * 100) if errs else 0
+        within_10 = (sum(1 for e in errs if e < 10) / len(errs) * 100) if errs else 0
+
+        # ── Model accuracy ────────────────────────────────────────────────────
+        pred_m     = [m for m in gt_matches
+                      if m.get('model_prediction') not in (None, 'unclassified', '')]
+        correct_m  = [m for m in pred_m
+                      if m['model_prediction'] == m['source_label']]
+        model_acc  = len(correct_m) / len(pred_m) * 100 if pred_m else 0.0
+
+        # ── Latency ───────────────────────────────────────────────────────────
+        lats    = [m['detection_latency'] for m in gt_matches
+                   if m.get('detection_latency') is not None]
+        avg_lat = sum(lats) / len(lats) if lats else 0.0
+
+        # ── Helpers ───────────────────────────────────────────────────────────
+        def pill(val, good, mid, fmt='%d%%'):
+            cls = 'green' if val >= good else 'amber' if val >= mid else 'red'
+            return f'<span class="pill {cls}">{fmt % val}</span>'
+
+        def kpi_cls(val, good, mid):
+            return 'green' if val >= good else 'amber' if val >= mid else 'red'
+
+        # ═══════════════════════════════════════════════════════════════════════
         html_parts = []
-        
-        # Header
-        html_parts.append(f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>ODAS Analysis Report - {results['run_id']}</title>
-    <script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
-    <style>
-        body {{ 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            margin: 20px;
-            background: #f5f5f5;
-        }}
-        .header {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        }}
-        .header h1 {{ margin: 0 0 10px 0; }}
-        .header .info {{ opacity: 0.9; font-size: 14px; }}
-        .section {{
-            background: white;
-            padding: 20px;
-            margin: 20px 0;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }}
-        .stats-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin: 20px 0;
-        }}
-        .stat-card {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 20px;
-            border-radius: 8px;
-            text-align: center;
-        }}
-        .stat-value {{ font-size: 32px; font-weight: bold; margin: 10px 0; }}
-        .stat-label {{ font-size: 14px; opacity: 0.9; }}
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin: 20px 0;
-        }}
-        th, td {{
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid #ddd;
-        }}
-        th {{
-            background: #667eea;
-            color: white;
-        }}
-        tr:hover {{ background: #f5f5f5; }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>🎯 ODAS Detection Analysis Report</h1>
-        <div class="info">
-            <strong>Run ID:</strong> {results['run_id']}<br>
-            <strong>Scene:</strong> {results['scene_name']}<br>
-            <strong>Render ID:</strong> {results['render_id']}<br>
-            <strong>Analysis Time:</strong> {results['timestamp']}<br>
-            <strong>Angular Threshold:</strong> {results['config']['angular_threshold']}°
-        </div>
-    </div>
-    
-    <div class="section">
-        <h2>📊 Summary Statistics</h2>
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-label">Total Detections</div>
-                <div class="stat-value">{summary['total_detections']}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Match Rate</div>
-                <div class="stat-value">{summary['match_rate']*100:.1f}%</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Avg Angular Error</div>
-                <div class="stat-value">{summary['avg_angular_error']:.2f}°</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Avg Confidence</div>
-                <div class="stat-value">{summary.get('avg_confidence', 0):.3f}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Time Span</div>
-                <div class="stat-value">{summary['time_span_seconds']:.1f}s</div>
-            </div>
-        </div>
-    </div>
-""")
-        
-        # Per-source statistics table
-        if by_source:
-            html_parts.append("""
-    <div class="section">
-        <h2>📈 Per-Source Statistics</h2>
-        <table>
-            <tr>
-                <th>Source Label</th>
-                <th>Detections</th>
-                <th>Avg Error (°)</th>
-                <th>Min Error (°)</th>
-                <th>Max Error (°)</th>
-                <th>Std Dev (°)</th>
-                <th>Avg Confidence</th>
-                <th>Min Confidence</th>
-                <th>Max Confidence</th>
-            </tr>
-""")
-            for label, stats in by_source.items():
-                html_parts.append(f"""
-            <tr>
-                <td><strong>{label}</strong></td>
-                <td>{stats['detections']}</td>
-                <td>{stats['avg_error']:.2f}</td>
-                <td>{stats['min_error']:.2f}</td>
-                <td>{stats['max_error']:.2f}</td>
-                <td>{stats['std_error']:.2f}</td>
-                <td>{stats.get('avg_confidence', 0):.3f}</td>
-                <td>{stats.get('min_confidence', 0):.3f}</td>
-                <td>{stats.get('max_confidence', 0):.3f}</td>
-            </tr>
-""")
-            html_parts.append("        </table>\n    </div>\n")
-        
-        # YAMNet Classification Statistics
-        # Use yamnet_class/yamnet_confidence from match dict — set by
-        # _apply_yamnet_classifications(), which already prefers event_* fields.
-        classified_matches = [m for m in matches
-                              if m.get('yamnet_class', 'unclassified') not in ('unclassified', '', None)
-                              and m.get('yamnet_id', -1) != -1]
-        if classified_matches:
-            # Calculate classification statistics
-            class_counts = {}
-            class_confidences = {}
-            class_votes    = {}   # event_votes per class (0 for legacy firmware)
-            for m in classified_matches:
-                cname = m.get('yamnet_class', 'unknown')
-                votes = m.get('yamnet_votes', 0)
-                class_counts[cname] = class_counts.get(cname, 0) + 1
-                if cname not in class_confidences:
-                    class_confidences[cname] = []
-                    class_votes[cname]       = []
-                class_confidences[cname].append(m.get('yamnet_confidence', 0))
-                class_votes[cname].append(votes)
 
-            avg_class_conf = np.mean([m.get('yamnet_confidence', 0) for m in classified_matches])
-            has_votes = any(m.get('yamnet_votes', 0) > 0 for m in classified_matches)
+        # ── Stylesheet ────────────────────────────────────────────────────────
+        html_parts.append(f"""<!DOCTYPE html>
+<html><head>
+  <meta charset="utf-8">
+  <title>ODAS Analysis — {run_id}</title>
+  <script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
+  <style>
+    *{{box-sizing:border-box;margin:0;padding:0;}}
+    body{{font-family:'Segoe UI',sans-serif;background:#f0f2f5;color:#2d3436;}}
+    .page{{max-width:1440px;margin:0 auto;padding:20px 24px;}}
 
-            mode_label = '6-hop Rolling Mode' if has_votes else 'Single-hop'
-            html_parts.append(f"""
-    <div class="section">
-        <h2>🎯 YAMNet Classification Statistics <small style="font-size:13px;color:#888;">({mode_label})</small></h2>
-        <div class="stats-grid">
-            <div class="stat-card" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">  
-                <div class="stat-label">Classified Events</div>
-                <div class="stat-value">{len(classified_matches)}</div>
-            </div>
-            <div class="stat-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">  
-                <div class="stat-label">Unique Classes</div>
-                <div class="stat-value">{len(class_counts)}</div>
-            </div>
-            <div class="stat-card" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">  
-                <div class="stat-label">Avg Confidence</div>
-                <div class="stat-value">{avg_class_conf:.3f}</div>
-            </div>
-            {f'<div class="stat-card" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);">' if has_votes else ''}
-            {f'<div class="stat-label">Avg Votes / Event</div><div class="stat-value">{np.mean([m.get("yamnet_votes",0) for m in classified_matches]):.1f} / 6</div></div>' if has_votes else ''}
-        </div>
-        
-        <h3>Classification Distribution</h3>
-        <table>
-            <tr>
-                <th>Class Name</th>
-                <th>Events</th>
-                <th>%</th>
-                <th>Avg Conf</th>
-                <th>Min Conf</th>
-                <th>Max Conf</th>
-                {'<th>Avg Votes</th>' if has_votes else ''}
-            </tr>
-""")
-            for cname, count in sorted(class_counts.items(), key=lambda x: x[1], reverse=True):
-                percentage = (count / len(classified_matches)) * 100
-                avg_conf = np.mean(class_confidences[cname])
-                min_conf = np.min(class_confidences[cname])
-                max_conf = np.max(class_confidences[cname])
-                avg_v    = np.mean(class_votes[cname]) if has_votes else 0
-                votes_cell = f'<td>{avg_v:.1f} / 6</td>' if has_votes else ''
-                html_parts.append(f"""
-            <tr>
-                <td><strong>{cname}</strong></td>
-                <td>{count}</td>
-                <td>{percentage:.1f}%</td>
-                <td>{avg_conf:.3f}</td>
-                <td>{min_conf:.3f}</td>
-                <td>{max_conf:.3f}</td>
-                {votes_cell}
-            </tr>
-""")
-            html_parts.append("""
-        </table>
-    </div>
-""")
-        
-        # Time-based comparison table with slider
-        html_parts.append("""
-    <div class="section">
-        <h2>🔍 Detection Comparison by Time</h2>
-        <p>Use the slider to select a timestamp and see ground truth sources vs detected peaks</p>
-        <div style="margin: 20px 0;">
-            <label for="timeSlider" style="font-weight: bold;">Time (seconds): <span id="timeValue">0.00</span></label><br>
-            <input type="range" id="timeSlider" min="0" max="10" step="0.1" value="0" style="width: 100%; margin: 10px 0;">
-        </div>
-        <div id="comparisonTable"></div>
-    </div>
-""")
-        
-        # 3D Spatial views
-        html_parts.append('    <div class="section">\n        <h2>🌐 3D Spatial Distribution</h2>\n        <div id="spatial3d"></div>\n    </div>\n')
-        
-        # Error distribution
-        html_parts.append('    <div class="section">\n        <h2>📉 Angular Error Distribution</h2>\n        <div id="error_dist"></div>\n    </div>\n')
-        
-        # JavaScript for plots
-        html_parts.append("\n    <script>\n")
-        
-        # 3D Spatial plot
-        spatial_traces = []
-        
-        # Ground truth sources - handle both position array and x/y/z fields
-        # Normalize to unit vectors for comparison with ODAS detections
-        src_x = []
-        src_y = []
-        src_z = []
-        src_labels = [s['label'] for s in sources]
-        
-        for s in sources:
-            if 'position' in s:
-                pos = s['position']
-            else:
-                pos = [s.get('x', 0), s.get('y', 0), s.get('z', 0)]
-            
-            # Normalize to unit vector
-            magnitude = (pos[0]**2 + pos[1]**2 + pos[2]**2)**0.5
-            if magnitude > 0:
-                src_x.append(pos[0] / magnitude)
-                src_y.append(pos[1] / magnitude)
-                src_z.append(pos[2] / magnitude)
-            else:
-                src_x.append(0)
-                src_y.append(0)
-                src_z.append(0)
-        
-        spatial_traces.append({
-            'x': src_x,
-            'y': src_y,
-            'z': src_z,
-            'mode': 'markers+text',
-            'name': 'Ground Truth',
-            'marker': {'size': 12, 'color': 'gold', 'symbol': 'diamond'},
-            'text': src_labels,
-            'textposition': 'top center',
-            'hovertemplate': '<b>%{text}</b><br>(%{x:.2f}, %{y:.2f}, %{z:.2f})<extra></extra>'
-        })
-        
-        # Matched detections (colored by source)
-        # Group matches by label
-        labels_in_matches = set(m['label'] for m in matches)
-        for label in labels_in_matches:
-            matched_for_label = [m for m in matches if m['label'] == label]
-            det_x = [m['detection']['x'] for m in matched_for_label]
-            det_y = [m['detection']['y'] for m in matched_for_label]
-            det_z = [m['detection']['z'] for m in matched_for_label]
-            
-            # Different styling for 'unknown'
-            if label == 'unknown':
-                spatial_traces.append({
-                    'x': det_x,
-                    'y': det_y,
-                    'z': det_z,
-                    'mode': 'markers',
-                    'name': 'Unknown',
-                    'marker': {'size': 4, 'color': 'red', 'symbol': 'x', 'opacity': 0.6},
-                    'hovertemplate': '<b>Unknown</b><br>(%{x:.2f}, %{y:.2f}, %{z:.2f})<extra></extra>'
-                })
-            else:
-                errors = [m['angular_error'] for m in matched_for_label]
-                confidences = [m['confidence'] for m in matched_for_label]
-                spatial_traces.append({
-                    'x': det_x,
-                    'y': det_y,
-                    'z': det_z,
-                    'mode': 'markers',
-                    'name': f'{label} (det)',
-                    'marker': {'size': 4, 'opacity': 0.6},
-                    'text': [f"Error: {e:.2f}°<br>Conf: {c:.3f}" if e is not None else f"Conf: {c:.3f}" for e, c in zip(errors, confidences)],
-                    'hovertemplate': f'<b>{label}</b><br>(%{{x:.2f}}, %{{y:.2f}}, %{{z:.2f}})<br>%{{text}}<extra></extra>'
-                })
-        
-        # Remove old unmatched block since they're now in matches as 'unknown'
-        
-        # Add mic array at origin
-        spatial_traces.append({
-            'x': [0],
-            'y': [0],
-            'z': [0],
-            'mode': 'markers',
-            'name': 'Mic Array',
-            'marker': {'size': 10, 'color': 'black', 'symbol': 'square'},
-            'hovertemplate': '<b>Mic Array</b><br>(0, 0, 0)<extra></extra>'
-        })
-        
-        html_parts.append(f"""
-        var spatialData = {json.dumps(spatial_traces)};
-        var spatialLayout = {{
-            title: '3D Spatial Distribution',
-            scene: {{
-                xaxis: {{ title: 'X (m)' }},
-                yaxis: {{ title: 'Y (m)' }},
-                zaxis: {{ title: 'Z (m)' }},
-                aspectmode: 'cube'
-            }},
-            height: 700
-        }};
-        Plotly.newPlot('spatial3d', spatialData, spatialLayout);
-""")
-        
-        # Error distribution histogram (only for matched sources, not unknown)
-        matched_to_sources = [m for m in matches if m['label'] != 'unknown']
-        if matched_to_sources:
-            all_errors = [m['angular_error'] for m in matched_to_sources]
-            html_parts.append(f"""
-        var errorData = [{{
-            x: {json.dumps(all_errors)},
-            type: 'histogram',
-            name: 'Angular Errors',
-            marker: {{ color: '#667eea' }},
-            nbinsx: 30
-        }}];
-        var errorLayout = {{
-            title: 'Angular Error Distribution (Matched Sources Only)',
-            xaxis: {{ title: 'Angular Error (degrees)' }},
-            yaxis: {{ title: 'Frequency' }},
-            height: 400
-        }};
-        Plotly.newPlot('error_dist', errorData, errorLayout);
-""")
-        
-        # Add time slider logic for comparison table
-        # Get scene duration
-        scene_duration = scene.get('duration', 10.0)
-        
-        # Create data structure for comparison table - cover full time range
-        comparison_data = {}
-        
-        # Create entries for every 0.1s in the full duration
-        for i in range(int(scene_duration * 10) + 1):
-            time_key = round(i * 0.1, 1)
-            comparison_data[time_key] = {'sources': [], 'detections': []}
-        
-        # Add ground truth sources active at each time
-        for src in sources:
-            src_start = src.get('start_time', 0)
-            src_end = src.get('end_time', float('inf'))
-            src_label = src.get('label', 'unknown')
-            
-            if 'position' in src:
-                src_pos = src['position']
-            else:
-                src_pos = [src.get('x', 0), src.get('y', 0), src.get('z', 0)]
-            
-            # Normalize to unit vector for comparison with ODAS output
-            magnitude = (src_pos[0]**2 + src_pos[1]**2 + src_pos[2]**2)**0.5
-            if magnitude > 0:
-                src_x_norm = src_pos[0] / magnitude
-                src_y_norm = src_pos[1] / magnitude
-                src_z_norm = src_pos[2] / magnitude
-            else:
-                src_x_norm = src_y_norm = src_z_norm = 0
-            
-            for time_key in comparison_data.keys():
-                if src_start <= time_key <= src_end:
-                    comparison_data[time_key]['sources'].append({
-                        'label': src_label,
-                        'x': src_x_norm,
-                        'y': src_y_norm,
-                        'z': src_z_norm,
-                        'x_orig': src_pos[0],
-                        'y_orig': src_pos[1],
-                        'z_orig': src_pos[2]
-                    })
-        
-        # Add detections (all are now in matches, whether matched to source or unknown)
-        for match in matches:
-            # Handle both full results structure and saved JSON structure
-            if 'detection' in match:
-                # Full results structure (in-memory)
-                det = match['detection']
-                det_x = det['x']
-                det_y = det['y']
-                det_z = det['z']
-                det_timestamp = det['timestamp']
-                det_activity = det.get('activity', 0)
-            else:
-                # Saved JSON structure (flattened)
-                det_x = match['position'][0]
-                det_y = match['position'][1]
-                det_z = match['position'][2]
-                det_timestamp = match['timestamp']
-                det_activity = match['activity']
-            
-            time_key = round(det_timestamp, 1)
-            if time_key in comparison_data:
-                det_type = 'matched' if match.get('source_label', match.get('label', 'unknown')) != 'unknown' else 'unmatched'
-                detection_entry = {
-                    'type': det_type,
-                    'label': match.get('source_label', match.get('label', 'unknown')),
-                    'x': det_x,
-                    'y': det_y,
-                    'z': det_z,
-                    'error': match.get('angular_error'),
-                    'confidence': match.get('confidence', 0),
-                    'activity': det_activity
-                }
-                
-                # Add YAMNet classification info if available
-                if 'yamnet_class' in match and match['yamnet_class']:
-                    detection_entry['yamnet_class'] = match['yamnet_class']
-                    detection_entry['yamnet_confidence'] = match.get('yamnet_confidence', 0)
-                    detection_entry['yamnet_votes'] = match.get('yamnet_votes', 0)
-                    detection_entry['match_type'] = match.get('match_type', 'ground_truth')
-                
-                comparison_data[time_key]['detections'].append(detection_entry)
-        
-        html_parts.append(f"""
-        // Time slider for comparison table
-        var comparisonData = {json.dumps(self._convert_to_native(comparison_data))};
-        var timeSlider = document.getElementById('timeSlider');
-        var timeValue = document.getElementById('timeValue');
-        var comparisonTable = document.getElementById('comparisonTable');
-        
-        // Set slider range based on actual data
-        var times = Object.keys(comparisonData).map(parseFloat).sort((a,b) => a-b);
-        if (times.length > 0) {{
-            timeSlider.min = times[0];
-            timeSlider.max = times[times.length - 1];
-            timeSlider.value = times[0];
-        }}
-        
-        function updateComparisonTable(time) {{
-            timeValue.textContent = parseFloat(time).toFixed(2);
-            
-            // Find closest time key
-            var timeKey = parseFloat(time).toFixed(1);
-            var data = comparisonData[timeKey];
-            
-            if (!data) {{
-                comparisonTable.innerHTML = '<p style="color: #666;">No data at this timestamp</p>';
-                return;
-            }}
-            
-            var html = '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">';
-            
-            // Ground truth sources
-            html += '<div>';
-            html += '<h3 style="color: #667eea;">Ground Truth Sources</h3>';
-            if (data.sources.length === 0) {{
-                html += '<p style="color: #666;">No active sources at this time</p>';
-            }} else {{
-                html += '<table style="width: 100%; margin-top: 10px;">';
-                html += '<tr style="background: #667eea; color: white;"><th>Label</th><th>X (unit)</th><th>Y (unit)</th><th>Z (unit)</th><th>Position (m)</th></tr>';
-                data.sources.forEach(function(src) {{
-                    html += '<tr>';
-                    html += '<td><strong>' + src.label + '</strong></td>';
-                    html += '<td>' + src.x.toFixed(3) + '</td>';
-                    html += '<td>' + src.y.toFixed(3) + '</td>';
-                    html += '<td>' + src.z.toFixed(3) + '</td>';
-                    html += '<td>(' + src.x_orig.toFixed(1) + ', ' + src.y_orig.toFixed(1) + ', ' + src.z_orig.toFixed(1) + ')</td>';
-                    html += '</tr>';
-                }});
-                html += '</table>';
-            }}
-            html += '</div>';
-            
-            // Detected peaks
-            html += '<div>';
-            html += '<h3 style="color: #4CAF50;">Detected Peaks</h3>';
-            if (data.detections.length === 0) {{
-                html += '<p style="color: #666;">No detections at this time</p>';
-            }} else {{
-                html += '<table style="width: 100%; margin-top: 10px; font-size: 12px;">';
-                html += '<tr style="background: #4CAF50; color: white;">';
-                html += '<th>GT Label</th><th>YAMNet</th><th>X</th><th>Y</th><th>Z</th><th>Error</th><th>Conf</th><th>Activity</th><th>Type</th>';
-                html += '</tr>';
-                data.detections.forEach(function(det) {{
-                    var rowColor = det.type === 'matched' ? '' : 'background: #ffebee;';
-                    
-                    // Highlight mismatch between GT and YAMNet prediction
-                    if (det.yamnet_class && det.label !== det.yamnet_class && det.label !== 'unknown') {{
-                        rowColor = 'background: #fff3cd; border-left: 4px solid #ff9800;';
-                    }}
-                    
-                    html += '<tr style="' + rowColor + '">';
-                    html += '<td><strong>' + det.label + '</strong></td>';
-                    
-                    // YAMNet prediction column
-                    if (det.yamnet_class) {{
-                        var yamnetColor = det.label === det.yamnet_class ? '#4CAF50' : '#f44336';
-                        html += '<td style="color: ' + yamnetColor + '; font-weight: bold;">' + det.yamnet_class;
-                        if (det.yamnet_confidence !== undefined) {{
-                            html += '<br><small>conf: ' + det.yamnet_confidence.toFixed(2);
-                            if (det.yamnet_votes && det.yamnet_votes > 0) {{
-                                html += ' &nbsp;·&nbsp; votes: ' + det.yamnet_votes + '/6';
-                            }}
-                            html += '</small>';
-                        }}
-                        html += '</td>';
-                    }} else {{
-                        html += '<td style="color: #999;">-</td>';
-                    }}
-                    
-                    html += '<td>' + det.x.toFixed(3) + '</td>';
-                    html += '<td>' + det.y.toFixed(3) + '</td>';
-                    html += '<td>' + det.z.toFixed(3) + '</td>';
-                    html += '<td>' + (det.error !== null && det.error !== undefined ? det.error.toFixed(2) + '°' : 'N/A') + '</td>';
-                    html += '<td>' + (det.confidence !== undefined ? det.confidence.toFixed(3) : '0.000') + '</td>';
-                    html += '<td>' + det.activity.toFixed(3) + '</td>';
-                    html += '<td style="font-size: 10px;">' + (det.match_type || det.type) + '</td>';
-                    html += '</tr>';
-                }});
-                html += '</table>';
-                
-                // Legend
-                html += '<div style="margin-top: 10px; font-size: 11px; color: #666;">';
-                html += '<strong>Legend:</strong> ';
-                html += '<span style="background: #fff3cd; padding: 2px 6px; margin: 0 4px;">⚠️ GT ≠ YAMNet</span> ';
-                html += '<span style="background: #ffebee; padding: 2px 6px; margin: 0 4px;">Unmatched</span>';
-                html += '</div>';
-            }}
-            html += '</div>';
-            
-            html += '</div>';
-            comparisonTable.innerHTML = html;
-        }}
-        
-        timeSlider.addEventListener('input', function() {{
-            updateComparisonTable(this.value);
-        }});
-        
-        // Initialize
-        updateComparisonTable(timeSlider.value);
-    </script>
-""")
-        
-        # Collect YAMNet classification data
-        # Prefer event fields (6-hop rolling mode); fall back to legacy fields.
-        yamnet_data = {}
-        for match in matches:
-            det = match['detection']
-            ev_id   = det.get('event_class_id', -1)
-            ev_name = det.get('event_class_name', 'unclassified')
-            ev_conf = det.get('event_avg_confidence', 0.0)
-            if ev_id != -1 and ev_name not in ('unclassified', ''):
-                class_name = ev_name
-                confidence = ev_conf
-            else:
-                class_name = det.get('class_name', 'unclassified')
-                confidence = det.get('class_confidence', 0.0)
-            timestamp = det['timestamp']
-            track_id = det.get('track_id', 0)
+    /* Banner */
+    .banner{{background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);
+             color:#fff;padding:26px 34px;border-radius:12px;margin-bottom:20px;}}
+    .banner h1{{font-size:21px;margin-bottom:8px;letter-spacing:.3px;}}
+    .banner .meta{{font-size:13px;opacity:.75;line-height:1.9;}}
+    .banner .meta b{{color:#f9ca24;}}
 
-            # Skip if no valid classification
-            if class_name == 'unclassified' or confidence == 0.0 or class_name == '':
+    /* KPI row */
+    .kpi-row{{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:20px;}}
+    .kpi{{background:white;border-radius:10px;padding:15px 12px;text-align:center;
+          box-shadow:0 2px 8px rgba(0,0,0,.06);border-top:4px solid #636e72;}}
+    .kpi.green{{border-top-color:#00b894;}}
+    .kpi.red{{border-top-color:#d63031;}}
+    .kpi.amber{{border-top-color:#e17055;}}
+    .kpi.blue{{border-top-color:#0984e3;}}
+    .kpi.purple{{border-top-color:#6c5ce7;}}
+    .kpi-val{{font-size:28px;font-weight:700;margin:5px 0 3px;}}
+    .kpi-lbl{{font-size:11px;color:#636e72;text-transform:uppercase;letter-spacing:.6px;}}
+    .kpi-sub{{font-size:11px;color:#b2bec3;margin-top:3px;}}
+
+    /* Cards */
+    .card{{background:white;border-radius:10px;padding:22px 26px;
+           margin-bottom:18px;box-shadow:0 2px 8px rgba(0,0,0,.06);}}
+    .card h2{{font-size:17px;margin-bottom:4px;}}
+    .card .sub{{font-size:13px;color:#636e72;margin-bottom:14px;}}
+    .two-col{{display:grid;grid-template-columns:1fr 1fr;gap:18px;}}
+    .three-col{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:18px;}}
+
+    /* Tables */
+    table{{width:100%;border-collapse:collapse;font-size:13px;margin-top:12px;}}
+    th{{background:#f8f9fa;color:#636e72;font-weight:600;text-transform:uppercase;
+        font-size:11px;letter-spacing:.5px;padding:9px 12px;
+        border-bottom:2px solid #dee2e6;text-align:left;}}
+    td{{padding:8px 12px;border-bottom:1px solid #f1f3f5;vertical-align:middle;}}
+    tr:last-child td{{border-bottom:none;}}
+    tr:hover td{{background:#f8f9fa;}}
+
+    /* Pills */
+    .pill{{display:inline-block;padding:2px 9px;border-radius:20px;
+           font-size:11px;font-weight:600;}}
+    .pill.green{{background:#d4edda;color:#155724;}}
+    .pill.red{{background:#f8d7da;color:#721c24;}}
+    .pill.amber{{background:#fff3cd;color:#856404;}}
+    .pill.blue{{background:#cce5ff;color:#004085;}}
+    .pill.grey{{background:#e9ecef;color:#495057;}}
+
+    /* Insight */
+    .insight{{background:#f0f0fe;border-left:4px solid #6c5ce7;
+              padding:10px 16px;border-radius:0 6px 6px 0;
+              font-size:13px;line-height:1.6;margin:12px 0 4px;}}
+    .insight b{{color:#6c5ce7;}}
+
+    /* Section label */
+    .sec-lbl{{font-size:11px;color:#b2bec3;text-transform:uppercase;
+              letter-spacing:1px;margin:26px 0 8px;padding-left:2px;}}
+
+    @media(max-width:900px){{
+      .kpi-row{{grid-template-columns:repeat(2,1fr);}}
+      .two-col,.three-col{{grid-template-columns:1fr;}}
+    }}
+  </style>
+</head><body><div class="page">
+
+  <!-- Banner -->
+  <div class="banner">
+    <h1>🎯 ODAS Pipeline Analysis Report</h1>
+    <div class="meta">
+      <b>Run:</b> {run_id} &nbsp;·&nbsp;
+      <b>Scene:</b> {scene_name} &nbsp;·&nbsp;
+      <b>Render:</b> {render_id}<br>
+      <b>Analysed:</b> {str(timestamp)[:19].replace('T',' ')} &nbsp;·&nbsp;
+      <b>Duration:</b> {scene_duration:.0f} s &nbsp;·&nbsp;
+      <b>Threshold:</b> {cfg.get('angular_threshold','?')}°
+    </div>
+  </div>
+""")
+
+        # ── KPI Cards ─────────────────────────────────────────────────────────
+        gt_str    = str(total_gt) if total_gt else 'N/A'
+        det_str   = f'{odas_det_rate:.0f}%' if total_gt else f"{summary.get('match_rate',0)*100:.0f}%"
+        html_parts.append(f"""
+  <!-- KPI Cards -->
+  <div class="kpi-row">
+    <div class="kpi purple">
+      <div class="kpi-lbl">GT Sound Events</div>
+      <div class="kpi-val">{gt_str}</div>
+      <div class="kpi-sub">{summary.get('unique_sources',0)} sources · {scene_duration:.0f}s</div>
+    </div>
+    <div class="kpi {kpi_cls(odas_det_rate,75,50)}">
+      <div class="kpi-lbl">ODAS Detection Rate</div>
+      <div class="kpi-val">{det_str}</div>
+      <div class="kpi-sub">{detected_event_count} detected · {missed_event_count} missed</div>
+    </div>
+    <div class="kpi {kpi_cls(100-fp_rate,60,40)}">
+      <div class="kpi-lbl">False Positive Rate</div>
+      <div class="kpi-val">{fp_rate:.0f}%</div>
+      <div class="kpi-sub">{len(fp_matches)} FP · {len(gt_matches)} GT frames</div>
+    </div>
+    <div class="kpi blue">
+      <div class="kpi-lbl">Avg Angular Error</div>
+      <div class="kpi-val">{avg_err:.1f}°</div>
+      <div class="kpi-sub">{within_5:.0f}% &lt;5° · {within_10:.0f}% &lt;10°</div>
+    </div>
+    <div class="kpi {kpi_cls(model_acc,60,30)}">
+      <div class="kpi-lbl">Model Accuracy</div>
+      <div class="kpi-val">{model_acc:.1f}%</div>
+      <div class="kpi-sub">{len(correct_m)} correct · {len(pred_m)} classified</div>
+    </div>
+  </div>
+""")
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # SECTION 1 – ODAS Detection Quality
+        # ═══════════════════════════════════════════════════════════════════════
+        all_src = sorted(set(list(total_gt_by_label.keys()) + list(by_source.keys())))
+
+        # Build per-source stats for table + chart
+        ch_labels, ch_det, ch_miss, ch_err, ch_acc = [], [], [], [], []
+        src_rows_html = ''
+        for lbl in sorted(all_src,
+                          key=lambda l: -(len(det_windows.get(l, set())) /
+                                          max(total_gt_by_label.get(l, 1), 1))):
+            gt_n  = total_gt_by_label.get(lbl, 0)
+            det_n = len(det_windows.get(lbl, set()))
+            mis_n = gt_n - det_n
+            rate  = det_n / gt_n * 100 if gt_n else 0.0
+            ae    = by_source.get(lbl, {}).get('avg_error', 0.0)
+
+            src_gt   = [m for m in gt_matches if m.get('source_label') == lbl]
+            src_pred = [m for m in src_gt
+                        if m.get('model_prediction') not in (None, 'unclassified', '')]
+            src_corr = sum(1 for m in src_pred
+                           if m['model_prediction'] == m['source_label'])
+            src_acc  = src_corr / len(src_pred) * 100 if src_pred else 0.0
+
+            p_rate = 'green' if rate >= 80 else 'amber' if rate >= 60 else 'red'
+            p_acc  = 'green' if src_acc >= 60 else 'amber' if src_acc >= 30 else 'red'
+
+            src_rows_html += f"""
+        <tr>
+          <td><b>{lbl}</b></td>
+          <td style="text-align:right">{gt_n}</td>
+          <td style="text-align:right">{det_n}</td>
+          <td style="text-align:right">{mis_n}</td>
+          <td style="text-align:right"><span class="pill {p_rate}">{rate:.0f}%</span></td>
+          <td style="text-align:right">{ae:.1f}°</td>
+          <td style="text-align:right">{len(src_gt)}</td>
+          <td style="text-align:right"><span class="pill {p_acc}">{src_acc:.1f}%</span></td>
+        </tr>"""
+
+            ch_labels.append(lbl)
+            ch_det.append(det_n)
+            ch_miss.append(mis_n)
+            ch_err.append(round(ae, 2))
+            ch_acc.append(round(src_acc, 1))
+
+        html_parts.append(f"""
+  <div class="sec-lbl">01 — ODAS Spatial Detection</div>
+  <div class="card">
+    <h2>📡 Detection Quality by Source</h2>
+    <p class="sub">How many GT sound events did ODAS spatially locate? Angular accuracy and model accuracy per source.</p>
+    <div class="two-col">
+      <div id="ch_det_rate" style="height:310px"></div>
+      <div id="ch_ang_cdf"  style="height:310px"></div>
+    </div>
+    <table>
+      <tr>
+        <th>Source</th>
+        <th style="text-align:right">GT Events</th>
+        <th style="text-align:right">Detected</th>
+        <th style="text-align:right">Missed</th>
+        <th style="text-align:right">Det. Rate</th>
+        <th style="text-align:right">Avg Ang. Err</th>
+        <th style="text-align:right">ODAS Frames</th>
+        <th style="text-align:right">Model Acc.</th>
+      </tr>
+      {src_rows_html}
+    </table>
+  </div>
+""")
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # SECTION 2 – Distance Analysis
+        # ═══════════════════════════════════════════════════════════════════════
+        DIST_BANDS = [
+            (0,   10,  '< 10 m'),
+            (10,  25,  '10–25 m'),
+            (25,  50,  '25–50 m'),
+            (50,  100, '50–100 m'),
+            (100, 200, '100–200 m'),
+            (200, 9999,'> 200 m'),
+        ]
+        def _d3(sp):
+            return _math.sqrt(sum(x**2 for x in sp)) if sp and len(sp) == 3 else None
+
+        gt_pos = [m for m in gt_matches
+                  if m.get('source_position') and len(m['source_position']) == 3]
+        dist_stats = []
+        for lo, hi, band in DIST_BANDS:
+            bm = [m for m in gt_pos if lo <= _d3(m['source_position']) < hi]
+            if not bm:
                 continue
-            
-            if class_name not in yamnet_data:
-                yamnet_data[class_name] = {
-                    'times': [],
-                    'confidences': [],
-                    'track_ids': [],
-                    'labels': []
-                }
-            
-            yamnet_data[class_name]['times'].append(timestamp)
-            yamnet_data[class_name]['confidences'].append(confidence)
-            yamnet_data[class_name]['track_ids'].append(track_id)
-            yamnet_data[class_name]['labels'].append(match.get('label', 'unknown'))
-        
-        # Only create the plot if we have YAMNet data
-        if yamnet_data:
-            html_parts.append("""
-    <div class="section">
-        <h2>🎵 YAMNet Classification Timeline</h2>
-        <p style="color: #666; margin-bottom: 15px;">
-            Audio classifications from ODAS beamformed signals. 
-            Bar height represents confidence level.
-        </p>
-        <div id="yamnet_timeline"></div>
-    </div>
-""")
-            
-            # Create unique class list and assign indices
-            unique_classes = sorted(yamnet_data.keys())
-            class_to_idx = {cls: idx for idx, cls in enumerate(unique_classes)}
-            
-            # Create traces for each class
-            yamnet_traces = []
-            colors = px.colors.qualitative.Dark24 + px.colors.qualitative.Light24
-            
-            for cls_name in unique_classes:
-                data = yamnet_data[cls_name]
-                class_idx = class_to_idx[cls_name]
-                color = colors[class_idx % len(colors)]
-                
-                # Create hover text with details
-                hover_texts = []
-                for i in range(len(data['times'])):
-                    hover_text = (
-                        f"<b>{cls_name}</b><br>"
-                        f"Time: {data['times'][i]:.2f}s<br>"
-                        f"Confidence: {data['confidences'][i]:.3f}<br>"
-                        f"Track ID: {data['track_ids'][i]}<br>"
-                        f"GT Label: {data['labels'][i]}"
-                    )
-                    hover_texts.append(hover_text)
-                
-                trace = {
-                    'x': data['times'],
-                    'y': [class_idx] * len(data['times']),
-                    'customdata': data['confidences'],
-                    'mode': 'markers',
-                    'marker': {
-                        'color': color,
-                        'size': [c * 15 + 5 for c in data['confidences']],  # Size based on confidence
-                        'opacity': [c * 0.7 + 0.3 for c in data['confidences']],  # Opacity based on confidence
-                        'line': {'color': 'white', 'width': 1}
-                    },
-                    'name': cls_name,
-                    'text': hover_texts,
-                    'hovertemplate': '%{text}<extra></extra>',
-                    'showlegend': True
-                }
-                yamnet_traces.append(trace)
-            
-            html_parts.append(f"""
-    <script>
-        var yamnetData = {json.dumps(yamnet_traces)};
-        var yamnetLayout = {{
-            title: {{
-                text: 'YAMNet Audio Classifications Over Time',
-                font: {{ size: 16, color: '#333' }}
-            }},
-            xaxis: {{ 
-                title: 'Time (seconds)',
-                showgrid: true,
-                gridcolor: '#e0e0e0'
-            }},
-            yaxis: {{ 
-                title: 'Detected Audio Class',
-                ticktext: {json.dumps(unique_classes)},
-                tickvals: {json.dumps(list(range(len(unique_classes))))},
-                showgrid: true,
-                gridcolor: '#e0e0e0'
-            }},
-            hovermode: 'closest',
-            height: {max(400, len(unique_classes) * 35)},
-            plot_bgcolor: '#fafafa',
-            paper_bgcolor: 'white',
-            margin: {{ l: 150, r: 50, t: 60, b: 60 }},
-            legend: {{
-                orientation: 'h',
-                yanchor: 'bottom',
-                y: -0.2,
-                xanchor: 'center',
-                x: 0.5
-            }}
-        }};
-        Plotly.newPlot('yamnet_timeline', yamnetData, yamnetLayout);
-    </script>
-""")
+            dists  = [_d3(m['source_position']) for m in bm]
+            b_errs = [m.get('angular_error', 0) for m in bm]
+            b_pred = [m for m in bm
+                      if m.get('model_prediction') not in (None, 'unclassified', '')]
+            b_corr = sum(1 for m in b_pred
+                         if m['model_prediction'] == m['source_label'])
+            b_lats = [m['detection_latency'] for m in bm
+                      if m.get('detection_latency') is not None]
+            top    = Counter(m.get('source_label', '?') for m in bm).most_common(3)
+            dist_stats.append({
+                'label':    band,
+                'n':        len(bm),
+                'avg_dist': sum(dists) / len(dists),
+                'avg_err':  sum(b_errs) / len(b_errs),
+                'max_err':  max(b_errs),
+                'acc':      b_corr / len(b_pred) * 100 if b_pred else 0.0,
+                'avg_lat':  sum(b_lats) / len(b_lats) if b_lats else 0.0,
+                'top':      ', '.join(f'{l}×{c}' for l, c in top),
+            })
 
-        # ── Event Votes Distribution chart (new firmware only) ────────────────
-        votes_data = []
-        for match in matches:
-            v = match.get('yamnet_votes', 0)
-            c = match.get('yamnet_class', '')
-            if v > 0 and c and c != 'unclassified':
-                votes_data.append({'votes': v, 'class': c,
-                                   'ts': match['detection']['timestamp']})
+        if dist_stats:
+            # Insight: is angular error flat or increasing with distance?
+            first_err = dist_stats[0]['avg_err']
+            last_err  = dist_stats[-1]['avg_err']
+            if last_err > first_err * 1.25:
+                insight_d = (f"⚠️ <b>Angular error grows with distance</b> — "
+                             f"{dist_stats[0]['label']} avg {first_err:.1f}° vs "
+                             f"{dist_stats[-1]['label']} avg {last_err:.1f}°. "
+                             f"Consider tightening thresholds for near sources.")
+            else:
+                insight_d = (f"✅ <b>Angular accuracy is distance-agnostic</b> — "
+                             f"error only {first_err:.1f}°–{last_err:.1f}° across all bands. "
+                             f"ODAS spatial localisation is robust to range.")
 
-        if votes_data:
-            # Histogram of vote counts (1–6) coloured by class
-            from collections import defaultdict
-            vote_by_class = defaultdict(lambda: [0]*7)  # index = vote count 0-6
-            for d in votes_data:
-                vote_by_class[d['class']][d['votes']] += 1
-
-            vote_traces = []
-            colors = px.colors.qualitative.Dark24
-            for ci, (cls, counts) in enumerate(sorted(vote_by_class.items())):
-                vote_traces.append({
-                    'x': list(range(1, 7)),
-                    'y': counts[1:7],
-                    'name': cls,
-                    'type': 'bar',
-                    'marker': {'color': colors[ci % len(colors)]},
-                    'hovertemplate': f'<b>{cls}</b><br>Votes: %{{x}}/6<br>Events: %{{y}}<extra></extra>'
-                })
+            dist_rows = ''
+            for b in dist_stats:
+                p = 'green' if b['acc'] >= 60 else 'amber' if b['acc'] >= 30 else 'red'
+                dist_rows += f"""
+        <tr>
+          <td><b>{b['label']}</b></td>
+          <td style="text-align:right">{b['n']}</td>
+          <td style="text-align:right">{b['avg_dist']:.0f} m</td>
+          <td style="text-align:right">{b['avg_err']:.1f}°</td>
+          <td style="text-align:right">{b['max_err']:.1f}°</td>
+          <td style="text-align:right">{b['avg_lat']:.2f} s</td>
+          <td style="text-align:right"><span class="pill {p}">{b['acc']:.1f}%</span></td>
+          <td style="font-size:12px">{b['top']}</td>
+        </tr>"""
 
             html_parts.append(f"""
-    <div class="section">
-        <h2>\ud83d\uddf3\ufe0f Event Votes Distribution</h2>
-        <p style="color: #666; margin-bottom: 15px;">
-            Number of events by vote count (out of 6 rolling hops).
-            Higher votes = more consistent classification over time.
-        </p>
-        <div id="votes_chart"></div>
-    </div>
-    <script>
-        var votesData = {json.dumps(vote_traces)};
-        var votesLayout = {{
-            barmode: 'stack',
-            xaxis: {{ title: 'Hop votes (out of 6)', dtick: 1 }},
-            yaxis: {{ title: 'Number of events' }},
-            height: 320,
-            plot_bgcolor: '#fafafa',
-            paper_bgcolor: 'white',
-            margin: {{ l: 60, r: 40, t: 20, b: 60 }},
-            legend: {{ orientation: 'h', yanchor: 'bottom', y: -0.4,
-                       xanchor: 'center', x: 0.5 }}
-        }};
-        Plotly.newPlot('votes_chart', votesData, votesLayout);
-    </script>
+  <div class="sec-lbl">02 — Distance Analysis</div>
+  <div class="card">
+    <h2>📏 Detection &amp; Accuracy vs Source Distance</h2>
+    <p class="sub">Does ODAS detect nearer events more reliably? Is classification accuracy distance-dependent?</p>
+    <div id="ch_dist" style="height:330px"></div>
+    <div class="insight">{insight_d}</div>
+    <table>
+      <tr>
+        <th>Distance Band</th>
+        <th style="text-align:right">GT Frames</th>
+        <th style="text-align:right">Avg Distance</th>
+        <th style="text-align:right">Avg Ang. Err</th>
+        <th style="text-align:right">Max Ang. Err</th>
+        <th style="text-align:right">Avg Latency</th>
+        <th style="text-align:right">Model Acc.</th>
+        <th>Top Sources</th>
+      </tr>
+      {dist_rows}
+    </table>
+  </div>
 """)
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # SECTION 3 – Simultaneous Sources (existing helper)
+        # ═══════════════════════════════════════════════════════════════════════
+        html_parts.append('\n  <div class="sec-lbl">03 — Simultaneous Sources</div>')
+        self._add_concurrent_source_section(html_parts, results)
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # SECTION 4 – Timing
+        # ═══════════════════════════════════════════════════════════════════════
+        pq_counts  = Counter(m.get('patch_quality') for m in gt_matches)
+        pq_labels  = [k for k, _ in pq_counts.most_common()]
+        pq_vals    = [v for _, v in pq_counts.most_common()]
+        po_vals    = [m['patch_gt_overlap'] for m in gt_matches
+                      if m.get('patch_gt_overlap') is not None]
+        avg_po     = sum(po_vals) / len(po_vals) if po_vals else 0.0
+
+        pq_desc = {
+            'during_gt': 'Detection fired while source was active',
+            'pre_gt':    'Detection arrived before source started (early ODAS)',
+            'post_gt':   'Detection arrived after source ended (Kalman tail)',
+        }
+        pq_rows = ''
+        for k, v in pq_counts.most_common():
+            p = v / len(gt_matches) * 100 if gt_matches else 0
+            pq_rows += (f'<tr><td><b>{k}</b></td>'
+                        f'<td style="text-align:right">{v}</td>'
+                        f'<td style="text-align:right">{p:.0f}%</td>'
+                        f'<td style="color:#636e72">{pq_desc.get(k,"—")}</td></tr>')
+
+        lt100 = sum(1 for l in lats if l < 0.1)
+        html_parts.append(f"""
+  <div class="sec-lbl">04 — Timing</div>
+  <div class="card">
+    <h2>⏱️ Detection Timing</h2>
+    <p class="sub">How quickly does ODAS detect events? Are detections temporally aligned with the GT windows?</p>
+    <div class="two-col">
+      <div id="ch_latency"  style="height:290px"></div>
+      <div id="ch_patch_q"  style="height:290px"></div>
+    </div>
+    <table>
+      <tr><th>Patch Quality</th><th style="text-align:right">Frames</th>
+          <th style="text-align:right">%</th><th>Meaning</th></tr>
+      {pq_rows}
+    </table>
+    <div class="insight" style="margin-top:14px">
+      <b>Avg latency:</b> {avg_lat:.2f} s &nbsp;·&nbsp;
+      <b>Within 100 ms:</b> {lt100}/{len(lats)} ({lt100/max(len(lats),1)*100:.0f}% of GT frames) &nbsp;·&nbsp;
+      <b>Avg GT overlap:</b> {avg_po:.0%}
+    </div>
+    <details style="margin-top:10px">
+      <summary style="cursor:pointer;font-size:12px;color:#6c5ce7;font-weight:600">❓ Why can ODAS detect events <em>before</em> GT start? (pre_gt frames)</summary>
+      <div class="insight" style="margin-top:8px;border-left-color:#0984e3">
+        <b>Four reasons ODAS fires before the ground-truth window opens:</b><br>
+        1. <b>Kalman noise tracking</b> — the filter continuously tracks ambient noise in all directions.
+           When a GT source activates, an existing noise track that happens to point the right way is
+           promoted rather than a new track started, so the "first seen" timestamp is earlier than GT start.<br>
+        2. <b>YAMNet 960 ms buffer</b> — ODAS waits until its rolling audio buffer is full before
+           emitting a classification.  That buffer spans up to 960 ms, so a detection reported at
+           time T contains audio from as far back as T&minus;960 ms — bridging back before GT start.<br>
+        3. <b>Room acoustics / reverb</b> — early reflections from walls can reach the mic array
+           slightly before the direct wavefront, letting ODAS lock onto the direction a fraction
+           of a second before the sound source officially begins.<br>
+        4. <b>Pre-window tolerance</b> — the matcher deliberately accepts detections
+           up to <code>time_pre</code> seconds before GT start (default 10 s) to catch exactly
+           these early starts.  Only a tiny fraction (&lt;5 %) of frames fall in this bucket.
+      </div>
+    </details>
+  </div>
+""")
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # SECTION 5 – Model Classification
+        # ═══════════════════════════════════════════════════════════════════════
+        conf_labels = sorted(
+            set(m['source_label'] for m in pred_m) |
+            set(m['model_prediction'] for m in pred_m)
+        )
+        cl_idx = {l: i for i, l in enumerate(conf_labels)}
+        conf_mat = [[0] * len(conf_labels) for _ in conf_labels]
+        for m in pred_m:
+            ti = cl_idx.get(m['source_label'], -1)
+            pi = cl_idx.get(m['model_prediction'], -1)
+            if ti >= 0 and pi >= 0:
+                conf_mat[ti][pi] += 1
+
+        # Per-source accuracy (bar)
+        src_acc_lbl, src_acc_pct, src_corr_n, src_total_n = [], [], [], []
+        for lbl in sorted(all_src):
+            sp = [m for m in gt_matches if m.get('source_label') == lbl
+                  and m.get('model_prediction') not in (None, 'unclassified', '')]
+            sc = sum(1 for m in sp if m['model_prediction'] == m['source_label'])
+            src_acc_lbl.append(lbl)
+            src_acc_pct.append(round(sc / len(sp) * 100 if sp else 0, 1))
+            src_corr_n.append(sc)
+            src_total_n.append(len(sp))
+
+        # Top-10 wrong pairs
+        wrong_pairs = Counter(
+            (m['source_label'], m['model_prediction'])
+            for m in pred_m if m['model_prediction'] != m['source_label']
+        )
+        wrong_rows = ''
+        for (tl, pl), cnt in wrong_pairs.most_common(10):
+            pct = cnt / sum(1 for m in pred_m if m['source_label'] == tl) * 100
+            wrong_rows += (f'<tr><td>{tl}</td><td style="color:#636e72">→</td>'
+                           f'<td><b>{pl}</b></td>'
+                           f'<td style="text-align:right">{cnt}</td>'
+                           f'<td style="text-align:right">{pct:.0f}%</td></tr>')
+
+        corr_conf  = [round(m.get('model_confidence', 0) or 0, 3) for m in correct_m]
+        wrong_conf = [round(m.get('model_confidence', 0) or 0, 3)
+                      for m in pred_m if m['model_prediction'] != m['source_label']]
+
+        html_parts.append(f"""
+  <div class="sec-lbl">05 — Model Classification</div>
+  <div class="card">
+    <h2>🤖 Classification Performance</h2>
+    <p class="sub">Of the ODAS-detected events, how accurately does the deployed model identify the sound class?</p>
+    <div class="two-col">
+      <div id="ch_confusion" style="height:390px"></div>
+      <div id="ch_src_acc"   style="height:390px"></div>
+    </div>
+    <div class="two-col" style="margin-top:18px">
+      <div>
+        <h3 style="font-size:14px;margin-bottom:8px;color:#636e72">Top Misclassifications</h3>
+        <table>
+          <tr><th>True Class</th><th></th><th>Predicted As</th>
+              <th style="text-align:right">Count</th>
+              <th style="text-align:right">% of True</th></tr>
+          {wrong_rows}
+        </table>
+      </div>
+      <div id="ch_conf_dist" style="height:310px"></div>
+    </div>
+  </div>
+""")
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # SECTION 7 – Directional & Temporal Overview
+        # ═══════════════════════════════════════════════════════════════════════
+        def _sph_deg(vec):
+            """Cartesian unit/position vector → (azimuth_deg, elevation_deg)."""
+            x, y, z = float(vec[0]), float(vec[1]), float(vec[2])
+            r = _math.sqrt(x**2 + y**2 + z**2)
+            if r < 1e-9:
+                return 0.0, 0.0
+            el = round(_math.degrees(_math.asin(max(-1.0, min(1.0, z / r)))), 1)
+            az = round(_math.degrees(_math.atan2(y, x)), 1)
+            return az, el
+
+        # Load all GT event positions from scene file ─────────────────────────
+        gt_all_events = []   # {lbl, az, el, dist, start, end}
+        try:
+            _rdata = json.loads(render_path.read_text())
+            _sf = _rdata.get('scene_file', '')
+            if _sf and os.path.exists(_sf):
+                _scene_d = json.loads(open(_sf).read())
+                for _s in _scene_d.get('directional_sources', []):
+                    _x, _y, _z = _s.get('x',0), _s.get('y',0), _s.get('z',0)
+                    _d = _math.sqrt(_x**2 + _y**2 + _z**2)
+                    _az, _el = _sph_deg([_x, _y, _z])
+                    gt_all_events.append({'lbl': _s.get('label','?'),
+                                          'az': _az, 'el': _el,
+                                          'dist': round(_d, 1),
+                                          'start': round(_s.get('start_time', 0), 2),
+                                          'end':   round(_s.get('end_time',   0), 2)})
+        except Exception:
+            pass
+        # Fallback: use GT-matched events only
+        if not gt_all_events:
+            _seen_k = set()
+            for _m in gt_matches:
+                _k = (_m.get('source_label',''), round(_m.get('gt_start',0), 1))
+                if _k in _seen_k:
+                    continue
+                _seen_k.add(_k)
+                _sp = _m.get('source_position') or [0, 0, 0]
+                _d2 = _math.sqrt(sum(v**2 for v in _sp))
+                _az2, _el2 = _sph_deg(_sp)
+                gt_all_events.append({'lbl': _m.get('source_label',''),
+                                      'az': _az2, 'el': _el2, 'dist': round(_d2, 1),
+                                      'start': round(_m.get('gt_start',0), 2),
+                                      'end':   round(_m.get('gt_end',  0), 2)})
+
+        # ODAS direction vectors → az/el ───────────────────────────────────────
+        odas_matched_dir = []
+        for _m in gt_matches:
+            _az, _el = _sph_deg(_m.get('position', [0, 0, 0]))
+            odas_matched_dir.append({'az': _az, 'el': _el,
+                                     'lbl': _m.get('source_label', '')})
+        odas_fp_dir = []
+        for _m in fp_matches:
+            _az, _el = _sph_deg(_m.get('position', [0, 0, 0]))
+            odas_fp_dir.append({'az': _az, 'el': _el})
+
+        # Timeline: bands per source row ───────────────────────────────────────
+        _tl_src_set = sorted(
+            set(e['lbl'] for e in gt_all_events) |
+            set(_m.get('source_label','') for _m in gt_matches)
+        )
+        _tl_src_idx = {lbl: i for i, lbl in enumerate(_tl_src_set)}
+        tl_gt_bands = [{'lbl': e['lbl'], 'start': e['start'], 'end': e['end'],
+                         'y': _tl_src_idx.get(e['lbl'], 0)}
+                        for e in gt_all_events]
+        tl_odas_gt  = [{'t': round(_m.get('timestamp',0), 2),
+                         'y': _tl_src_idx.get(_m.get('source_label',''), -1),
+                         'lbl': _m.get('source_label','')}
+                        for _m in gt_matches]
+        tl_odas_fp  = [{'t': round(_m.get('timestamp',0), 2)}
+                        for _m in fp_matches]
+
+        html_parts.append(f"""
+  <div class="sec-lbl">07 \u2014 Spatial &amp; Temporal Overview</div>
+  <div class="card">
+    <h2>🗺️ Directional Distribution</h2>
+    <p class="sub">
+      GT sound events (♦ diamonds) positioned by azimuth &amp; elevation angle as seen from the mic
+      array, colour-coded by source distance. Green circles = ODAS-matched detections;
+      red circles = false-positive (unmatched) detections.
+    </p>
+    <div id="ch_dir" style="height:420px"></div>
+  </div>
+  <div class="card" style="margin-top:18px">
+    <h2>⏰ Detection Timeline</h2>
+    <p class="sub">
+      Shaded bands = GT event windows per source label.
+      Green dots = ODAS frames matched to GT. Red dots = false-positive ODAS frames
+      (plotted below the source rows).
+    </p>
+    <div id="ch_timeline" style="height:{max(320, len(_tl_src_set)*55+100)}px"></div>
+  </div>
+""")
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # SECTION 6 – Frame-by-Frame Timeline Slider
+        # ═══════════════════════════════════════════════════════════════════════
+        tl_data: dict = defaultdict(list)
+        for m in matches:
+            tk = f'{round(m.get("timestamp", 0), 1):.1f}'
+            tl_data[tk].append({
+                'mt':   m.get('match_type', 'unmatched'),
+                'sl':   m.get('source_label', ''),
+                'mp':   m.get('model_prediction', ''),
+                'ae':   round(m.get('angular_error', 0) or 0, 2),
+                'lat':  round(m.get('detection_latency', 0) or 0, 3),
+                'conf': round(m.get('confidence', 0) or 0, 3),
+            })
+        tl_json = json.dumps(dict(tl_data))
+
+        html_parts.append(f"""
+  <div class="sec-lbl">06 — Detection Timeline</div>
+  <div class="card">
+    <h2>🔍 Frame-by-Frame Detection Timeline</h2>
+    <p class="sub">Scrub through time to inspect individual ODAS detection frames vs ground truth.</p>
+    <div style="margin:14px 0">
+      <label style="font-weight:600;font-size:13px">
+        Time: <span id="tl_val">0.0</span> s
+      </label><br>
+      <input type="range" id="tl_slider"
+             min="0" max="{scene_duration:.0f}" step="0.1" value="0"
+             style="width:100%;margin:8px 0;accent-color:#6c5ce7">
+    </div>
+    <div id="tl_table"></div>
+  </div>
+""")
+
+        # ── Audio waveform (existing helper) ─────────────────────────────────
         self._add_audio_waveform_section(html_parts, results)
-        
-        html_parts.append("""
-</body>
-</html>
-""")
-        
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # JavaScript – all Plotly charts
+        # ═══════════════════════════════════════════════════════════════════════
+        # Pre-serialise Python data to JSON strings for embedding
+        _ch_det_rate_data = json.dumps({
+            'labels': ch_labels, 'det': ch_det, 'miss': ch_miss, 'err': ch_err,
+        })
+        _errs_json   = json.dumps(sorted(errs))
+        _dist_json   = json.dumps([
+            {'label': b['label'], 'n': b['n'], 'err': round(b['avg_err'], 1),
+             'acc': round(b['acc'], 1)} for b in dist_stats
+        ] if dist_stats else [])
+        _lat_json    = json.dumps(lats)
+        _pq_json     = json.dumps({'labels': pq_labels, 'values': pq_vals})
+        _conf_labels = json.dumps(conf_labels)
+        _conf_mat    = json.dumps(conf_mat)
+        _src_acc     = json.dumps({
+            'labels': src_acc_lbl, 'pcts': src_acc_pct,
+            'corr': src_corr_n, 'total': src_total_n,
+        })
+        _corr_conf   = json.dumps(corr_conf)
+        _wrong_conf  = json.dumps(wrong_conf)
+        _gt_dir_json       = json.dumps(gt_all_events)
+        _odas_matched_dir_json = json.dumps(odas_matched_dir)
+        _odas_fp_dir_json  = json.dumps(odas_fp_dir)
+        _tl_bands_json     = json.dumps(tl_gt_bands)
+        _tl_odas_gt_json   = json.dumps(tl_odas_gt)
+        _tl_odas_fp_json   = json.dumps(tl_odas_fp)
+        _tl_sources_json   = json.dumps(_tl_src_set)
+
+        html_parts.append(f"""
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// Ch1 · Detection rate per source (stacked bar + angular error overlay)
+(function() {{
+  var d = {_ch_det_rate_data};
+  Plotly.newPlot('ch_det_rate', [
+    {{ x:d.labels, y:d.det,  name:'Detected', type:'bar',
+       marker:{{color:'#00b894'}},
+       hovertemplate:'<b>%{{x}}</b><br>Detected: %{{y}}<extra></extra>' }},
+    {{ x:d.labels, y:d.miss, name:'Missed', type:'bar',
+       marker:{{color:'#d63031'}},
+       hovertemplate:'<b>%{{x}}</b><br>Missed: %{{y}}<extra></extra>' }},
+    {{ x:d.labels, y:d.err, name:'Avg Ang.Err (°)', type:'scatter',
+       mode:'lines+markers', yaxis:'y2',
+       marker:{{color:'#0984e3',size:8}}, line:{{dash:'dot',width:2}},
+       hovertemplate:'<b>%{{x}}</b><br>Err: %{{y:.1f}}°<extra></extra>' }}
+  ], {{
+    barmode:'stack', height:310,
+    title:{{text:'Event Detection Rate by Source',font:{{size:13}}}},
+    xaxis:{{title:''}},
+    yaxis:{{title:'GT Events', gridcolor:'#f1f3f5'}},
+    yaxis2:{{title:'Angular Error (°)', overlaying:'y', side:'right', range:[0,20]}},
+    legend:{{orientation:'h', y:-0.28}},
+    plot_bgcolor:'#fafafa', paper_bgcolor:'white',
+    margin:{{l:50, r:55, t:40, b:90}}
+  }});
+}})();
+
+// Ch2 · Angular error histogram + CDF
+(function() {{
+  var e = {_errs_json};
+  var n = e.length;
+  var cdf = e.map(function(_,i){{ return (i+1)/n*100; }});
+  Plotly.newPlot('ch_ang_cdf', [
+    {{ x:e, type:'histogram', name:'Frequency', nbinsx:30,
+       marker:{{color:'#6c5ce7',opacity:0.7}},
+       hovertemplate:'Error: %{{x:.1f}}°<br>Count: %{{y}}<extra></extra>' }},
+    {{ x:e, y:cdf, type:'scatter', mode:'lines', name:'CDF (%)', yaxis:'y2',
+       line:{{color:'#e17055',width:2}},
+       hovertemplate:'Error: %{{x:.1f}}°<br>CDF: %{{y:.1f}}%<extra></extra>' }}
+  ], {{
+    height:310,
+    title:{{text:'Angular Error Distribution & CDF',font:{{size:13}}}},
+    xaxis:{{title:'Angular Error (°)'}},
+    yaxis:{{title:'Detection Frames', gridcolor:'#f1f3f5'}},
+    yaxis2:{{title:'Cumulative %', overlaying:'y', side:'right', range:[0,100]}},
+    legend:{{orientation:'h', y:-0.28}},
+    plot_bgcolor:'#fafafa', paper_bgcolor:'white',
+    margin:{{l:50, r:55, t:40, b:90}}
+  }});
+}})();
+
+// Ch3 · Distance: frames + angular error + model accuracy
+(function() {{
+  var d = {_dist_json};
+  if (!d.length) return;
+  var lbl = d.map(function(x){{ return x.label; }});
+  Plotly.newPlot('ch_dist', [
+    {{ x:lbl, y:d.map(function(x){{return x.n;}}), name:'ODAS Frames', type:'bar',
+       marker:{{color:'#0984e3',opacity:.8}},
+       hovertemplate:'<b>%{{x}}</b><br>Frames: %{{y}}<extra></extra>' }},
+    {{ x:lbl, y:d.map(function(x){{return x.err;}}), name:'Avg Ang. Err (°)',
+       type:'scatter', mode:'lines+markers', yaxis:'y2',
+       marker:{{color:'#e17055',size:9}}, line:{{width:2}},
+       hovertemplate:'<b>%{{x}}</b><br>Err: %{{y:.1f}}°<extra></extra>' }},
+    {{ x:lbl, y:d.map(function(x){{return x.acc;}}), name:'Model Acc (%)',
+       type:'scatter', mode:'lines+markers', yaxis:'y2',
+       marker:{{color:'#00b894',size:9,symbol:'diamond'}},
+       line:{{width:2,dash:'dot'}},
+       hovertemplate:'<b>%{{x}}</b><br>Acc: %{{y:.1f}}%<extra></extra>' }}
+  ], {{
+    height:330,
+    title:{{text:'ODAS Frames · Angular Error · Model Accuracy vs Distance',font:{{size:13}}}},
+    xaxis:{{title:'Distance from mic array'}},
+    yaxis:{{title:'ODAS Detection Frames', gridcolor:'#f1f3f5'}},
+    yaxis2:{{title:'Degrees / Accuracy %', overlaying:'y', side:'right', range:[0,100]}},
+    legend:{{orientation:'h', y:-0.3}},
+    plot_bgcolor:'#fafafa', paper_bgcolor:'white',
+    margin:{{l:50, r:65, t:40, b:100}}
+  }});
+}})();
+
+// Ch4 · Detection latency histogram
+(function() {{
+  var lat = {_lat_json};
+  Plotly.newPlot('ch_latency', [
+    {{ x:lat, type:'histogram', nbinsx:40, name:'Latency',
+       marker:{{color:'#6c5ce7',opacity:0.75}},
+       hovertemplate:'Latency: %{{x:.2f}}s<br>Count: %{{y}}<extra></extra>' }}
+  ], {{
+    height:290,
+    title:{{text:'Detection Latency (time from GT start to first ODAS frame)',font:{{size:13}}}},
+    xaxis:{{title:'Latency (s)'}},
+    yaxis:{{title:'Count', gridcolor:'#f1f3f5'}},
+    plot_bgcolor:'#fafafa', paper_bgcolor:'white',
+    margin:{{l:50, r:20, t:44, b:60}}
+  }});
+}})();
+
+// Ch5 · Patch quality donut
+(function() {{
+  var pq = {_pq_json};
+  Plotly.newPlot('ch_patch_q', [{{
+    labels: pq.labels, values: pq.values, type:'pie', hole:0.45,
+    marker:{{colors:['#00b894','#0984e3','#e17055','#636e72']}},
+    textinfo:'label+percent',
+    hovertemplate:'<b>%{{label}}</b><br>%{{value}} frames (%{{percent}})<extra></extra>'
+  }}], {{
+    height:290,
+    title:{{text:'Patch Quality Distribution',font:{{size:13}}}},
+    plot_bgcolor:'#fafafa', paper_bgcolor:'white',
+    margin:{{l:20, r:20, t:44, b:20}}
+  }});
+}})();
+
+// Ch6 · Confusion matrix heatmap (row-normalised %)
+(function() {{
+  var labels = {_conf_labels};
+  var z      = {_conf_mat};
+  var zp = z.map(function(row) {{
+    var s = row.reduce(function(a,b){{return a+b;}},0);
+    return s > 0 ? row.map(function(v){{return Math.round(v/s*100);}})
+                 : row.map(function(){{return 0;}});
+  }});
+  Plotly.newPlot('ch_confusion', [{{
+    x:labels, y:labels, z:zp, type:'heatmap',
+    colorscale:'Blues',
+    text:zp.map(function(row){{return row.map(function(v){{return v+'%';}}); }}),
+    texttemplate:'%{{text}}', textfont:{{size:11}},
+    hovertemplate:'True: %{{y}}<br>Pred: %{{x}}<br>%{{z}}%<extra></extra>',
+    colorbar:{{thickness:14, len:0.8}}
+  }}], {{
+    height:390,
+    title:{{text:'Confusion Matrix — row-normalised (%)',font:{{size:13}}}},
+    xaxis:{{title:'Predicted', tickangle:-35}},
+    yaxis:{{title:'True', autorange:'reversed'}},
+    plot_bgcolor:'#fafafa', paper_bgcolor:'white',
+    margin:{{l:100, r:60, t:50, b:110}}
+  }});
+}})();
+
+// Ch7 · Per-source model accuracy (horizontal bar)
+(function() {{
+  var d = {_src_acc};
+  var colors = d.pcts.map(function(a){{
+    return a>=60?'#00b894': a>=30?'#e17055':'#d63031';
+  }});
+  Plotly.newPlot('ch_src_acc', [{{
+    x:d.pcts, y:d.labels, type:'bar', orientation:'h',
+    marker:{{color:colors}},
+    text:d.labels.map(function(_,i){{return d.corr[i]+'/'+d.total[i];}}),
+    textposition:'outside',
+    hovertemplate:'<b>%{{y}}</b><br>Acc: %{{x:.1f}}%<br>%{{text}} correct<extra></extra>'
+  }}], {{
+    height:390,
+    title:{{text:'Model Accuracy by Source',font:{{size:13}}}},
+    xaxis:{{title:'Accuracy (%)', range:[0,115]}},
+    yaxis:{{title:''}},
+    plot_bgcolor:'#fafafa', paper_bgcolor:'white',
+    margin:{{l:100, r:60, t:50, b:60}}
+  }});
+}})();
+
+// Ch8 · Model confidence: correct vs incorrect
+(function() {{
+  var cc = {_corr_conf};
+  var wc = {_wrong_conf};
+  Plotly.newPlot('ch_conf_dist', [
+    {{ x:cc, type:'histogram', name:'Correct',   opacity:0.7, nbinsx:20,
+       marker:{{color:'#00b894'}},
+       hovertemplate:'Conf: %{{x:.2f}}<br>Count: %{{y}}<extra></extra>' }},
+    {{ x:wc, type:'histogram', name:'Incorrect', opacity:0.7, nbinsx:20,
+       marker:{{color:'#d63031'}},
+       hovertemplate:'Conf: %{{x:.2f}}<br>Count: %{{y}}<extra></extra>' }}
+  ], {{
+    barmode:'overlay', height:310,
+    title:{{text:'Model Confidence: Correct vs Incorrect',font:{{size:13}}}},
+    xaxis:{{title:'Model Confidence'}},
+    yaxis:{{title:'Count', gridcolor:'#f1f3f5'}},
+    legend:{{x:0.65, y:0.9}},
+    plot_bgcolor:'#fafafa', paper_bgcolor:'white',
+    margin:{{l:50, r:20, t:44, b:60}}
+  }});
+}})();
+
+// Ch9 · Directional distribution (az/el scatter)
+(function() {{
+  var gt = {_gt_dir_json};
+  var om = {_odas_matched_dir_json};
+  var fp = {_odas_fp_dir_json};
+
+  // Jitter GT diamonds that land on the same rounded az+el cell so they don't
+  // stack on top of each other. Spiral outward: odd indices shift right, even left.
+  var gtAz = gt.map(function(d){{ return d.az; }});
+  var gtEl = gt.map(function(d){{ return d.el; }});
+  (function() {{
+    var seen = {{}};
+    for (var i = 0; i < gtAz.length; i++) {{
+      var k = Math.round(gtAz[i]) + ',' + Math.round(gtEl[i]);
+      var n = seen[k] || 0;
+      if (n > 0) {{
+        var step = Math.ceil(n / 2) * 2.5;
+        gtAz[i] += (n % 2 === 0 ? 1 : -1) * step;
+        gtEl[i] += (n % 4 < 2  ? 0.8 : -0.8) * Math.ceil(n / 2);
+      }}
+      seen[k] = n + 1;
+    }}
+  }})();
+
+  Plotly.newPlot('ch_dir', [
+    // FP — faint red dots; shows density/clusters of false positives
+    {{ x:fp.map(function(d){{return d.az;}}),
+       y:fp.map(function(d){{return d.el;}}),
+       mode:'markers', type:'scatter', name:'False Positive',
+       marker:{{symbol:'circle', size:4, color:'#d63031', opacity:0.22}},
+       hovertemplate:'Az:%{{x:.1f}}°  El:%{{y:.1f}}°<extra>False Positive</extra>' }},
+    // Matched ODAS directions — green circles
+    {{ x:om.map(function(d){{return d.az;}}),
+       y:om.map(function(d){{return d.el;}}),
+       mode:'markers', type:'scatter', name:'ODAS Matched',
+       text:om.map(function(d){{return d.lbl;}}),
+       marker:{{symbol:'circle', size:6, color:'#00b894', opacity:0.45,
+                line:{{color:'#00635a', width:0.7}}}},
+       hovertemplate:'<b>%{{text}}</b><br>Az:%{{x:.1f}}°  El:%{{y:.1f}}°<extra>Matched</extra>' }},
+    // GT events — diamonds, colour = source distance
+    {{ x:gtAz, y:gtEl,
+       mode:'markers', type:'scatter', name:'GT Event ♦',
+       text:gt.map(function(d){{
+         return d.lbl+' ('+d.dist+'m)  t='+d.start+'–'+d.end+'s';
+       }}),
+       marker:{{
+         symbol:'diamond', size:13,
+         color:gt.map(function(d){{return d.dist;}}),
+         colorscale:'YlOrRd', showscale:true,
+         colorbar:{{title:'Dist (m)', thickness:13, len:0.75, x:1.02}},
+         line:{{color:'#2d3436', width:1.2}}
+       }},
+       hovertemplate:'<b>%{{text}}</b><br>Az:%{{x:.1f}}°  El:%{{y:.1f}}°<extra>GT Event</extra>' }}
+  ], {{
+    height:420,
+    title:{{text:'Directional Distribution — GT Events ♦ (colour=distance) vs ODAS Detections',
+            font:{{size:13}}}},
+    xaxis:{{title:'Azimuth (°)', range:[-185,185], dtick:30,
+            gridcolor:'#f1f3f5', zeroline:true,
+            zerolinecolor:'#b2bec3', zerolinewidth:1.5}},
+    yaxis:{{title:'Elevation (°)', range:[-55,75], dtick:15,
+            gridcolor:'#f1f3f5', zeroline:true,
+            zerolinecolor:'#b2bec3', zerolinewidth:1.5}},
+    legend:{{orientation:'h', y:-0.22}},
+    plot_bgcolor:'#fafafa', paper_bgcolor:'white',
+    margin:{{l:60, r:85, t:50, b:80}}
+  }});
+}})();
+
+// Ch10 · Detection timeline
+(function() {{
+  var bands  = {_tl_bands_json};
+  var gtPts  = {_tl_odas_gt_json};
+  var fpPts  = {_tl_odas_fp_json};
+  var srcs   = {_tl_sources_json};
+  var nSrc   = srcs.length;
+  var shapes = bands.map(function(b) {{
+    return {{type:'rect',
+             x0:b.start, x1:b.end,
+             y0:b.y-0.35, y1:b.y+0.35,
+             fillcolor:'rgba(108,92,231,0.13)',
+             line:{{color:'#6c5ce7',width:0.7}}}};
+  }});
+  var fpY = -0.7;
+  Plotly.newPlot('ch_timeline', [
+    {{ x:gtPts.map(function(d){{return d.t;}}),
+       y:gtPts.map(function(d){{return d.y;}}),
+       mode:'markers', type:'scatter', name:'ODAS Matched',
+       text:gtPts.map(function(d){{return d.lbl;}}),
+       marker:{{color:'#00b894',size:5,opacity:0.65,symbol:'circle'}},
+       hovertemplate:'<b>%{{text}}</b><br>t=%{{x:.2f}}s<extra>Matched</extra>' }},
+    {{ x:fpPts.map(function(d){{return d.t;}}),
+       y:fpPts.map(function(){{return fpY;}}),
+       mode:'markers', type:'scatter', name:'False Positive',
+       marker:{{color:'#d63031',size:3,opacity:0.35,symbol:'circle'}},
+       hovertemplate:'t=%{{x:.2f}}s<extra>False Positive</extra>' }}
+  ], {{
+    shapes:shapes,
+    title:{{text:'Detection Timeline — GT windows (shaded) vs ODAS detections',font:{{size:13}}}},
+    xaxis:{{title:'Time (s)',gridcolor:'#f1f3f5'}},
+    yaxis:{{
+      tickvals:srcs.map(function(_,i){{return i;}}).concat([fpY]),
+      ticktext:srcs.concat(['FP / Unmatched']),
+      range:[-1.2, nSrc],
+      gridcolor:'#f1f3f5'
+    }},
+    legend:{{orientation:'h',y:-0.18}},
+    plot_bgcolor:'#fafafa', paper_bgcolor:'white',
+    margin:{{l:130,r:30,t:50,b:80}}
+  }});
+}})();
+
+// Timeline slider
+(function() {{
+  var tl      = {tl_json};
+  var slider  = document.getElementById('tl_slider');
+  var valEl   = document.getElementById('tl_val');
+  var tableEl = document.getElementById('tl_table');
+
+  function render(t) {{
+    var key = parseFloat(t).toFixed(1);
+    valEl.textContent = key;
+    var rows = tl[key] || [];
+    if (!rows.length) {{
+      tableEl.innerHTML = '<p style="color:#b2bec3;font-size:13px;padding:8px 0">No detections at this timestamp.</p>';
+      return;
+    }}
+    var html = '<table><tr><th>Match Type</th><th>Source (GT)</th>'
+             + '<th>Model Prediction</th>'
+             + '<th style="text-align:right">Ang. Err</th>'
+             + '<th style="text-align:right">Latency</th>'
+             + '<th style="text-align:right">ODAS Conf</th></tr>';
+    rows.forEach(function(r) {{
+      var ok  = r.sl && r.mp && r.sl === r.mp;
+      var bad = r.sl && r.mp && r.sl !== r.mp;
+      var bg  = r.mt === 'ground_truth'
+                  ? (ok ? '#f0fff4' : bad ? '#fff5f5' : '#f8f9fa')
+                  : '#fff5f5';
+      var mc  = ok ? '#00b894' : bad ? '#d63031' : '#636e72';
+      html += '<tr style="background:' + bg + '">'
+            + '<td><span class="pill '+(r.mt==='ground_truth'?'green':'red')+'">' + r.mt + '</span></td>'
+            + '<td>' + (r.sl || '—') + '</td>'
+            + '<td style="color:'+mc+';font-weight:600">' + (r.mp || '—') + '</td>'
+            + '<td style="text-align:right">' + r.ae + '°</td>'
+            + '<td style="text-align:right">' + r.lat + ' s</td>'
+            + '<td style="text-align:right">' + r.conf + '</td>'
+            + '</tr>';
+    }});
+    html += '</table>';
+    tableEl.innerHTML = html;
+  }}
+
+  slider.addEventListener('input', function() {{ render(this.value); }});
+  render(slider.value);
+}})();
+</script>
+</div></body></html>""")
+
         return ''.join(html_parts)
-    
+
     def _display_summary(self, analysis_data):
         """Display analysis summary in Streamlit"""
         summary = analysis_data['summary']
@@ -2376,15 +3065,40 @@ class ResultAnalyzer:
                 
                 st.markdown("---")
         
+        # Compute event-level detection rate from matches + render sidecar
+        _all_m   = analysis_data.get('matches', [])
+        _gt_m    = [m for m in _all_m if m.get('match_type') == 'ground_truth']
+        _fp_m    = [m for m in _all_m if m.get('match_type') != 'ground_truth']
+        _det_evt = len(set(
+            (m.get('source_label', m.get('label', '')), round(m.get('gt_start', 0), 1))
+            for m in _gt_m
+        ))
+        _total_gt = 0
+        try:
+            import pathlib as _pl, json as _json
+            _render_f = self.base_output_dir / 'renders' / f"{analysis_data.get('render_id','')}.json"
+            _total_gt = len(_json.loads(_render_f.read_text()).get('source_sidecars', []))
+        except Exception:
+            pass
+        _fp_rate = len(_fp_m) / max(len(_all_m), 1) * 100
+
         col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
-            st.metric("Total Detections", summary['total_detections'])
+            st.metric("ODAS Frames", summary['total_detections'],
+                      help="Total ODAS detection frames (GT-matched + false positives)")
         with col2:
-            st.metric("Match Rate", f"{summary['match_rate']*100:.1f}%")
+            if _total_gt:
+                st.metric("Events Detected", f"{_det_evt}/{_total_gt}",
+                          delta=f"{_det_evt/_total_gt*100:.0f}%",
+                          help="GT sound events that ODAS picked up at least once")
+            else:
+                st.metric("GT Frame Coverage", f"{summary['match_rate']*100:.1f}%",
+                          help="Fraction of ODAS frames that matched a GT source")
         with col3:
-            st.metric("Avg Error", f"{summary['avg_angular_error']:.2f}°")
+            st.metric("False Positive Rate", f"{_fp_rate:.0f}%",
+                      help="ODAS frames not matched to any GT source")
         with col4:
-            st.metric("Avg Confidence", f"{summary.get('avg_confidence', 0):.3f}")
+            st.metric("Avg Angular Error", f"{summary['avg_angular_error']:.2f}°")
         with col5:
             st.metric("Time Span", f"{summary['time_span_seconds']:.1f}s")
         

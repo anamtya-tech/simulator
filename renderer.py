@@ -17,6 +17,7 @@ ReSpeaker USB 4 Mic Array geometry (in meters):
 Output format: ${date}_{scene_name}_ChatakX_sim.raw
 """
 
+import re
 import streamlit as st
 import numpy as np
 import json
@@ -185,27 +186,46 @@ class AudioRenderer:
             if add_noise:
                 noise_level = st.slider("Noise level (dB)", -60, -20, -40, 5)
         
+        # ── Pre-flight warnings (outside button — checkboxes must live at top level) ──
+        # Real peak RAM with the streaming/memmap renderer:
+        #   2 mmaps (mic + ambient, paged) + one source window + FFT headroom
+        max_src_dur   = max((s['end_time'] - s['start_time'])
+                            for s in scene['directional_sources']) if scene['directional_sources'] else 0
+        mmap_gb       = 2 * (scene['duration'] * self.sample_rate * 4 * 4) / (1024**3)
+        src_window_gb = (max_src_dur * self.sample_rate * 4) / (1024**3)
+        estimated_gb  = mmap_gb + src_window_gb * 4  # ×4 FFT headroom
+
+        confirm_ram      = True
+        confirm_duration = True
+        confirm_sources  = True
+
+        if estimated_gb > 8:
+            st.warning(
+                f"⚠️ Estimated peak RAM: {estimated_gb:.1f} GB (two mmap accumulators + FFT headroom). "
+                f"The renderer streams one source at a time and never holds all sources in RAM at once."
+            )
+            confirm_ram = st.checkbox("I understand the RAM warning and want to continue",
+                                      key="confirm_ram")
+
+        if scene['duration'] > 3600:
+            st.warning(f"⚠️ Scene duration is {scene['duration']} s "
+                       f"({scene['duration']/3600:.1f} h). Rendering may take a very long time.")
+            confirm_duration = st.checkbox("I understand this will take a long time",
+                                           key="confirm_duration")
+
+        if len(scene['directional_sources']) > 100:
+            st.warning(
+                f"⚠️ {len(scene['directional_sources'])} directional sources. "
+                f"This is fine — sources are rendered one at a time with no memory explosion. "
+                f"It will just take longer."
+            )
+            confirm_sources = st.checkbox("I understand, render anyway",
+                                          key="confirm_sources")
+
+        all_confirmed = confirm_ram and confirm_duration and confirm_sources
+
         # Render button
-        if st.button("🎨 Render Audio", type="primary"):
-            # Memory usage estimation
-            estimated_gb = (scene['duration'] * self.sample_rate * 4 * 4) / (1024**3)  # 4 bytes per float32, 4 mic channels
-            estimated_gb += (len(scene['directional_sources']) * scene['duration'] * self.sample_rate * 4) / (1024**3)  # source signals
-            
-            if estimated_gb > 8:  # Warn if over 8GB
-                st.warning(f"⚠️ Estimated memory usage: {estimated_gb:.1f} GB. This may cause the process to be killed on systems with limited RAM.")
-                if not st.checkbox("I understand the risk and want to continue"):
-                    st.stop()
-            
-            if scene['duration'] > 3600:  # 1 hour
-                st.warning(f"⚠️ Scene duration is {scene['duration']} seconds ({scene['duration']/3600:.1f} hours). Rendering may take a very long time.")
-                if not st.checkbox("I understand this will take a long time"):
-                    st.stop()
-            
-            if len(scene['directional_sources']) > 100:
-                st.warning(f"⚠️ {len(scene['directional_sources'])} directional sources may cause memory issues or very long render times.")
-                if not st.checkbox("I understand the risk"):
-                    st.stop()
-            
+        if st.button("🎨 Render Audio", type="primary", disabled=not all_confirmed):
             with st.spinner("Rendering audio..."):
                 try:
                     output_path = self._render_scene(
@@ -237,13 +257,17 @@ class AudioRenderer:
         duration = scene['duration']
         n_samples = int(duration * self.sample_rate)
         
-        # Memory safety check
-        estimated_memory_gb = (n_samples * 4 * 4) / (1024**3)  # 4 bytes per float32, 4 mic channels
-        estimated_memory_gb += (len(scene['directional_sources']) * n_samples * 4) / (1024**3)  # source signals
-        
-        if estimated_memory_gb > 12:  # Conservative limit
-            raise MemoryError(f"Estimated memory usage ({estimated_memory_gb:.1f} GB) exceeds safe limit. "
-                            f"Try reducing scene duration or number of sources.")
+        # Memory safety check — streaming renderer never holds all sources at once.
+        # Peak RAM = 2 mmaps (mic + ambient, both paged) + one source window + FFT temps.
+        max_src_dur        = max((s['end_time'] - s['start_time'])
+                                 for s in scene['directional_sources']) if scene['directional_sources'] else 0
+        mmap_gb            = 2 * (n_samples * 4 * 4) / (1024**3)   # mic + ambient mmaps
+        src_window_gb      = (max_src_dur * self.sample_rate * 4) / (1024**3)
+        estimated_memory_gb = mmap_gb + src_window_gb * 4           # ×4 FFT headroom
+
+        if estimated_memory_gb > 16:  # true RAM limit — mmaps keep most data on disk
+            raise MemoryError(f"Estimated peak RAM ({estimated_memory_gb:.1f} GB) exceeds safe limit. "
+                            f"Try reducing scene duration.")
         
         actual_samples = n_samples
 
@@ -263,6 +287,20 @@ class AudioRenderer:
         _mic_tmp_fd, _mic_tmp_path = tempfile.mkstemp(suffix='_mic_acc.f32')
         os.close(_mic_tmp_fd)
         mic_signals = np.memmap(_mic_tmp_path, dtype=np.float32, mode='w+', shape=(4, n_samples))
+
+        # ── Output path (computed now so sidecar filenames can reference it) ─
+        timestamp        = datetime.now().strftime("%Y%m%d_%H%M%S")
+        scene_name_clean = scene['name'].replace(' ', '_')
+        output_filename  = f"{scene_name_clean}_{timestamp}.raw"
+        output_path      = self.output_dir / output_filename
+
+        # ── GT sidecar: separate ambient accumulator ──────────────────────────
+        # ambient_signals holds ONLY the background (no directional partials,
+        # no noise).  GT clip = partial_i[mic_ch] + ambient[mic_ch, t_start:t_end]
+        amb_sidecar_path = str(output_path).replace('.raw', '.ambient.f32')
+        ambient_signals  = np.memmap(amb_sidecar_path, dtype=np.float32,
+                                     mode='w+', shape=(4, n_samples))
+        source_sidecars  = []  # populated during the directional source loop
 
         # Process directional sources
         progress_bar = st.progress(0)
@@ -295,6 +333,14 @@ class AudioRenderer:
             else:
                 # Pad if needed
                 audio = np.pad(audio, (0, max(0, duration_samples - len(audio))))
+
+            # Capture the true content length BEFORE final trim/conversion
+            # (used by GT builder to avoid chunking silent padding)
+            audio_active_samples = int(np.count_nonzero(
+                np.abs(audio) > 1e-6  # anything above noise floor
+            ) > 0 and min(len(audio), duration_samples) or min(len(audio), duration_samples))
+            # Simpler: non-zero content is however many samples loaded from wav
+            audio_active_samples = int(min(len(audio), duration_samples))
 
             # Ensure audio is exactly the right length
             audio = audio[:duration_samples]
@@ -334,7 +380,24 @@ class AudioRenderer:
             p_len = partial.shape[1]
             acc_start = start_sample
             acc_end   = min(acc_start + p_len, n_samples)
-            mic_signals[:, acc_start:acc_end] += partial[:, :acc_end - acc_start]
+            sidecar_frames = acc_end - acc_start
+            mic_signals[:, acc_start:acc_end] += partial[:, :sidecar_frames]
+
+            # ── GT sidecar: isolated room-processed mic signals for this source
+            _lbl_clean    = re.sub(r'[^\w\-]', '_', source_config.get('label', f'source_{idx}'))
+            _sidecar_path = self.output_dir / f"{output_path.stem}_src{idx:02d}_{_lbl_clean}.f32"
+            partial[:, :sidecar_frames].tofile(str(_sidecar_path))
+            source_sidecars.append({
+                'source_idx':          idx,
+                'label':               source_config.get('label', f'source_{idx}'),
+                'start_time':          source_config['start_time'],
+                'end_time':            source_config['end_time'],
+                'start_sample':        int(acc_start),
+                'end_sample':          int(acc_end),
+                'sidecar_path':        str(_sidecar_path),
+                'n_frames':            int(sidecar_frames),
+                'audio_active_samples': int(audio_active_samples),
+            })
 
             del src_room, window_signal, partial  # releases RIRs, FFT buffers, everything
             mic_signals.flush()  # ensure written pages are pushed to disk
@@ -413,7 +476,8 @@ class AudioRenderer:
                     ch_rms = np.where(ch_rms > 0, ch_rms, mean_rms)  # avoid /0
                     cap_mics = cap_mics / ch_rms * mean_rms
 
-                mic_signals += cap_mics * cap_volume
+                mic_signals     += cap_mics * cap_volume
+                ambient_signals += cap_mics * cap_volume
             else:
                 st.warning('Real Capture mode selected but no valid capture file found. Continuing without ambient background.')
 
@@ -440,8 +504,13 @@ class AudioRenderer:
                     ambient_mix += audio
 
                 for i in range(mic_signals.shape[0]):
-                    mic_signals[i, :] += ambient_mix
-        
+                    mic_signals[i, :]     += ambient_mix
+                    ambient_signals[i, :] += ambient_mix
+
+        # Flush ambient sidecar before noise (noise is NOT part of GT ambient)
+        ambient_signals.flush()
+        del ambient_signals
+
         # Add noise if requested
         if add_noise:
             noise_amplitude = 10 ** (noise_level / 20)
@@ -469,11 +538,6 @@ class AudioRenderer:
         #   4. .flatten() — yet another full copy
         # We open the output file once and stream through it in CHUNK_FRAMES-frame
         # blocks.  Peak working RAM = one chunk × 6 ch × 2 bytes ~ a few MB.
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        scene_name_clean = scene['name'].replace(' ', '_')
-        output_filename = f"{scene_name_clean}_{timestamp}.raw"
-        output_path = self.output_dir / output_filename
-
         CHUNK_FRAMES = 16000 * 30  # 30-second chunks
         N_CH = self.n_channels_output
 
@@ -535,6 +599,8 @@ class AudioRenderer:
             'output_file': str(output_path),
             'warmup_seconds': WARMUP_SECONDS,
             'tail_silence_seconds': TAIL_SECONDS,
+            'source_sidecars': source_sidecars,
+            'ambient_sidecar_path': amb_sidecar_path,
         }
         
         metadata_path = str(output_path).replace('.raw', '.json')
@@ -546,6 +612,37 @@ class AudioRenderer:
         
         return output_path
     
+    def _save_as_wav(self, raw_path):
+        """Convert the full-length raw PCM file to a 4-channel WAV.
+
+        Streams through the file in 30-second chunks so RAM stays bounded
+        regardless of the render duration.  Channels saved are the 4 mic
+        channels (columns 1-4 of the 6-channel interleaved layout).
+
+        Returns the path of the saved WAV file.
+        """
+        wav_path = str(raw_path).rsplit('.raw', 1)[0] + '.wav'
+        file_size = os.path.getsize(raw_path)
+        n_frames  = file_size // (self.n_channels_output * 2)  # int16 = 2 bytes
+
+        CHUNK_FRAMES = self.sample_rate * 30  # 30-second chunks
+
+        audio_mmap = np.memmap(raw_path, dtype=np.int16, mode='r',
+                               shape=(n_frames, self.n_channels_output))
+        try:
+            with sf.SoundFile(wav_path, mode='w', samplerate=self.sample_rate,
+                              channels=4, subtype='PCM_16') as wav_out:
+                offset = 0
+                while offset < n_frames:
+                    end   = min(offset + CHUNK_FRAMES, n_frames)
+                    chunk = np.array(audio_mmap[offset:end, 1:5])  # mic channels
+                    wav_out.write(chunk)
+                    offset = end
+        finally:
+            del audio_mmap
+
+        return wav_path
+
     def _show_preview(self, raw_path):
         """Scrubbing preview — fixed RAM cost (~8 MB) regardless of file size.
 
@@ -651,6 +748,32 @@ class AudioRenderer:
             st.markdown("**Mixed (All Mics Average)**")
             st.audio(np.mean(play_slice, axis=1), sample_rate=self.sample_rate)
             del play_slice
+
+            # ── Save full audio to WAV ─────────────────────────────────────────
+            st.markdown("---")
+            st.markdown("**💾 Save Full Audio as WAV**")
+            wav_path = str(raw_path).rsplit('.raw', 1)[0] + '.wav'
+            _wav_key_save    = f'savewav_{abs(hash(str(raw_path)))}'
+            _wav_key_resave  = f'resavewav_{abs(hash(str(raw_path)))}'
+            if os.path.exists(wav_path):
+                wav_size_mb = os.path.getsize(wav_path) / (1024 * 1024)
+                st.info(
+                    f"WAV already saved: `{os.path.basename(wav_path)}` "
+                    f"({wav_size_mb:.1f} MB)  →  `{wav_path}`"
+                )
+                if st.button("🔄 Re-save WAV", key=_wav_key_resave):
+                    with st.spinner(f"Saving {total_duration:.0f} s → WAV …"):
+                        saved = self._save_as_wav(raw_path)
+                    st.success(f"✅ WAV saved: {saved}")
+            else:
+                st.caption(
+                    f"Export the full {total_duration:.0f} s render as a "
+                    f"4-channel WAV (Mic 1-4) for playback in any audio player."
+                )
+                if st.button("💾 Save to WAV", key=_wav_key_save):
+                    with st.spinner(f"Saving {total_duration:.0f} s → WAV …"):
+                        saved = self._save_as_wav(raw_path)
+                    st.success(f"✅ WAV saved: {saved}")
 
         except Exception as e:
             st.error(f"Error previewing audio: {e}")

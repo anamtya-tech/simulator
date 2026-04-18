@@ -433,3 +433,76 @@ Same improvements applied to the interactive Plotly heatmap in the **🔬 Raw Sp
 - **Y axis:** Bin numbers → frequency in Hz (0–8000)
 - **Theme:** White background → dark (`#0e1117`) with white font and `#333` grid lines
 - **Caption:** Now includes the actual dB range (e.g. `Range: -82–-14 dB`)
+
+
+---
+
+# Changes — April 11, 2026
+
+> YAMNet fine-tuning: class-imbalance experiments and model selection.
+
+---
+
+## YAMNet Fine-Tuning — Class Imbalance Experiments
+
+### Background
+
+Baseline run `chatak_yamnet_20260411_101107` (55.85% test, balanced_acc=45.97%) suffered from severe class imbalance: drone_binary recall=0%, background over-predicting (recall=86%, precision=56%). Two experiments were run in parallel on the same dataset (`merged_20260411_101103_c43424cf`, 1372 clips, 17 classes, ~11× imbalance ratio) using the same two-phase pipeline (Phase 1: head-only lr=1e-3, Phase 2: fine-tune top 4 backbone layers lr=1e-5).
+
+### Experiment A — `chatak_yamnet_20260411_wfloor` (class weights + weight floor)
+
+**Config:** `sklearn` balanced class weights with `weight_floor=0.5` — background weight clamped 0.277 → 0.5, Elephant 0.450 → 0.5; all minority classes kept at their computed weights.
+
+**Rationale:** Raw balanced weights made background weight so low (0.277) that background recall collapsed 86% → 51% in run `132858`. The floor preserves minority-class upweighting while preventing the majority-class penalty from being too harsh.
+
+**Results:**
+
+| Phase | Best val_accuracy |
+|---|---|
+| Phase 1 (8 ep, early stop) | 0.5385 |
+| Phase 2 (26 ep) | 0.5497 |
+| **Test accuracy** | **53.69%** |
+| **Balanced accuracy** | **51.21%** |
+
+### Experiment B — `chatak_yamnet_20260411_focal` (focal loss γ=2.0)
+
+**Config:** Focal loss `FL(p_t) = -(1-p_t)² · log(p_t)`, γ=2, no class weights. Down-weights easy/well-classified samples so training focuses on hard minority classes.
+
+**Results:**
+
+| Phase | Best val_accuracy |
+|---|---|
+| Phase 1 (20 ep, LR → 5e-4 at Ep6) | 0.5979 |
+| Phase 2 (9 ep, early stop) | 0.5856 |
+| **Test accuracy** | **55.54%** |
+| **Balanced accuracy** | **44.90%** |
+
+### Head-to-Head Test Set — Key Classes
+
+| Class | `wfloor` recall | `focal` recall | Winner |
+|---|---|---|---|
+| background | 70.7% | 86.0% | focal (but dominates) |
+| drone_binary | **40.0%** | 10.0% | **wfloor** |
+| drone_bebop | **20.0%** | 5.0% | **wfloor** |
+| drone_membo | **25.0%** | 20.0% | **wfloor** |
+| Monkey | **68.0%** | 52.0% | **wfloor** |
+| Wolfhowl | **80.0%** | 46.7% | **wfloor** |
+| Elephant | 55.3% | **61.2%** | focal |
+| Lion | 20.0% | **27.3%** | focal |
+| Overall accuracy | 53.69% | **55.54%** | focal |
+| **Balanced accuracy** | **51.21%** | 44.90% | **wfloor** |
+
+**Key finding:** Focal loss reverted to background dominance — 86% background recall squeezes out the drone classes (drone_binary: 40% → 10%). Background is noise for this use case; drone detection is critical. `wfloor` wins on balanced accuracy (+6.3pp) and is dramatically better on all three drone classes.
+
+### Full Run History
+
+| Run | Config | Test Acc | Balanced Acc | drone_binary | background recall |
+|---|---|---|---|---|---|
+| `101107` | Baseline | 55.85% | 45.97% | 0% | 86% |
+| `132858` | Class weights (no floor) | 48.46% | 49.02% | 60% | 51% |
+| `wfloor` ✅ | Class weights + floor=0.5 | **53.69%** | **51.21%** | **40%** | **71%** |
+| `focal` | Focal loss γ=2.0 | 55.54% | 44.90% | 10% | 86% |
+
+### Decision
+
+**Active model set to `chatak_yamnet_20260411_wfloor`** in `model_store/registry.json`.
