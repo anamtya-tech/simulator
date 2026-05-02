@@ -1819,35 +1819,28 @@ class ResultAnalyzer:
         duration = scene_metadata.get('duration', 10.0)
         
         try:
+            import numpy as _np
+
             # Read raw audio file (S16_LE format - signed 16-bit little-endian)
-            with open(raw_audio_file, 'rb') as f:
-                raw_data = f.read()
-            
-            # Calculate total samples and samples per channel
-            bytes_per_sample = 2  # 16-bit = 2 bytes
-            total_samples = len(raw_data) // bytes_per_sample
-            samples_per_channel = total_samples // n_channels
-            
-            # Unpack all samples
-            samples = struct.unpack(f'<{total_samples}h', raw_data)
-            
+            # Use numpy memmap so we never load the full file into RAM.
+            audio_mm = _np.memmap(raw_audio_file, dtype='<i2', mode='r')
+
             # Extract channel 3 (index 2) - can be made configurable
             channel_to_plot = 2  # Channel 3 (0-indexed)
-            channel_samples = [samples[i] for i in range(channel_to_plot, total_samples, n_channels)]
-            
+            channel_samples_np = audio_mm[channel_to_plot::n_channels].astype(_np.float32)
+
             # Normalize to -1 to 1 range
-            max_val = 32768.0
-            normalized_samples = [s / max_val for s in channel_samples]
-            
-            # Create time axis
-            time_axis = [i / sample_rate for i in range(len(normalized_samples))]
-            
+            channel_samples_np /= 32768.0
+
             # Downsample for plotting — keep max 2000 points for small report size
             max_plot_points = 2000
-            if len(time_axis) > max_plot_points:
-                step = len(time_axis) // max_plot_points
-                time_axis = time_axis[::step]
-                normalized_samples = normalized_samples[::step]
+            n_ch = len(channel_samples_np)
+            step = max(1, n_ch // max_plot_points)
+            channel_samples_np = channel_samples_np[::step]
+
+            normalized_samples = channel_samples_np.tolist()
+            n_pts = len(normalized_samples)
+            time_axis = [i * step / sample_rate for i in range(n_pts)]
             
             # Add HTML section (no embedded audio — base64 audio adds ~2MB to report)
             html_parts.append(f"""
