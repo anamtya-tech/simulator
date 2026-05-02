@@ -29,6 +29,42 @@ import signal
 # ── session-state key used by the background thread ───────────────────────────
 _SIM_STATE_KEY = "sim_state"
 
+# ── Named ODAS SST presets ────────────────────────────────────────────────────
+# These patch the key parameters into the config file before each run.
+# Param descriptions: see docs/odas_sst_tuning.md
+SST_PRESETS = {
+    "Balanced (default)": {
+        "description": "Best balance for dataset collection. N_prob=6, ~0.63 FP/s.",
+        "Pnew": 0.06,
+        "theta_new": 0.80,
+        "N_prob": 6,
+        "theta_prob": 0.65,
+        "Pfalse": 0.1,
+        "gainMin": 0.40,
+        "theta_inactive": 0.80,
+    },
+    "High-Recall (dataset collection)": {
+        "description": "Maximises event detection rate. More FPs (~1.3/s). Use ONLY for building training datasets.",
+        "Pnew": 0.15,
+        "theta_new": 0.60,
+        "N_prob": 3,
+        "theta_prob": 0.60,
+        "Pfalse": 0.2,
+        "gainMin": 0.30,
+        "theta_inactive": 0.70,
+    },
+    "Low-FP (deployment test)": {
+        "description": "Suppresses spurious tracks. Higher miss rate for short/quiet events. Use for deployment simulation.",
+        "Pnew": 0.03,
+        "theta_new": 0.85,
+        "N_prob": 8,
+        "theta_prob": 0.75,
+        "Pfalse": 0.05,
+        "gainMin": 0.45,
+        "theta_inactive": 0.85,
+    },
+}
+
 def _get_sim_state():
     """Return the sim_state dict from session_state (creates it if absent)."""
     if _SIM_STATE_KEY not in st.session_state:
@@ -123,6 +159,123 @@ class SimulationRunner:
             with col3:
                 st.metric("Sample Rate", f"{metadata.get('sample_rate', 16000)} Hz")
         
+        # ── Experiment settings ───────────────────────────────────────────────
+        with st.expander("🧪 Experiment Settings", expanded=True):
+            exp_col1, exp_col2 = st.columns(2)
+            with exp_col1:
+                preset_name = st.selectbox(
+                    "ODAS SST Preset",
+                    list(SST_PRESETS.keys()),
+                    index=0,
+                    help=(
+                        "Quick-start configuration for ODAS Sound Source Tracking (SST).  "
+                        "Each preset is a named combination of the 7 parameters below — "
+                        "expand **Advanced** to inspect or override individual values.\n\n"
+                        "**Balanced (default)** — `N_prob=6 / theta_prob=0.65 / Pnew=0.06` — "
+                        "best for general dataset collection; ~0.63 FP/s.\n\n"
+                        "**High-Recall** — `N_prob=3 / theta_prob=0.60 / Pnew=0.15` — "
+                        "catches short/quiet events at the cost of more FPs (~1.3/s); "
+                        "use *only* for building training datasets (EXP-A/B).\n\n"
+                        "**Low-FP (deployment test)** — `N_prob=8 / theta_prob=0.75 / Pnew=0.03` — "
+                        "suppresses geometry-driven hotspot FPs; higher miss rate; "
+                        "use to simulate live-device conditions (EXP-C/D)."
+                    )
+                )
+                preset = SST_PRESETS[preset_name]
+                st.caption(f"ℹ️ {preset['description']}")
+            with exp_col2:
+                experiment_tag = st.text_input(
+                    "Experiment tag (optional)",
+                    placeholder="e.g. exp_b4_hard_negatives",
+                    help=(
+                        "Free-text tag written into the run JSON and propagated to datasets/models. "
+                        "Use the tags from docs/experiments.md so results are traceable."
+                    )
+                )
+
+            # ── Advanced per-parameter overrides ─────────────────────────────
+            with st.expander("⚙️ Advanced — override individual SST parameters"):
+                st.caption(
+                    "Values are pre-filled from the chosen preset. "
+                    "Any change here overrides the preset for this run only — the preset name is "
+                    "still saved in the run JSON for traceability."
+                )
+                adv_col1, adv_col2 = st.columns(2)
+                with adv_col1:
+                    ov_Pnew = st.slider(
+                        "Pnew — track-birth probability",
+                        0.01, 0.30, float(preset["Pnew"]), 0.01,
+                        help=(
+                            "Probability threshold for spawning a *new* tracked source. "
+                            "Lower → more new tracks born (higher recall, more FPs). "
+                            "Higher → only strong candidates become tracks (fewer FPs, miss quiet sources)."
+                        )
+                    )
+                    ov_theta_new = st.slider(
+                        "theta_new — spatial gate for new tracks",
+                        0.40, 0.99, float(preset["theta_new"]), 0.01,
+                        help=(
+                            "Angular coherence required before a candidate SSL peak is promoted "
+                            "to a new SST track. Higher → stricter spatial gate."
+                        )
+                    )
+                    ov_Pfalse = st.slider(
+                        "Pfalse — false-source probability",
+                        0.01, 0.30, float(preset["Pfalse"]), 0.01,
+                        help=(
+                            "Prior probability that any given observation is a false alarm. "
+                            "Higher → tracker is more sceptical, prunes more aggressively."
+                        )
+                    )
+                    ov_gainMin = st.slider(
+                        "gainMin — minimum beamformer gain",
+                        0.10, 0.90, float(preset["gainMin"]), 0.05,
+                        help=(
+                            "Minimum gain applied to the beamformed output for each tracked source. "
+                            "Lower → more aggressive noise suppression; may clip quiet signals. "
+                            "Higher → more signal retained but also more residual noise in the clip."
+                        )
+                    )
+                with adv_col2:
+                    ov_N_prob = st.slider(
+                        "N_prob — confirmation frames",
+                        1, 15, int(preset["N_prob"]), 1,
+                        help=(
+                            "Number of consecutive ODAS frames a candidate must remain active "
+                            "before being confirmed as a real source. "
+                            "Higher → fewer FPs but misses short events. "
+                            "Lower → catches brief sounds but increases FP rate."
+                        )
+                    )
+                    ov_theta_prob = st.slider(
+                        "theta_prob — confirmation coherence",
+                        0.40, 0.99, float(preset["theta_prob"]), 0.01,
+                        help=(
+                            "Minimum spatial coherence required during the N_prob confirmation "
+                            "window. Higher → stricter confirmation gate."
+                        )
+                    )
+                    ov_theta_inactive = st.slider(
+                        "theta_inactive — track-death threshold",
+                        0.40, 0.99, float(preset["theta_inactive"]), 0.01,
+                        help=(
+                            "A confirmed track is killed when its coherence drops below this "
+                            "value for several frames. Higher → tracks die sooner after the "
+                            "source stops (less trailing FP activity)."
+                        )
+                    )
+
+                # Build override dict — passed to _run_simulation
+                sst_overrides = {
+                    "Pnew":           ov_Pnew,
+                    "theta_new":      ov_theta_new,
+                    "N_prob":         ov_N_prob,
+                    "theta_prob":     ov_theta_prob,
+                    "Pfalse":         ov_Pfalse,
+                    "gainMin":        ov_gainMin,
+                    "theta_inactive": ov_theta_inactive,
+                }
+
         # Port configuration
         port = st.number_input("Socket Port", 10000, 20000, 10000, 1)
         
@@ -134,7 +287,10 @@ class SimulationRunner:
             stop_button = st.button("⏹️ Stop Simulation", type="secondary")
         
         if run_button:
-            self._run_simulation(str(selected_raw_file), port, metadata)
+            self._run_simulation(str(selected_raw_file), port, metadata,
+                                 preset_name=preset_name,
+                                 sst_overrides=sst_overrides,
+                                 experiment_tag=experiment_tag.strip() or None)
             st.rerun()  # switch to the status view immediately
 
         if stop_button:
@@ -176,14 +332,49 @@ class SimulationRunner:
         time.sleep(5)
         st.rerun()
     
-    def _run_simulation(self, raw_file_path, port, metadata):
+    def _apply_sst_preset(self, preset: dict):
+        """Patch the SST parameters in the ODAS config file to match the selected preset."""
+        import re as _re
+        cfg_path = self.odas_config
+        try:
+            text = Path(cfg_path).read_text()
+            param_map = {
+                'Pnew':           str(preset['Pnew']),
+                'theta_new':      str(preset['theta_new']),
+                'N_prob':         str(preset['N_prob']),
+                'theta_prob':     str(preset['theta_prob']),
+                'Pfalse':         str(preset['Pfalse']),
+                'gainMin':        str(preset['gainMin']),
+                'theta_inactive': str(preset['theta_inactive']),
+            }
+            for param, value in param_map.items():
+                # Matches: Pnew = 0.06;  (with optional spaces)
+                text = _re.sub(
+                    rf'({_re.escape(param)}\s*=\s*)[^;]+;',
+                    rf'\g<1>{value};',
+                    text
+                )
+            Path(cfg_path).write_text(text)
+        except Exception as exc:
+            st.warning(f"⚠️ Could not patch ODAS config with preset: {exc}")
+
+    def _run_simulation(self, raw_file_path, port, metadata,
+                        preset_name: str = "Balanced (default)",
+                        sst_overrides: dict | None = None,
+                        experiment_tag: str | None = None):
         """Start the ODAS simulation — processes run in a background thread so
-        Streamlit re-runs cannot kill them prematurely."""
+        Streamlit re-renders cannot kill them prematurely."""
 
         sim = _get_sim_state()
         if sim["running"]:
             st.warning("A simulation is already running.")
             return
+
+        # ── apply SST config — overrides take precedence over preset ─────────
+        base_preset = SST_PRESETS.get(preset_name, SST_PRESETS["Balanced (default)"])
+        effective = {**base_preset, **(sst_overrides or {})}
+        self._apply_sst_preset(effective)
+        st.info(f"⚙️ ODAS SST preset applied: **{preset_name}**")
 
         # ── derive names / durations ────────────────────────────────────────
         render_id = metadata.get('render_id', Path(raw_file_path).stem)
@@ -269,7 +460,8 @@ class SimulationRunner:
             target=self._monitor_background,
             args=(sim, log_fh, run_name, render_id, scene_name,
                   metadata, raw_file_path, log_file_path,
-                  run_start_time, run_timestamp, duration),
+                  run_start_time, run_timestamp, duration,
+                  preset_name, experiment_tag),
             daemon=True,
         )
         monitor_thread.start()
@@ -277,7 +469,9 @@ class SimulationRunner:
     # ── background monitor ────────────────────────────────────────────────────
     def _monitor_background(self, sim, log_fh, run_name, render_id, scene_name,
                              metadata, raw_file_path, log_file_path,
-                             run_start_time, run_timestamp, duration):
+                             run_start_time, run_timestamp, duration,
+                             preset_name: str = "Balanced (default)",
+                             experiment_tag: str | None = None):
         """Runs in a daemon thread — waits for socket to finish, then cleans up.
         Updates sim dict in-place so the Streamlit polling loop can display
         progress without touching the processes.
@@ -364,6 +558,8 @@ class SimulationRunner:
             'port': 10000,
             'odas_config': self.odas_config,
             'warmup_seconds': metadata.get('warmup_seconds', 0),
+            'odas_preset': preset_name,
+            'experiment_tag': experiment_tag or '',
         }
         run_file_path = str(self.runs_dir / f"{run_name}.json")
         with open(run_file_path, 'w') as f:

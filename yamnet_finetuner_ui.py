@@ -204,6 +204,25 @@ class YAMNetFinetunerUI:
 
         st.divider()
 
+        # ── Per-class clip cap ────────────────────────────────────────────────
+        max_clips_per_class = st.number_input(
+            "🔢 Max training clips per class",
+            min_value=0,
+            max_value=5000,
+            value=0,
+            step=50,
+            help=(
+                "Cap the number of **training** clips per label to this value "
+                "(val/test clips are never capped).  "
+                "0 = no cap.  Useful to prevent a large background class from "
+                "drowning out smaller animal classes; ~200–500 is a good starting "
+                "point.  Clips are removed at the source-file level where possible "
+                "to avoid leakage."
+            ),
+        )
+
+        st.divider()
+
         train_dir = st.session_state.get(self._K_TRAIN_DIR)
         if train_dir:
             st.success(f"✅ Training directory ready: `{Path(train_dir).name}`")
@@ -214,6 +233,7 @@ class YAMNetFinetunerUI:
                     training_dir, n = self.ft.prepare_training_dir(
                         selected_paths,
                         inject_bg_clips=inject_bg,
+                        max_clips_per_class=max_clips_per_class,
                     )
                     st.session_state[self._K_TRAIN_DIR] = str(training_dir)
                     # reset any cached classifier so the analyzer picks up the new model

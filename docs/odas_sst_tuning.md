@@ -275,7 +275,46 @@ A non-planar mic arrangement (e.g., tetrahedral or pyramid) would break the inte
 
 ---
 
-## 8. Config File Quick Reference
+## 8. App Preset System (added 2026-05-02)
+
+The simulator UI exposes three named presets that patch the live config before each run. These are defined in `simulator.py → SST_PRESETS` and can be further overridden with per-parameter sliders in the **Advanced** expander.
+
+### Preset definitions
+
+| Preset | Pnew | N_prob | theta_prob | theta_new | Pfalse | gainMin | theta_inactive | Intended use |
+|--------|------|--------|------------|-----------|--------|---------|----------------|--------------|
+| **Balanced (default)** | 0.06 | 6 | 0.65 | 0.80 | 0.10 | 0.40 | 0.80 | General dataset collection; ~0.63 FP/s |
+| **High-Recall** | 0.15 | 3 | 0.60 | 0.60 | 0.20 | 0.30 | 0.70 | Maximise event capture for training data; ~1.3 FP/s |
+| **Low-FP (deployment test)** | 0.03 | 8 | 0.75 | 0.85 | 0.05 | 0.45 | 0.85 | Simulate live-device conditions; higher miss rate |
+
+### When to use each preset
+
+- **Balanced** — default for all EXP-A/B runs unless the experiment specifically varies ODAS config.  
+- **High-Recall** — use when the goal is to capture as many clips as possible for training (e.g. EXP-B1, EXP-B2). Accept the higher FP rate; the downstream YAMNet classifier will handle filtering.  
+- **Low-FP** — use when simulating what the Raspberry Pi will actually see (EXP-C, EXP-D). FP/s will be lower but brief animal calls (<2s) may be missed.
+
+### Using Advanced overrides
+
+Select a preset to pre-populate all 7 sliders, then adjust individual parameters. The preset name is always written to the run JSON for traceability even if you've deviated from it. Recommended workflow:
+
+1. Start with the closest preset.  
+2. Adjust only the parameters you have a hypothesis about.  
+3. Add an `experiment_tag` (e.g. `exp_c1_low_fp_v2`) so the run is traceable back to `docs/experiments.md`.
+
+### N_prob ↔ theta_prob coupling rule
+
+**Do not lower `theta_prob` without raising `N_prob` proportionally.** A shorter window at a lower threshold is strictly worse than the original single-frame baseline — noise bursts accumulate across more chances to fake a confirmation. The safe design space is:
+
+| N_prob (frames / ms) | Minimum theta_prob |
+|----------------------|--------------------|
+| 1–3 (8–24ms) | ≥ 0.75 |
+| 4–6 (32–48ms) | ≥ 0.65 |
+| 7–10 (56–80ms) | ≥ 0.60 |
+| > 10 | ≥ 0.55 |
+
+---
+
+## 9. Config File Quick Reference
 
 **File:** `/home/azureuser/z_odas_newbeamform/config/runtime/local_socket.cfg`  
 **Note:** This is the ONLY config read by the simulator. `/home/azureuser/z_odas/re6_sockets.cfg` is NOT used.

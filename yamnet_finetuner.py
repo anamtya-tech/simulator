@@ -160,8 +160,9 @@ class YAMNetFinetuner:
 
     def prepare_training_dir(
         self,
-        dataset_paths    : list[str],
-        inject_bg_clips  : int = 0,
+        dataset_paths      : list[str],
+        inject_bg_clips    : int = 0,
+        max_clips_per_class: int = 0,
     ) -> tuple[Path, int]:
         """
         Prepare a training-ready directory that data_loader.py can consume.
@@ -173,16 +174,28 @@ class YAMNetFinetuner:
         datasets and inject them as a 'background' class.  Injection is
         skipped when the selected datasets already contain a background class.
 
+        max_clips_per_class > 0 caps the number of *training* clips per label
+        (validation/test clips are never capped) to prevent class imbalance
+        from dominating the loss.  Set to 0 to disable.
+
         Returns (training_dir, n_samples).
         """
         if len(dataset_paths) == 1:
             ds_dir = Path(dataset_paths[0])
             if self._is_odas_dataset(ds_dir):
-                return self._prepare_odas_single(ds_dir, inject_bg_clips=inject_bg_clips)
-            return self._prepare_single(ds_dir)
-        return self._prepare_merged(dataset_paths, inject_bg_clips=inject_bg_clips)
+                return self._prepare_odas_single(
+                    ds_dir,
+                    inject_bg_clips=inject_bg_clips,
+                    max_clips_per_class=max_clips_per_class,
+                )
+            return self._prepare_single(ds_dir, max_clips_per_class=max_clips_per_class)
+        return self._prepare_merged(
+            dataset_paths,
+            inject_bg_clips=inject_bg_clips,
+            max_clips_per_class=max_clips_per_class,
+        )
 
-    def _prepare_single(self, ds_dir: Path) -> tuple[Path, int]:
+    def _prepare_single(self, ds_dir: Path, max_clips_per_class: int = 0) -> tuple[Path, int]:
         manifest   = pd.read_csv(ds_dir / 'manifest.csv')
         audio_base = ds_dir / 'audio'
         rows = []
@@ -194,14 +207,17 @@ class YAMNetFinetuner:
                 # Fallback: put under label subdir
                 rel = Path(str(row['label'])) / wav_abs.name
             rows.append({
-                'filename': str(rel),
-                'label'   : row['label'],
-                'fold'    : row.get('fold', 'train'),
+                'filename'  : str(rel),
+                'label'     : row['label'],
+                'fold'      : row.get('fold', 'train'),
+                'source_wav': wav_abs.stem,
             })
         df = pd.DataFrame(rows)
         df = self._rebalance_folds(df)
+        if max_clips_per_class > 0:
+            df = self._cap_train_clips(df, max_clips_per_class)
         labels_csv = ds_dir / 'labels.csv'
-        df.to_csv(labels_csv, index=False)
+        df[['filename', 'label', 'fold']].to_csv(labels_csv, index=False)
         return ds_dir, len(df)
 
     @staticmethod
@@ -266,8 +282,9 @@ class YAMNetFinetuner:
 
     def _prepare_odas_single(
         self,
-        ds_dir          : Path,
-        inject_bg_clips : int = 0,
+        ds_dir              : Path,
+        inject_bg_clips     : int = 0,
+        max_clips_per_class : int = 0,
     ) -> tuple[Path, int]:
         """Prepare a post-ODAS curator dataset (flat audio/, no manifest.csv) for training.
 
@@ -322,13 +339,17 @@ class YAMNetFinetuner:
                 } for r in bg_rows])
                 slim = pd.concat([slim, bg_df], ignore_index=True)
 
+        if max_clips_per_class > 0:
+            slim = self._cap_train_clips(slim, max_clips_per_class)
+
         slim.to_csv(stage / 'labels.csv', index=False)
         return stage, len(slim)
 
     def _prepare_merged(
         self,
-        dataset_paths   : list[str],
-        inject_bg_clips : int = 0,
+        dataset_paths       : list[str],
+        inject_bg_clips     : int = 0,
+        max_clips_per_class : int = 0,
     ) -> tuple[Path, int]:
         """Create a staging directory that merges N datasets via symlinks.
 
@@ -417,10 +438,56 @@ class YAMNetFinetuner:
             merged_df = pd.DataFrame(all_rows)
             merged_df = self._rebalance_folds(merged_df)
 
+        if max_clips_per_class > 0:
+            merged_df = self._cap_train_clips(merged_df, max_clips_per_class)
+
         merged_df.to_csv(labels_csv, index=False)
         return stage, len(merged_df)
 
     # ── Fold rebalancing ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _cap_train_clips(df: pd.DataFrame, max_clips: int, seed: int = 42) -> pd.DataFrame:
+        """Cap training clips per class to *max_clips* (val/test untouched).
+
+        Uses source-file grouped sampling: if a ``source_wav`` column is
+        present, entire source files are kept or dropped together so no
+        clip from a dropped source sneaks into the test split through a
+        different row.  Falls back to row-level sampling when the column
+        is absent.
+        """
+        import numpy as np
+        rng = np.random.default_rng(seed)
+        keep_parts: list[pd.DataFrame] = []
+
+        # Never touch val/test rows
+        non_train = df[df['fold'] != 'train'].copy()
+        train     = df[df['fold'] == 'train'].copy()
+
+        for label, grp in train.groupby('label'):
+            if len(grp) <= max_clips:
+                keep_parts.append(grp)
+                continue
+
+            if 'source_wav' in grp.columns:
+                # Group by source WAV to avoid leakage
+                sources = grp['source_wav'].unique()
+                rng.shuffle(sources)
+                selected: list[pd.DataFrame] = []
+                n_so_far = 0
+                for src in sources:
+                    src_rows = grp[grp['source_wav'] == src]
+                    if n_so_far >= max_clips:
+                        break
+                    selected.append(src_rows)
+                    n_so_far += len(src_rows)
+                keep_parts.append(pd.concat(selected).iloc[:max_clips])
+            else:
+                idx = rng.choice(len(grp), max_clips, replace=False)
+                keep_parts.append(grp.iloc[sorted(idx)])
+
+        result = pd.concat([non_train] + keep_parts, ignore_index=True)
+        return result
 
     @staticmethod
     def _rebalance_folds(df: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
@@ -462,24 +529,45 @@ class YAMNetFinetuner:
     ) -> pd.DataFrame:
         """Assign val/test folds via per-class stratified sampling (70/15/15).
 
-        Classes with fewer than 3 clips stay entirely in train.
+        When a ``source_wav`` column is present, grouping is done at the
+        *source-file* level so clips from the same WAV never end up in both
+        train and val/test (prevents data leakage from Griffin-Lim chunking).
+
+        Classes with fewer than 3 (source-file) groups stay entirely in train.
         """
         import numpy as np
         rng = np.random.default_rng(seed)
         df  = df.copy()
         df['fold'] = 'train'
 
+        use_grouped = 'source_wav' in df.columns
+
         for label in df['label'].unique():
-            idx = df.index[df['label'] == label].tolist()
-            n   = len(idx)
-            if n < 3:
-                continue                          # too few — all in train
-            shuffled = rng.permutation(idx)
-            n_val  = max(1, int(round(n * val_frac)))
-            n_test = max(1, int(round(n * test_frac)))
-            df.loc[shuffled[:n_val],              'fold'] = 'val'
-            df.loc[shuffled[n_val:n_val + n_test], 'fold'] = 'test'
-            # rest remain 'train'
+            label_mask = df['label'] == label
+
+            if use_grouped:
+                # Source-file level grouping — prevent leakage across folds
+                sources = df.loc[label_mask, 'source_wav'].unique()
+                n = len(sources)
+                if n < 3:
+                    continue
+                shuffled_srcs = rng.permutation(sources)
+                n_val  = max(1, int(round(n * val_frac)))
+                n_test = max(1, int(round(n * test_frac)))
+                val_srcs  = set(shuffled_srcs[:n_val])
+                test_srcs = set(shuffled_srcs[n_val:n_val + n_test])
+                df.loc[label_mask & df['source_wav'].isin(val_srcs),  'fold'] = 'val'
+                df.loc[label_mask & df['source_wav'].isin(test_srcs), 'fold'] = 'test'
+            else:
+                idx = df.index[label_mask].tolist()
+                n   = len(idx)
+                if n < 3:
+                    continue
+                shuffled = rng.permutation(idx)
+                n_val  = max(1, int(round(n * val_frac)))
+                n_test = max(1, int(round(n * test_frac)))
+                df.loc[shuffled[:n_val],               'fold'] = 'val'
+                df.loc[shuffled[n_val:n_val + n_test], 'fold'] = 'test'
 
         return df
 

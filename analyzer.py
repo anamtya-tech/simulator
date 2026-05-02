@@ -81,6 +81,17 @@ class ResultAnalyzer:
                     value=True,
                     help="Curate GT-matched detections into the YAMNet training dataset"
                 )
+                ambient_only_mode = st.checkbox(
+                    "🌿 Label ALL peaks as background (ambient-only run)",
+                    value=False,
+                    help=(
+                        "Enable this when the scene has ZERO directional sources "
+                        "(ambient-only render, e.g. EXP-B4 hard negatives). "
+                        "Every ODAS detection will be saved as the 'background' class "
+                        "regardless of GT or YAMNet prediction. "
+                        "This teaches the model to reject ambient ghost tracks."
+                    )
+                )
             
             with col2:
                 # YAMNet classification confidence threshold for the curator.
@@ -162,6 +173,15 @@ class ResultAnalyzer:
             st.metric("Render ID", run_data.get('render_id', 'N/A'))
         with col4:
             st.metric("Duration", f"{run_data.get('scene_metadata', {}).get('duration', 0)}s")
+
+        # Show experiment provenance if tagged
+        exp_tag   = run_data.get('experiment_tag', '')
+        odas_preset = run_data.get('odas_preset', '')
+        if exp_tag or odas_preset:
+            tag_parts = []
+            if exp_tag:    tag_parts.append(f"🧪 `{exp_tag}`")
+            if odas_preset: tag_parts.append(f"⚙️ preset: *{odas_preset}*")
+            st.caption("  ·  ".join(tag_parts))
         
         # Configuration
         with st.expander("⚙️ Analysis Settings", expanded=False):
@@ -246,11 +266,18 @@ class ResultAnalyzer:
                         try:
                             # Apply the UI threshold before curating
                             self.yamnet_curator.config['curation_criteria']['confidence_threshold'] = yamnet_conf_threshold
-                            yamnet_stats = self.yamnet_curator.curate_from_analysis(results, run_id)
-                            saved_t = yamnet_stats.get('saved', 0)
-                            saved_u = yamnet_stats.get('unknown_saved', 0)
-                            if saved_t or saved_u:
-                                st.info(f"🎵 YAMNet dataset: {saved_t} training + {saved_u} unknown samples saved")
+                            if ambient_only_mode:
+                                # Ambient-only run: label all peaks as 'background' hard negatives
+                                bg_stats = self.yamnet_curator.curate_ambient_as_background(
+                                    results, run_id)
+                                saved_bg = bg_stats.get('saved', 0)
+                                st.info(f"🌿 Ambient-only mode: {saved_bg} peaks saved as 'background' hard negatives")
+                            else:
+                                yamnet_stats = self.yamnet_curator.curate_from_analysis(results, run_id)
+                                saved_t = yamnet_stats.get('saved', 0)
+                                saved_u = yamnet_stats.get('unknown_saved', 0)
+                                if saved_t or saved_u:
+                                    st.info(f"🎵 YAMNet dataset: {saved_t} training + {saved_u} unknown samples saved")
                         except Exception as e:
                             st.warning(f"⚠️ YAMNet curation skipped: {e}")
                     
@@ -273,97 +300,104 @@ class ResultAnalyzer:
                     self._delete_analysis(run_id)
                     st.rerun()
                 return
-            
-            self._display_summary(analysis_data)
-            
-            # Action buttons
-            st.markdown("---")
-            
-            if report_path.exists():
-                st.success("📊 Interactive Report Generated!")
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    view_report = st.button("🔍 Open Report (Full Page)", key=f"open_{run_id}", width='stretch', type="primary")
-                
-                with col2:
-                    with open(report_path, 'rb') as f:
-                        st.download_button(
-                            "📥 Download HTML",
-                            f,
-                            file_name=report_path.name,
-                            mime="text/html",
-                            width='stretch'
-                        )
-                
-                with col3:
-                    st.text_input(
-                        "File Path",
-                        value=str(report_path),
-                        key=f"path_{run_id}",
-                        label_visibility="collapsed"
-                    )
-                
-                # Show report in full page when button clicked
-                if view_report:
-                    st.markdown("---")
-                    st.markdown("### 📊 Interactive Report Viewer")
-                    try:
-                        with open(report_path, 'r') as f:
-                            html_content = f.read()
-                        html_size_kb = len(html_content) / 1024
-                        if html_size_kb < 2048:  # <2MB safe to embed
-                            import streamlit.components.v1 as components
-                            st.info(f"⚡ Fully interactive ({html_size_kb:.0f} KB) — rotate 3D plots, zoom timeline, hover for details")
-                            components.html(html_content, width=None, height=1400, scrolling=True)
-                        else:
-                            st.warning(
-                                f"📁 Report is **{html_size_kb:.0f} KB** — too large to embed safely.  \n"
-                                f"Use the **Download** button above, then open the file in your browser."
-                            )
-                    except Exception as _e:
-                        st.error(f"Could not load report: {_e}")
-                    st.markdown("---")
-                    if st.button("⬆️ Back to Top", key=f"back_{run_id}"):
-                        st.rerun()
-            
-            st.markdown("---")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if dataset_path.exists():
-                    with open(dataset_path, 'rb') as f:
-                        st.download_button(
-                            "📥 Download Dataset CSV",
-                            f,
-                            file_name=dataset_path.name,
-                            mime="text/csv",
-                            width='stretch'
-                        )
-            
-            with col2:
-                with st.expander("📄 View Analysis JSON"):
-                    # Show summary only — full matches array can be thousands of
-                    # entries and pushing it over Streamlit's WebSocket causes
-                    # StreamClosedError.  Offer a download for the full file.
-                    summary_view = {
-                        'run_id':     analysis_data.get('run_id'),
-                        'scene_name': analysis_data.get('scene_name'),
-                        'timestamp':  analysis_data.get('timestamp'),
-                        'summary':    analysis_data.get('summary'),
-                        'by_source':  analysis_data.get('by_source'),
-                        'match_count': len(analysis_data.get('matches', [])),
-                    }
-                    st.json(summary_view)
-                    if analysis_path.exists():
-                        with open(analysis_path, 'rb') as f:
+
+            # ── Tabs: standard results + deployment evaluation ──────────────────
+            res_tab, deploy_tab = st.tabs(["📊 Results", "🚀 Deployment Evaluation"])
+
+            with res_tab:
+                self._display_summary(analysis_data)
+
+                # Action buttons
+                st.markdown("---")
+
+                if report_path.exists():
+                    st.success("📊 Interactive Report Generated!")
+
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        view_report = st.button("🔍 Open Report (Full Page)", key=f"open_{run_id}", width='stretch', type="primary")
+
+                    with col2:
+                        with open(report_path, 'rb') as f:
                             st.download_button(
-                                "📥 Download full analysis JSON",
+                                "📥 Download HTML",
                                 f,
-                                file_name=analysis_path.name,
-                                mime='application/json',
-                                key=f'dl_json_{run_id}'
+                                file_name=report_path.name,
+                                mime="text/html",
+                                width='stretch'
                             )
+
+                    with col3:
+                        st.text_input(
+                            "File Path",
+                            value=str(report_path),
+                            key=f"path_{run_id}",
+                            label_visibility="collapsed"
+                        )
+
+                    # Show report in full page when button clicked
+                    if view_report:
+                        st.markdown("---")
+                        st.markdown("### 📊 Interactive Report Viewer")
+                        try:
+                            with open(report_path, 'r') as f:
+                                html_content = f.read()
+                            html_size_kb = len(html_content) / 1024
+                            if html_size_kb < 2048:  # <2MB safe to embed
+                                import streamlit.components.v1 as components
+                                st.info(f"⚡ Fully interactive ({html_size_kb:.0f} KB) — rotate 3D plots, zoom timeline, hover for details")
+                                components.html(html_content, width=None, height=1400, scrolling=True)
+                            else:
+                                st.warning(
+                                    f"📁 Report is **{html_size_kb:.0f} KB** — too large to embed safely.  \n"
+                                    f"Use the **Download** button above, then open the file in your browser."
+                                )
+                        except Exception as _e:
+                            st.error(f"Could not load report: {_e}")
+                        st.markdown("---")
+                        if st.button("⬆️ Back to Top", key=f"back_{run_id}"):
+                            st.rerun()
+
+                st.markdown("---")
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    if dataset_path.exists():
+                        with open(dataset_path, 'rb') as f:
+                            st.download_button(
+                                "📥 Download Dataset CSV",
+                                f,
+                                file_name=dataset_path.name,
+                                mime="text/csv",
+                                width='stretch'
+                            )
+
+                with col2:
+                    with st.expander("📄 View Analysis JSON"):
+                        # Show summary only — full matches array can be thousands of
+                        # entries and pushing it over Streamlit's WebSocket causes
+                        # StreamClosedError.  Offer a download for the full file.
+                        summary_view = {
+                            'run_id':     analysis_data.get('run_id'),
+                            'scene_name': analysis_data.get('scene_name'),
+                            'timestamp':  analysis_data.get('timestamp'),
+                            'summary':    analysis_data.get('summary'),
+                            'by_source':  analysis_data.get('by_source'),
+                            'match_count': len(analysis_data.get('matches', [])),
+                        }
+                        st.json(summary_view)
+                        if analysis_path.exists():
+                            with open(analysis_path, 'rb') as f:
+                                st.download_button(
+                                    "📥 Download full analysis JSON",
+                                    f,
+                                    file_name=analysis_path.name,
+                                    mime='application/json',
+                                    key=f'dl_json_{run_id}'
+                                )
+
+            with deploy_tab:
+                self._render_deployment_eval(analysis_data, run_id)
         
         # Show recent analyses
         st.markdown("---")
@@ -3170,6 +3204,68 @@ class ResultAnalyzer:
                     if len(classified_matches) > 50:
                         st.info(f"Showing first 50 of {len(classified_matches)} classified detections")
     
+    def _render_deployment_eval(self, analysis_data: dict, run_id: str):
+        """Render the Deployment Evaluation tab using compute_deployment_metrics()."""
+        st.markdown("### 🚀 Deployment Evaluation Metrics")
+        st.caption(
+            "These metrics measure how the *deployed* classifier would perform on this run: "
+            "event-level precision/recall (direction-aware) and false-positive rate."
+        )
+
+        try:
+            dep = self.yamnet_curator.compute_deployment_metrics(analysis_data)
+        except Exception as exc:
+            st.warning(f"Could not compute deployment metrics: {exc}")
+            return
+
+        if not dep:
+            st.info("No deployment metrics available for this run.")
+            return
+
+        # ── Top-line metrics ────────────────────────────────────────────────
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Event Precision", f"{dep.get('event_precision', 0):.2%}")
+        with col2:
+            st.metric("Event Recall", f"{dep.get('event_recall', 0):.2%}")
+        with col3:
+            st.metric("Event F1", f"{dep.get('event_f1', 0):.2%}")
+        with col4:
+            fp_min = dep.get("fp_per_min", dep.get("fp_per_minute", 0))
+            st.metric("FP / min", f"{fp_min:.2f}")
+
+        direction_acc = dep.get("correct_class_and_direction_pct", dep.get("direction_accuracy"))
+        if direction_acc is not None:
+            st.metric("Correct class + direction %", f"{direction_acc:.1%}")
+
+        # ── Confusion matrix ─────────────────────────────────────────────────
+        cm = dep.get("confusion_matrix")
+        if cm:
+            st.markdown("#### Confusion Matrix")
+            import pandas as pd
+            st.dataframe(pd.DataFrame(cm), use_container_width=True)
+
+        # ── Per-label breakdown ──────────────────────────────────────────────
+        per_label = dep.get("per_label")
+        if per_label:
+            st.markdown("#### Per-Label Breakdown")
+            import pandas as pd
+            rows = []
+            for label, stats in per_label.items():
+                rows.append({
+                    "Label":     label,
+                    "TP":        stats.get("tp", 0),
+                    "FP":        stats.get("fp", 0),
+                    "FN":        stats.get("fn", 0),
+                    "Precision": f"{stats.get('precision', 0):.2%}",
+                    "Recall":    f"{stats.get('recall', 0):.2%}",
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+        # ── Raw JSON dump for debugging ──────────────────────────────────────
+        with st.expander("📄 Raw deployment metrics JSON"):
+            st.json({k: v for k, v in dep.items() if k != "confusion_matrix"})
+
     def _show_recent_analyses(self):
         """Show table of recent analyses"""
         st.subheader("📁 Recent Analyses")

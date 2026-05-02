@@ -1,6 +1,8 @@
 # ODAS False Positives & Missed Events — Practical Guide
-> Scene used for all data: `forest_animals_20260409_103128` (1220s, 285 GT events, 7 labels, real ambient at −10 dBFS)
-> Best config run: RUN6 (`N_prob=6, theta_prob=0.65`) — see [odas_sst_tuning.md](odas_sst_tuning.md)
+> Scene used for all data: `forest_animals_20260409_103128` (1220s, 285 GT events, 7 labels, real ambient at −10 dBFS)  
+> Best config run: RUN6 (`N_prob=6, theta_prob=0.65`) — see [odas_sst_tuning.md](odas_sst_tuning.md)  
+> App preset system and N_prob ↔ theta_prob coupling rules — see [odas_sst_tuning.md §8](odas_sst_tuning.md)  
+> Pipeline and dataset strategy insights — see [pipeline_insights.md](pipeline_insights.md)
 
 ---
 

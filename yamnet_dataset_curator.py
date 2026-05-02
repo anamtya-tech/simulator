@@ -1069,3 +1069,154 @@ class YAMNetDatasetCurator:
             }
         
         return None
+
+    # ── Hard-negative / ambient-only curation ─────────────────────────────────
+
+    def curate_ambient_as_background(self, analysis_results, run_id,
+                                     dataset_name: str | None = None) -> dict:
+        """Label ALL ODAS detections from an ambient-only run as 'background'.
+
+        Use this when the scene has ZERO directional sources (ambient-only render).
+        Every ODAS peak is a false positive driven by ambient noise — exactly the
+        hard-negative distribution we want the model to learn to reject.
+
+        The extracted audio is the same Griffin-Lim / render-extraction path as
+        normal curation, but the label is forced to 'background' regardless of
+        what ODAS event voting or YAMNet said.
+
+        Args:
+            analysis_results: Dict from analyzer._analyze_run / _apply_yamnet_classifications.
+            run_id: Unique run identifier (written into filenames).
+            dataset_name: Target dataset name (default: active dataset).
+
+        Returns:
+            dict with saved / skipped counts.
+        """
+        if dataset_name is None:
+            dataset_name = self.get_active_dataset()
+
+        matches = analysis_results.get('matches', [])
+        if not matches:
+            return {'saved': 0, 'skipped': 0, 'dataset': dataset_name}
+
+        # Override every match: force label = 'background', dataset_type = 'training'
+        bg_matches = []
+        for match in matches:
+            m = dict(match)
+            m['label'] = 'background'
+            m['yamnet_class'] = 'background'
+            m['yamnet_confidence'] = 1.0
+            m['match_type'] = 'ambient_background'
+            m['patch_quality'] = 'during_gt'      # bypass GT-window gate
+            m['clean_match'] = True
+            m['dataset_type'] = 'training'
+            m['curation_reason'] = 'ambient_only_hard_negative'
+            # Spatial gate: any activity level is fine for hard negatives
+            det = m.get('detection', {})
+            if det.get('activity', 0) < 0.001 and not det.get('spectra_file'):
+                continue  # truly dead track — skip
+            bg_matches.append(m)
+
+        if not bg_matches:
+            return {'saved': 0, 'skipped': len(matches), 'dataset': dataset_name}
+
+        stats = self._save_samples(bg_matches, run_id, analysis_results,
+                                   dataset_name=dataset_name)
+        return {
+            'saved': stats.get('saved', 0),
+            'skipped': stats.get('skipped', 0),
+            'dataset': dataset_name,
+            'label_distribution': stats.get('label_distribution', {}),
+        }
+
+    def compute_deployment_metrics(self, analysis_results: dict) -> dict:
+        """Compute deployment-oriented metrics from an analysis result dict.
+
+        Returns a dict with:
+          - event_precision, event_recall, event_f1
+          - fp_per_min  (detections during quiet periods / quiet_minutes)
+          - correct_class_and_direction  (% of GT-matched detections where
+              yamnet_class == GT label AND angular_error <= direction_threshold)
+          - confusion: {gt_label: {predicted_label: count}}
+          - per_label: {label: {detected, total, precision, recall}}
+        """
+        matches = analysis_results.get('matches', [])
+        quiet_seconds = float(analysis_results.get('summary', {}).get('quiet_seconds', 0.0))
+        direction_threshold = float(
+            self.config.get('curation_criteria', {}).get('direction_threshold_deg', 15.0)
+        )
+
+        # ── Event-level P/R ──────────────────────────────────────────────────
+        # A "true positive event" = at least one detection matched a GT source.
+        # Count unique (label, gt_start, gt_end) tuples that got at least one match.
+        gt_events_detected: set = set()
+        gt_events_total: set = set()
+        fp_count = 0
+        total_gt_matched = 0
+        correct_class_and_dir = 0
+        confusion: dict = {}
+        per_label: dict = {}
+
+        for m in matches:
+            src = m.get('source')
+            match_type = m.get('match_type', 'unmatched')
+
+            if src and match_type == 'ground_truth':
+                gt_key = (m.get('label', ''), src.get('start_time'), src.get('end_time'))
+                gt_events_total.add(gt_key)
+                gt_events_detected.add(gt_key)
+                total_gt_matched += 1
+
+                gt_lbl = m.get('label', 'unknown')
+                pred_lbl = m.get('yamnet_class', 'unclassified')
+                ang_err = m.get('angular_error', m.get('angular_error_deg', 999))
+
+                # Confusion matrix
+                confusion.setdefault(gt_lbl, {})
+                confusion[gt_lbl][pred_lbl] = confusion[gt_lbl].get(pred_lbl, 0) + 1
+
+                # Per-label
+                per_label.setdefault(gt_lbl, {'detected': 0, 'total': 0})
+                per_label[gt_lbl]['detected'] += 1
+
+                # Correct class AND direction
+                if (gt_lbl.lower() == pred_lbl.lower() and
+                        ang_err is not None and ang_err <= direction_threshold):
+                    correct_class_and_dir += 1
+            else:
+                fp_count += 1
+
+        # Total GT events including undetected ones (from by_source summary)
+        by_source = analysis_results.get('by_source', [])
+        for src_info in by_source:
+            lbl = src_info.get('label', 'unknown')
+            total = src_info.get('total_gt_events', src_info.get('total', 0))
+            per_label.setdefault(lbl, {'detected': 0, 'total': 0})
+            per_label[lbl]['total'] = max(per_label[lbl]['total'], total)
+
+        tp_events = len(gt_events_detected)
+        total_detections = len(matches)
+        total_gt = sum(v['total'] for v in per_label.values()) or len(gt_events_total)
+
+        event_precision = tp_events / total_detections if total_detections else 0.0
+        event_recall    = tp_events / total_gt if total_gt else 0.0
+        denom = event_precision + event_recall
+        event_f1 = 2 * event_precision * event_recall / denom if denom else 0.0
+
+        fp_per_min = fp_count / (quiet_seconds / 60.0) if quiet_seconds > 0 else float('nan')
+        cc_dir_pct = correct_class_and_dir / total_gt_matched if total_gt_matched else 0.0
+
+        return {
+            'event_precision':              round(event_precision, 4),
+            'event_recall':                 round(event_recall, 4),
+            'event_f1':                     round(event_f1, 4),
+            'fp_per_min':                   round(fp_per_min, 2),
+            'correct_class_and_direction':  round(cc_dir_pct, 4),
+            'total_detections':             total_detections,
+            'total_gt_events':              total_gt,
+            'gt_events_detected':           tp_events,
+            'fp_count':                     fp_count,
+            'quiet_seconds':                quiet_seconds,
+            'confusion':                    confusion,
+            'per_label':                    per_label,
+        }
