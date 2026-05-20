@@ -345,7 +345,23 @@ class AudioRenderer:
             # Ensure audio is exactly the right length
             audio = audio[:duration_samples]
 
-            # Apply per-source volume gain (default 1.0)
+            # ── Reference-level normalisation ────────────────────────────────
+            # If the source has a `ref_dbfs` value (read from label.txt line 3),
+            # normalise the signal so that a mic at 1 m in free-field would
+            # receive that RMS level (dBFS).  This removes recording-quality
+            # variation between different WAV files and gives pyroomacoustics
+            # a physically consistent starting amplitude; distance attenuation
+            # (≈ 1/r in amplitude) then falls out naturally from the RIR.
+            ref_dbfs = source_config.get('ref_dbfs', None)
+            if ref_dbfs is not None:
+                current_rms = float(np.sqrt(np.mean(audio ** 2)))
+                if current_rms > 1e-10:
+                    target_rms = 10.0 ** (ref_dbfs / 20.0)
+                    audio *= target_rms / current_rms
+
+            # Apply per-source volume gain (default 1.0) — acts as a fine-tune
+            # trim on top of the reference level above (or as an absolute gain
+            # when no ref_dbfs is set).
             audio *= source_config.get('volume', 1.0)
 
             # Windowed signal: only allocate an array for the active window
@@ -372,6 +388,8 @@ class AudioRenderer:
                 source_config['y'] + room_y / 2,
                 source_config['z'] + room_z / 2
             ])
+            # Ensure source is inside the room
+            source_pos = np.clip(source_pos, [0, 0, 0], [room_x, room_y, room_z])
             src_room.add_source(source_pos, signal=window_signal)
             src_room.simulate()
 
@@ -500,6 +518,15 @@ class AudioRenderer:
                         n_repeats = int(np.ceil(actual_samples / len(audio)))
                         audio = np.tile(audio, n_repeats)
                     audio = audio[:actual_samples]
+
+                    # Reference-level normalisation (same logic as directional sources)
+                    ref_dbfs = amb_source.get('ref_dbfs', None)
+                    if ref_dbfs is not None:
+                        current_rms = float(np.sqrt(np.mean(audio ** 2)))
+                        if current_rms > 1e-10:
+                            target_rms = 10.0 ** (ref_dbfs / 20.0)
+                            audio *= target_rms / current_rms
+
                     audio *= amb_source.get('volume', 0.5)
                     ambient_mix += audio
 

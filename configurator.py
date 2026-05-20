@@ -98,7 +98,18 @@ class SceneConfigurator:
                     stype = lines[1].strip() if len(lines) > 1 else 'directional'
                     if stype not in ('directional', 'ambient'):
                         stype = 'directional'
-                    result = (lbl, stype) if lbl else None
+                    # Line 3 (optional): reference dBFS RMS level at 1 m
+                    # e.g. "-18" means the source should produce -18 dBFS RMS
+                    # at a mic placed 1 m away (free-field).  pyroomacoustics
+                    # then applies realistic distance + room attenuation beyond
+                    # that reference distance.
+                    ref_dbfs = None
+                    if len(lines) > 2:
+                        try:
+                            ref_dbfs = float(lines[2].strip())
+                        except ValueError:
+                            ref_dbfs = None
+                    result = (lbl, stype, ref_dbfs) if lbl else None
                     label_cache[current] = result
                     return result
                 if current == root or current.parent == current:
@@ -113,9 +124,9 @@ class SceneConfigurator:
             if entry is None:
                 skipped.append(wav.name)
                 continue
-            lbl, stype = entry
+            lbl, stype, ref_dbfs = entry
             if lbl not in library:
-                library[lbl] = {'source_type': stype, 'files': []}
+                library[lbl] = {'source_type': stype, 'files': [], 'ref_dbfs': ref_dbfs}
             library[lbl]['files'].append(str(wav))
         return library, skipped
 
@@ -617,12 +628,22 @@ class SceneConfigurator:
         )
 
         # Per-source volume
+        ref_dbfs = source.get('ref_dbfs')
+        _vol_help = (
+            f'Fine-tune gain on top of the {ref_dbfs:+.0f} dBFS reference level '
+            f'set in label.txt (1.0 = use reference as-is).'
+            if ref_dbfs is not None
+            else 'Multiply signal amplitude. Add a ref_dbfs line to label.txt for '
+                 'physics-based level normalisation.'
+        )
         source['volume'] = st.slider(
             'Volume (gain)', 0.1, 10.0,
             float(source.get('volume', 1.0)),
             step=0.1, key=f'dir_volume_{idx}',
-            help='Multiply signal amplitude. Use >1 to compensate range attenuation.'
+            help=_vol_help
         )
+        if ref_dbfs is not None:
+            st.caption(f'📐 Reference level: {ref_dbfs:+.1f} dBFS @ 1 m (from label.txt)')
     
     def _visualize_capture(self, path, start_offset_s=0.0, preview_s=10.0):
         """Show per-channel waveform + RMS bar chart for a .raw capture file.
@@ -973,6 +994,7 @@ class SceneConfigurator:
 
         x, y, z = self._azimuth_elevation_to_cartesian(azimuth, distance, height)
 
+        lib_entry = self.library.get(label, {})
         source = {
             'label':      label,
             'wav_path':   wav_path,
@@ -981,6 +1003,10 @@ class SceneConfigurator:
             'end_time':   round(end_time,   2),
             'repeat':     do_repeat,
         }
+        # Carry the reference level from label.txt into the scene JSON so the
+        # renderer can normalise this source to a consistent physical level.
+        if lib_entry.get('ref_dbfs') is not None:
+            source['ref_dbfs'] = lib_entry['ref_dbfs']
         
         scene['directional_sources'].append(source)
     
@@ -997,11 +1023,14 @@ class SceneConfigurator:
             label = ambient_labels[0]
             volume = 0.5
         
+        lib_entry = self.library.get(label, {})
         source = {
             'label': label,
             'wav_path': 'Random',
             'volume': volume
         }
+        if lib_entry.get('ref_dbfs') is not None:
+            source['ref_dbfs'] = lib_entry['ref_dbfs']
         
         scene['ambient_sources'].append(source)
 
