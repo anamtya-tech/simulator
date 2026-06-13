@@ -576,16 +576,31 @@ class YAMNetFinetuner:
     def start_training(
         self,
         training_dir          : str,
-        phase1_epochs         : int  = 20,
-        phase2_epochs         : int  = 20,
-        batch_size            : int  = 32,
-        unfreeze_top          : int  = 4,
+        phase1_epochs         : int   = 20,
+        phase2_epochs         : int   = 0,    # 0 = pure frozen-embedding mode (recommended)
+        batch_size            : int   = 32,
+        unfreeze_top          : int   = 4,
+        focal_gamma           : float = 2.0,  # >0 = alpha-weighted focal loss (recommended
+                                              #      for wildlife/rare-class detection)
         run_name              : Optional[str] = None,
         warm_start_checkpoint : Optional[str] = None,
         nickname              : Optional[str] = None,
     ) -> tuple[subprocess.Popen, Path, str]:
         """
         Launch train_yamnet.py as a non-blocking subprocess.
+
+        Architecture: YAMNet backbone is kept *fully frozen* (phase2_epochs=0
+        by default).  Only the lightweight Dense head trained on 1024-D YAMNet
+        embeddings is updated.  This is the recommended approach when you have
+        few target classes and severe class imbalance (rare wildlife events vs.
+        abundant background).
+
+        focal_gamma > 0  activates alpha-weighted focal loss:
+            FL = -alpha_t * (1-p_t)^gamma * log(p_t)
+        where alpha_t = inverse-class-frequency weight.  This simultaneously
+        corrects the class prior (alpha) and down-weights easy background
+        samples (focal modulation).  gamma=2.0 is the standard RetinaNet value.
+        Set focal_gamma=0 to fall back to cross-entropy with class_weight.
 
         warm_start_checkpoint: path to a .keras model to warm-start backbone
         weights from instead of loading straight from the base SavedModel.
@@ -618,6 +633,7 @@ class YAMNetFinetuner:
             '--phase2-epochs', str(phase2_epochs),
             '--batch-size',    str(batch_size),
             '--unfreeze-top',  str(unfreeze_top),
+            '--focal-gamma',   str(focal_gamma),
             '--output-dir',    str(CHECKPOINTS_DIR),
             '--run-name',      run_name,
         ]

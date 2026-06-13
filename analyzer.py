@@ -20,6 +20,7 @@ import numpy as np
 import json
 import os
 import pandas as pd
+import soundfile as sf
 from pathlib import Path
 from datetime import datetime
 import plotly.graph_objects as go
@@ -27,6 +28,7 @@ from plotly.subplots import make_subplots
 import plotly.express as px
 from yamnet_dataset_curator import YAMNetDatasetCurator
 from timing_compensator import TimingCompensator
+from audio_reconstructor import AudioReconstructor
 
 # Global configuration
 CONFIG = {
@@ -301,8 +303,12 @@ class ResultAnalyzer:
                     st.rerun()
                 return
 
-            # ── Tabs: standard results + deployment evaluation ──────────────────
-            res_tab, deploy_tab = st.tabs(["📊 Results", "🚀 Deployment Evaluation"])
+            # ── Tabs: standard results + deployment evaluation + window explorer ─
+            res_tab, deploy_tab, windows_tab = st.tabs([
+                "📊 Results",
+                "🚀 Deployment Evaluation",
+                "🪟 Window Explorer"
+            ])
 
             with res_tab:
                 self._display_summary(analysis_data)
@@ -398,6 +404,9 @@ class ResultAnalyzer:
 
             with deploy_tab:
                 self._render_deployment_eval(analysis_data, run_id)
+
+            with windows_tab:
+                self._render_window_explorer(analysis_data, run_id)
         
         # Show recent analyses
         st.markdown("---")
@@ -3265,6 +3274,925 @@ class ResultAnalyzer:
         # ── Raw JSON dump for debugging ──────────────────────────────────────
         with st.expander("📄 Raw deployment metrics JSON"):
             st.json({k: v for k, v in dep.items() if k != "confusion_matrix"})
+
+    def _load_run_metadata(self, run_id: str, analysis_data: dict):
+        """Load run JSON metadata for this analysis."""
+        run_meta = analysis_data.get('run_metadata')
+        if isinstance(run_meta, dict) and run_meta:
+            return run_meta
+
+        run_path = self.runs_dir / f"{run_id}.json"
+        if not run_path.exists():
+            return {}
+        try:
+            return json.loads(run_path.read_text())
+        except Exception:
+            return {}
+
+    def _load_render_metadata(self, render_id: str):
+        """Load render sidecar JSON from outputs/renders/{render_id}.json."""
+        if not render_id:
+            return {}
+        render_path = self.base_output_dir / 'renders' / f"{render_id}.json"
+        if not render_path.exists():
+            return {}
+        try:
+            return json.loads(render_path.read_text())
+        except Exception:
+            return {}
+
+    def _extract_mono_from_raw_window(self, raw_audio_file, start_time, end_time,
+                                      warmup_seconds=0.0, sr=16000, n_channels=6):
+        """Extract a mono (avg of 4 mic channels) clip from interleaved raw PCM."""
+        if not raw_audio_file or not os.path.exists(raw_audio_file):
+            return None
+
+        try:
+            render_start = float(start_time) + float(warmup_seconds)
+            render_end = float(end_time) + float(warmup_seconds)
+            if render_end <= render_start:
+                return None
+
+            start_frame = int(render_start * sr)
+            end_frame = int(render_end * sr)
+            n_frames = max(0, end_frame - start_frame)
+            if n_frames <= 0:
+                return None
+
+            bytes_per_sample = 2  # S16_LE
+            start_byte = start_frame * n_channels * bytes_per_sample
+            n_bytes = n_frames * n_channels * bytes_per_sample
+
+            with open(raw_audio_file, 'rb') as f:
+                f.seek(start_byte)
+                raw_data = f.read(n_bytes)
+
+            if len(raw_data) < n_channels * bytes_per_sample:
+                return None
+
+            n_frames_actual = len(raw_data) // (n_channels * bytes_per_sample)
+            data = np.frombuffer(raw_data, dtype='<i2').reshape(n_frames_actual, n_channels)
+
+            # Channels 1:5 are the 4 microphone channels in renderer.py.
+            if data.shape[1] >= 5:
+                mono = data[:, 1:5].mean(axis=1).astype(np.float32) / 32768.0
+            else:
+                mono = data.mean(axis=1).astype(np.float32) / 32768.0
+            return mono
+        except Exception:
+            return None
+
+    def _waveform_to_spectrogram(self, waveform, sr=16000, n_fft=512, hop=128):
+        """Compute magnitude spectrogram from waveform."""
+        if waveform is None or len(waveform) == 0:
+            return None
+        try:
+            import librosa
+            spec = np.abs(librosa.stft(waveform.astype(np.float32), n_fft=n_fft, hop_length=hop))
+            return spec
+        except Exception:
+            return None
+
+    def _plot_spectrogram(self, spec, title, sr=16000, hop=128, key=None):
+        """Render a spectrogram (linear magnitude) as Plotly heatmap."""
+        if spec is None or spec.size == 0:
+            st.caption("No spectrogram available")
+            return
+
+        # Expect shape (freq_bins, time_frames)
+        db = 20.0 * np.log10(np.maximum(spec, 1e-8))
+        times = np.arange(db.shape[1]) * (hop / float(sr))
+        freqs = np.linspace(0, sr / 2.0, db.shape[0])
+
+        fig = go.Figure(
+            data=go.Heatmap(
+                z=db,
+                x=times,
+                y=freqs,
+                colorscale='Viridis',
+                colorbar=dict(title='dB')
+            )
+        )
+        fig.update_layout(
+            title=title,
+            xaxis_title='Time (s)',
+            yaxis_title='Frequency (Hz)',
+            height=320,
+            margin=dict(l=10, r=10, t=45, b=10)
+        )
+        st.plotly_chart(fig, use_container_width=True, key=key)
+
+    def _plot_slice_gt_direction_radar(self, scene_file, slice_start, slice_end, key=None):
+        """Plot a simple polar (radar-style) chart of GT source directions in a slice."""
+        if not scene_file or not os.path.exists(scene_file):
+            st.caption("GT direction radar unavailable (scene file missing).")
+            return
+
+        try:
+            scene = json.loads(Path(scene_file).read_text())
+        except Exception:
+            st.caption("GT direction radar unavailable (could not read scene file).")
+            return
+
+        active = []
+        for src in scene.get('directional_sources', []):
+            try:
+                s = float(src.get('start_time', 0.0))
+                e = float(src.get('end_time', 0.0))
+            except Exception:
+                continue
+            if e <= slice_start or s >= slice_end:
+                continue
+
+            x = float(src.get('x', 0.0))
+            y = float(src.get('y', 0.0))
+            z = float(src.get('z', 0.0))
+            az, _el = self._cartesian_to_spherical(x, y, z)
+            az_deg = (np.degrees(az) + 360.0) % 360.0
+            dist_xy = float(np.sqrt(x * x + y * y))
+            active.append({
+                'label': src.get('label', 'unknown'),
+                'az_deg': az_deg,
+                'dist_xy': max(dist_xy, 1e-6),
+            })
+
+        if not active:
+            st.caption("No active GT sources in this slice.")
+            return
+
+        max_r = max(a['dist_xy'] for a in active)
+        thetas = [a['az_deg'] for a in active]
+        rs = [a['dist_xy'] / max_r for a in active]
+        texts = [f"{a['label']} ({a['az_deg']:.0f}°)" for a in active]
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatterpolar(
+            r=rs,
+            theta=thetas,
+            mode='markers+text',
+            text=texts,
+            textposition='top center',
+            marker=dict(size=10),
+            name='GT sources'
+        ))
+        fig.update_layout(
+            title='GT source directions (slice)',
+            polar=dict(
+                radialaxis=dict(visible=True, range=[0, 1.05], title='Relative distance'),
+                angularaxis=dict(direction='counterclockwise', rotation=90)
+            ),
+            height=360,
+            margin=dict(l=10, r=10, t=45, b=10),
+            showlegend=False
+        )
+        st.plotly_chart(fig, use_container_width=True, key=key)
+
+    def _extract_gt_source_clips(self, scene_file, win_start, win_end, target_sr=16000):
+        """Extract source-local GT clips that overlap a selected window."""
+        if not scene_file or not os.path.exists(scene_file):
+            return []
+
+        try:
+            scene = json.loads(Path(scene_file).read_text())
+        except Exception:
+            return []
+
+        clips = []
+        for src in scene.get('directional_sources', []):
+            s = float(src.get('start_time', 0.0))
+            e = float(src.get('end_time', 0.0))
+            if e <= win_start or s >= win_end:
+                continue
+
+            overlap_start = max(win_start, s)
+            overlap_end = min(win_end, e)
+            if overlap_end <= overlap_start:
+                continue
+
+            wav_path = src.get('wav_path')
+            if not wav_path or not os.path.exists(wav_path):
+                continue
+
+            try:
+                audio, sr = sf.read(wav_path, always_2d=False)
+                if audio is None or len(audio) == 0:
+                    continue
+                if audio.ndim > 1:
+                    audio = np.mean(audio, axis=1)
+                audio = audio.astype(np.float32)
+
+                src_offset = max(0.0, overlap_start - s)
+                src_dur = max(0.0, overlap_end - overlap_start)
+                i0 = int(src_offset * sr)
+                i1 = int((src_offset + src_dur) * sr)
+                clip = audio[i0:i1]
+                if len(clip) == 0:
+                    continue
+
+                # Optional resample to target_sr for consistent spectrogram axes.
+                if int(sr) != int(target_sr):
+                    import librosa
+                    clip = librosa.resample(clip, orig_sr=int(sr), target_sr=int(target_sr))
+                    sr = target_sr
+
+                clips.append({
+                    'label': src.get('label', 'unknown'),
+                    'wav_path': wav_path,
+                    'start': overlap_start,
+                    'end': overlap_end,
+                    'audio': clip,
+                    'sample_rate': int(sr),
+                })
+            except Exception:
+                continue
+
+        return clips
+
+    def _save_window_bundle(self, run_id, window_id, payload):
+        """Persist per-window wav outputs and lookup JSON for offline listening."""
+        out_root = self.base_output_dir / 'analysis' / 'window_audio' / run_id / window_id
+        out_root.mkdir(parents=True, exist_ok=True)
+
+        lookup = {
+            'run_id': run_id,
+            'window_id': window_id,
+            'window': payload.get('window', {}),
+            'files': []
+        }
+
+        # Save peak clips
+        for i, p in enumerate(payload.get('peaks', [])):
+            audio = p.get('audio')
+            sr = int(p.get('sample_rate', 16000))
+            if audio is None or len(audio) == 0:
+                continue
+            fn = out_root / f"peak_{i:02d}_t{p.get('timestamp', 0.0):.3f}.wav"
+            sf.write(str(fn), np.asarray(audio, dtype=np.float32), sr)
+            lookup['files'].append({'type': 'peak', 'timestamp': p.get('timestamp', 0.0), 'path': str(fn)})
+
+        # Save rendered GT mix clip for this window
+        rendered_audio = payload.get('rendered_gt_audio')
+        if rendered_audio is not None and len(rendered_audio) > 0:
+            fn = out_root / 'window_rendered_gt_mix.wav'
+            sf.write(str(fn), np.asarray(rendered_audio, dtype=np.float32), int(payload.get('sample_rate', 16000)))
+            lookup['files'].append({'type': 'rendered_gt_mix', 'path': str(fn)})
+
+        # Save source-local GT clips used to render this window
+        for i, c in enumerate(payload.get('source_clips', [])):
+            audio = c.get('audio')
+            if audio is None or len(audio) == 0:
+                continue
+            safe_lbl = str(c.get('label', 'source')).replace(' ', '_')
+            fn = out_root / f"source_{i:02d}_{safe_lbl}.wav"
+            sf.write(str(fn), np.asarray(audio, dtype=np.float32), int(c.get('sample_rate', 16000)))
+            lookup['files'].append({
+                'type': 'source_gt',
+                'label': c.get('label', 'unknown'),
+                'start': c.get('start'),
+                'end': c.get('end'),
+                'path': str(fn)
+            })
+
+        (out_root / 'lookup.json').write_text(json.dumps(lookup, indent=2))
+
+        # Maintain run-level index for easy lookup by window.
+        run_index_path = self.base_output_dir / 'analysis' / 'window_audio' / run_id / 'lookup_index.json'
+        run_index = {}
+        if run_index_path.exists():
+            try:
+                run_index = json.loads(run_index_path.read_text())
+            except Exception:
+                run_index = {}
+        run_index[window_id] = {'lookup': str(out_root / 'lookup.json')}
+        run_index_path.write_text(json.dumps(run_index, indent=2))
+
+        return str(out_root), str(out_root / 'lookup.json')
+
+    def _build_slice_timeline_figure(self, windows, peaks, slice_start=None, slice_end=None):
+        """Build a compact timeline showing GT windows and peak timestamps."""
+        fig = go.Figure()
+
+        labels = sorted({str(w.get('label', 'unknown')) for w in windows})
+        y_map = {label: idx + 1 for idx, label in enumerate(labels)}
+        unmatched_y = 0
+
+        for w in windows:
+            label = str(w.get('label', 'unknown'))
+            y = y_map.get(label, len(y_map) + 1)
+            fig.add_trace(go.Scatter(
+                x=[w['start'], w['end']],
+                y=[y, y],
+                mode='lines',
+                line=dict(width=12),
+                name=f"GT: {label}",
+                legendgroup=f"gt_{label}",
+                showlegend=False,
+                hovertemplate=(
+                    f"GT {label}<br>start={w['start']:.3f}s<br>end={w['end']:.3f}s<extra></extra>"
+                )
+            ))
+
+        matched = [p for p in peaks if p.get('match_type') == 'ground_truth']
+        unmatched = [p for p in peaks if p.get('match_type') != 'ground_truth']
+
+        if matched:
+            fig.add_trace(go.Scatter(
+                x=[p['timestamp'] for p in matched],
+                y=[y_map.get(str(p.get('source_label', 'unknown')), unmatched_y) for p in matched],
+                mode='markers',
+                marker=dict(size=8, color='#1f77b4', symbol='circle'),
+                name='Matched peaks',
+                hovertemplate='Matched peak<br>t=%{x:.3f}s<extra></extra>'
+            ))
+
+        if unmatched:
+            fig.add_trace(go.Scatter(
+                x=[p['timestamp'] for p in unmatched],
+                y=[unmatched_y for _ in unmatched],
+                mode='markers',
+                marker=dict(size=8, color='#d62728', symbol='x'),
+                name='Other peaks',
+                hovertemplate='Other peak<br>t=%{x:.3f}s<extra></extra>'
+            ))
+
+        if slice_start is not None and slice_end is not None:
+            fig.add_vrect(
+                x0=slice_start,
+                x1=slice_end,
+                fillcolor='rgba(46, 204, 113, 0.18)',
+                line_width=1,
+                line_color='rgba(39, 174, 96, 0.7)'
+            )
+
+        tickvals = [unmatched_y] + [y_map[label] for label in labels]
+        ticktext = ['other/unmatched'] + labels
+        fig.update_layout(
+            title='GT windows and detected peaks over time',
+            xaxis_title='Time (s)',
+            yaxis=dict(title='GT label', tickmode='array', tickvals=tickvals, ticktext=ticktext),
+            height=360,
+            margin=dict(l=10, r=10, t=45, b=10),
+            legend=dict(orientation='h')
+        )
+        return fig
+
+    def _render_window_explorer(self, analysis_data: dict, run_id: str):
+        """Inspect per-window peak vs GT spectrograms and export window WAV bundles."""
+        st.markdown("### 🪟 Peak/GT Window Explorer")
+        st.caption(
+            "Compare ODAS peak spectrograms against GT rendered mix and source-local GT clips "
+            "for each window that contains detections."
+        )
+
+        matches = analysis_data.get('matches', []) or []
+        if not matches:
+            st.info("No detections found in analysis data.")
+            return
+
+        run_meta = self._load_run_metadata(run_id, analysis_data)
+        render_meta = self._load_render_metadata(analysis_data.get('render_id', ''))
+
+        source_sidecars = render_meta.get('source_sidecars', []) if isinstance(render_meta, dict) else []
+        windows = []
+        for i, s in enumerate(source_sidecars):
+            try:
+                ws = float(s.get('start_time', 0.0))
+                we = float(s.get('end_time', 0.0))
+                if we > ws:
+                    windows.append({
+                        'id': f"w{i:03d}",
+                        'label': s.get('label', 'unknown'),
+                        'start': ws,
+                        'end': we,
+                        'source_idx': s.get('source_idx', i),
+                    })
+            except Exception:
+                continue
+
+        # Fallback window list from GT bounds stored in matches.
+        if not windows:
+            seen = set()
+            for m in matches:
+                gs = m.get('gt_start')
+                ge = m.get('gt_end')
+                if gs is None or ge is None:
+                    continue
+                key = (m.get('source_label', 'unknown'), round(float(gs), 3), round(float(ge), 3))
+                if key in seen:
+                    continue
+                seen.add(key)
+                windows.append({
+                    'id': f"w{len(windows):03d}",
+                    'label': key[0],
+                    'start': float(gs),
+                    'end': float(ge),
+                    'source_idx': None,
+                })
+
+        if not windows:
+            st.warning("No GT windows available (render sidecar missing and no GT bounds in matches).")
+            return
+
+        # Detections/peaks across the run. Include all peaks; some may not have
+        # spectra sidecars, in which case they still appear in tables/timeline
+        # but won't have spectrogram/audio reconstruction available.
+        peaks = []
+        for m in matches:
+            ts = m.get('timestamp', m.get('detection', {}).get('timestamp'))
+            if ts is None:
+                continue
+            sf_path = m.get('spectra_file', m.get('detection', {}).get('spectra_file', ''))
+            frame_count = int(m.get('frame_count', m.get('detection', {}).get('frame_count', 0) or 0))
+            track_start = m.get('track_start', None)
+            if track_start is None:
+                track_start = float(ts) - frame_count * 0.008
+            peaks.append({
+                'timestamp': float(ts),
+                'spectra_file': sf_path,
+                'has_spectra': bool(sf_path and os.path.exists(sf_path)),
+                'source_label': m.get('source_label', m.get('label', 'unknown')),
+                'match_type': m.get('match_type', 'unknown'),
+                'model_prediction': m.get('model_prediction', ''),
+                'event_votes': int(m.get('event_votes', 0)),
+                'event_max_confidence': float(m.get('event_max_confidence', 0.0)),
+                'frame_count': frame_count,
+                'track_start': float(track_start),
+                'gt_start': m.get('gt_start'),
+                'gt_end': m.get('gt_end'),
+            })
+
+        if not peaks:
+            st.info("No peaks/detections were found in this analysis.")
+            return
+
+        def _same_gt_window(peak, window, tol=0.05):
+            if peak.get('match_type') != 'ground_truth':
+                return False
+            if str(peak.get('source_label', '')) != str(window.get('label', '')):
+                return False
+            gs = peak.get('gt_start')
+            ge = peak.get('gt_end')
+            if gs is None or ge is None:
+                return False
+            return abs(float(gs) - float(window['start'])) <= tol and abs(float(ge) - float(window['end'])) <= tol
+
+        # Peak count per window.
+        for w in windows:
+            w['peak_count'] = sum(1 for p in peaks if _same_gt_window(p, w))
+            w['time_window_peak_count'] = sum(1 for p in peaks if w['start'] <= p['timestamp'] <= w['end'])
+
+        st.markdown("#### ⏱️ Time-slice explorer")
+        overall_start = min([w['start'] for w in windows] + [p['timestamp'] for p in peaks])
+        overall_end = max([w['end'] for w in windows] + [p['timestamp'] for p in peaks])
+        default_duration = min(2.0, max(0.5, overall_end - overall_start))
+
+        slice_duration = st.slider(
+            "Slice duration (s)",
+            min_value=0.25,
+            max_value=max(0.25, float(max(0.25, overall_end - overall_start))),
+            value=float(default_duration),
+            step=0.05,
+            key="slice_duration_slider"
+        )
+        slice_start = st.slider(
+            "Slice start (s)",
+            min_value=float(overall_start),
+            max_value=float(max(overall_start, overall_end - slice_duration)),
+            value=float(overall_start),
+            step=0.05,
+            key="slice_start_slider"
+        )
+        slice_end = min(float(overall_end), float(slice_start + slice_duration))
+        st.caption(f"Selected slice: {slice_start:.3f}s → {slice_end:.3f}s")
+
+        slice_fig = self._build_slice_timeline_figure(windows, peaks, slice_start=slice_start, slice_end=slice_end)
+        st.plotly_chart(slice_fig, use_container_width=True)
+
+        slice_peaks = [p for p in peaks if slice_start <= p['timestamp'] <= slice_end]
+        slice_windows = [w for w in windows if not (w['end'] < slice_start or w['start'] > slice_end)]
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Peaks in slice", len(slice_peaks))
+        with col2:
+            st.metric("GT windows in slice", len(slice_windows))
+        with col3:
+            st.metric("Peaks with spectra", sum(1 for p in slice_peaks if p.get('has_spectra')))
+
+        if slice_peaks:
+            peak_rows = [{
+                't (s)': round(p['timestamp'], 3),
+                'GT': p.get('source_label', 'unknown'),
+                'match_type': p.get('match_type', 'unknown'),
+                'pred': p.get('model_prediction', ''),
+                'votes': p.get('event_votes', 0),
+                'has_spectra': p.get('has_spectra', False),
+            } for p in slice_peaks]
+            st.dataframe(pd.DataFrame(peak_rows), width='stretch')
+        else:
+            st.info("No peaks fall inside the selected slice.")
+
+        st.markdown("#### 📦 Slice records")
+
+        scene_meta = run_meta.get('scene_metadata', {}) if isinstance(run_meta, dict) else {}
+        raw_audio_file = run_meta.get('raw_audio_file', '') if isinstance(run_meta, dict) else ''
+        warmup_s = float(run_meta.get('warmup_seconds', scene_meta.get('warmup_seconds', 0.0))) if isinstance(run_meta, dict) else 0.0
+        sr = int(scene_meta.get('sample_rate', 16000)) if isinstance(scene_meta, dict) else 16000
+        n_channels = int(scene_meta.get('n_channels', 6)) if isinstance(scene_meta, dict) else 6
+        scene_file = run_meta.get('scene_file') if isinstance(run_meta, dict) else None
+
+        if not hasattr(self, '_window_reconstructor'):
+            self._window_reconstructor = AudioReconstructor(sample_rate=16000, n_fft=512, hop_length=128)
+        recon = self._window_reconstructor
+
+        slice_render_audio = self._extract_mono_from_raw_window(
+            raw_audio_file, slice_start, slice_end,
+            warmup_seconds=warmup_s, sr=sr, n_channels=n_channels
+        )
+        slice_render_spec = self._waveform_to_spectrogram(slice_render_audio, sr=sr)
+        slice_source_clips = self._extract_gt_source_clips(scene_file, slice_start, slice_end, target_sr=sr)
+
+        st.markdown("#### ✅ Clear slice overview")
+        st.caption(
+            "Read top-to-bottom: peak list for this slice, one GT rendered mix for the whole slice, "
+            "then all peak cards, then all GT source cards."
+        )
+
+        sum_col1, sum_col2 = st.columns([1.4, 1])
+        with sum_col1:
+            if slice_peaks:
+                overview_rows = [{
+                    'Peak t (s)': round(p['timestamp'], 3),
+                    'Associated GT': p.get('source_label', 'unknown'),
+                    'Match type': p.get('match_type', 'unknown'),
+                    'Predicted class': p.get('model_prediction') or 'n/a',
+                    'Votes': p.get('event_votes', 0),
+                    'Has spectra': 'yes' if p.get('has_spectra') else 'no',
+                } for p in slice_peaks]
+                st.dataframe(pd.DataFrame(overview_rows), width='stretch', hide_index=True)
+            else:
+                st.info("No peaks in the selected slice.")
+        with sum_col2:
+            gt_rows = [{
+                'GT label': w['label'],
+                'Start (s)': round(max(slice_start, w['start']), 3),
+                'End (s)': round(min(slice_end, w['end']), 3),
+                'Matched peaks': sum(1 for p in slice_peaks if _same_gt_window(p, w)),
+            } for w in slice_windows]
+            if gt_rows:
+                st.dataframe(pd.DataFrame(gt_rows), width='stretch', hide_index=True)
+            else:
+                st.info("No GT windows overlap this slice.")
+
+        st.markdown("**GT rendered mix for the entire selected slice**")
+        self._plot_spectrogram(slice_render_spec, "GT rendered mix for selected slice", sr=sr, key=f"slice_render_{slice_start:.3f}_{slice_end:.3f}")
+        if slice_render_audio is not None and len(slice_render_audio) > 0:
+            st.audio(slice_render_audio, sample_rate=sr)
+
+        st.markdown("**GT source direction radar for this slice**")
+        self._plot_slice_gt_direction_radar(
+            scene_file=scene_file,
+            slice_start=slice_start,
+            slice_end=slice_end,
+            key=f"slice_gt_radar_{slice_start:.3f}_{slice_end:.3f}"
+        )
+
+        def _render_peak_card(container, peak, card_key):
+            with container:
+                st.markdown(
+                    f"**Peak @ {peak['timestamp']:.3f}s**  \\n"
+                    f"GT: {peak.get('source_label', 'unknown')} · Pred: {peak.get('model_prediction') or 'n/a'} · Votes: {peak.get('event_votes', 0)}"
+                )
+                if peak.get('has_spectra'):
+                    try:
+                        raw = np.fromfile(peak['spectra_file'], dtype=np.float32)
+                        n_frames = raw.size // 257
+                        if n_frames > 0:
+                            spec = raw[:n_frames * 257].reshape(n_frames, 257).T
+                            self._plot_spectrogram(spec, f"Peak {peak['timestamp']:.3f}s", key=f"{card_key}_spec")
+                        rr = recon.reconstruct_from_spectra_file(peak['spectra_file'])
+                        if rr is not None and rr.get('audio') is not None and len(rr.get('audio')) > 0:
+                            st.audio(rr['audio'], sample_rate=16000)
+                    except Exception:
+                        st.caption("Peak spectrogram/audio unavailable.")
+                else:
+                    st.caption("No ODAS spectra sidecar for this peak.")
+
+        def _render_source_card(container, clip, card_key):
+            with container:
+                st.markdown(
+                    f"**{clip['label']}**  \\n"
+                    f"{clip['start']:.3f}s → {clip['end']:.3f}s"
+                )
+                clip_spec = self._waveform_to_spectrogram(clip['audio'], sr=clip['sample_rate'])
+                self._plot_spectrogram(clip_spec, f"GT source: {clip['label']}", sr=clip['sample_rate'], key=f"{card_key}_spec")
+                st.audio(clip['audio'], sample_rate=clip['sample_rate'])
+
+        st.markdown("**All peaks in this slice**")
+        if slice_peaks:
+            peak_cols_per_row = 2
+            for row_start in range(0, len(slice_peaks), peak_cols_per_row):
+                cols = st.columns(peak_cols_per_row)
+                for offset, peak in enumerate(slice_peaks[row_start:row_start + peak_cols_per_row]):
+                    _render_peak_card(cols[offset], peak, f"slice_peak_{row_start+offset}_{slice_start:.3f}_{slice_end:.3f}")
+        else:
+            st.caption("No peaks to display for this slice.")
+
+        st.markdown("**All GT source clips in this slice**")
+        if slice_source_clips:
+            src_cols_per_row = 2
+            for row_start in range(0, len(slice_source_clips), src_cols_per_row):
+                cols = st.columns(src_cols_per_row)
+                for offset, clip in enumerate(slice_source_clips[row_start:row_start + src_cols_per_row]):
+                    _render_source_card(cols[offset], clip, f"slice_src_{row_start+offset}_{slice_start:.3f}_{slice_end:.3f}")
+        else:
+            st.caption("No GT source clips overlap this slice.")
+
+        with st.expander("Advanced diagnostic views", expanded=False):
+
+            def _render_peaks_for_record(record_peaks, key_prefix):
+                if not record_peaks:
+                    st.caption("No peaks in this record.")
+                    return
+                for i, p in enumerate(record_peaks):
+                    st.markdown(
+                        f"Peak {i+1}: t={p['timestamp']:.3f}s · GT={p.get('source_label', 'unknown')} · "
+                        f"pred={p.get('model_prediction') or 'n/a'} · votes={p.get('event_votes', 0)}"
+                    )
+                    if p.get('has_spectra'):
+                        try:
+                            raw = np.fromfile(p['spectra_file'], dtype=np.float32)
+                            n_frames = raw.size // 257
+                            if n_frames > 0:
+                                spec = raw[:n_frames * 257].reshape(n_frames, 257).T
+                                self._plot_spectrogram(spec, f"{key_prefix} peak {i+1}", key=f"{key_prefix}_peak_{i}_spec")
+                                rr = recon.reconstruct_from_spectra_file(p['spectra_file'])
+                                if rr is not None and rr.get('audio') is not None and len(rr.get('audio')) > 0:
+                                    st.audio(rr['audio'], sample_rate=16000)
+                        except Exception:
+                            st.caption("Peak spectrogram reconstruction failed.")
+                    else:
+                        st.caption("No ODAS spectra sidecar available for this peak.")
+
+            if not slice_windows and slice_peaks:
+                st.info("This slice has peaks but no overlapping GT window; treat these as ambient/unmatched detections.")
+
+            for idx, w in enumerate(slice_windows):
+                rec_start = max(slice_start, w['start'])
+                rec_end = min(slice_end, w['end'])
+                record_peaks = [
+                    p for p in slice_peaks
+                    if _same_gt_window(p, w) or (w['start'] <= p['timestamp'] <= w['end'] and p.get('source_label') == w.get('label'))
+                ]
+                with st.expander(
+                    f"Record {idx+1}: {w['label']} · {rec_start:.3f}s → {rec_end:.3f}s · peaks={len(record_peaks)}",
+                    expanded=(idx == 0)
+                ):
+                    _render_peaks_for_record(record_peaks, f"record_{idx}")
+
+                    st.markdown("**GT rendered mix for this record**")
+                    rec_render_audio = self._extract_mono_from_raw_window(
+                        raw_audio_file, rec_start, rec_end,
+                        warmup_seconds=warmup_s, sr=sr, n_channels=n_channels
+                    )
+                    rec_render_spec = self._waveform_to_spectrogram(rec_render_audio, sr=sr)
+                    self._plot_spectrogram(rec_render_spec, f"Rendered GT mix: {w['label']}", sr=sr, key=f"record_{idx}_render_mix")
+                    if rec_render_audio is not None and len(rec_render_audio) > 0:
+                        st.audio(rec_render_audio, sample_rate=sr)
+
+                    st.markdown("**Overlapping source clips for this record**")
+                    record_source_clips = self._extract_gt_source_clips(scene_file, rec_start, rec_end, target_sr=sr)
+                    if not record_source_clips:
+                        st.caption("No GT source clips overlap this record.")
+                    else:
+                        for j, clip in enumerate(record_source_clips):
+                            st.markdown(
+                                f"Source {j+1}: {clip['label']} · {clip['start']:.3f}s → {clip['end']:.3f}s"
+                            )
+                            clip_spec = self._waveform_to_spectrogram(clip['audio'], sr=clip['sample_rate'])
+                            self._plot_spectrogram(clip_spec, f"Source clip: {clip['label']}", sr=clip['sample_rate'], key=f"record_{idx}_source_{j}_{clip['label']}")
+                            st.audio(clip['audio'], sample_rate=clip['sample_rate'])
+
+            unmatched_slice_peaks = [
+                p for p in slice_peaks
+                if not any(_same_gt_window(p, w) for w in slice_windows)
+            ]
+            if unmatched_slice_peaks:
+                with st.expander(
+                    f"Record: ambient/unmatched · peaks={len(unmatched_slice_peaks)}",
+                    expanded=False
+                ):
+                    _render_peaks_for_record(unmatched_slice_peaks, 'ambient')
+
+        show_empty = st.checkbox("Show windows without peaks", value=False)
+        filtered = windows if show_empty else [w for w in windows if w['peak_count'] > 0]
+        if not filtered:
+            st.info("No windows with peaks under current filter.")
+            return
+
+        selected = st.selectbox(
+            "Window",
+            filtered,
+            format_func=lambda w: (
+                f"{w['id']} | {w['label']} | {w['start']:.2f}s–{w['end']:.2f}s "
+                f"| matched_peaks={w['peak_count']}"
+            )
+        )
+
+        win_start, win_end = selected['start'], selected['end']
+        include_other_time_peaks = st.checkbox(
+            "Include unrelated peaks that happen in the same time window",
+            value=False,
+            help="Off by default: only peaks matched to this exact GT event are shown. Turn on to also inspect other peaks that occur during the same time span."
+        )
+
+        matched_peaks_for_window = [p for p in peaks if _same_gt_window(p, selected)]
+        time_window_peaks = [p for p in peaks if win_start <= p['timestamp'] <= win_end]
+        peaks_in_window = time_window_peaks if include_other_time_peaks else matched_peaks_for_window
+        peaks_in_window.sort(key=lambda p: p['timestamp'])
+
+        st.markdown(
+            f"**Window:** {selected['id']} · **Label:** {selected['label']} · "
+            f"**Range:** {win_start:.2f}s → {win_end:.2f}s · "
+            f"**Matched peaks:** {len(matched_peaks_for_window)} · "
+            f"**All peaks in time span:** {len(time_window_peaks)}"
+        )
+
+        if not include_other_time_peaks and not peaks_in_window:
+            st.info("No peaks were spatially/temporally matched to this exact GT event. Turn on the checkbox above to inspect all peaks that occurred during the same time range.")
+            return
+
+        # Peak-centric view: choose one peak and show only assets associated
+        # with that peak interval.
+        st.markdown("#### 🎯 Selected peak details")
+        sel_peak = st.selectbox(
+            "Peak",
+            peaks_in_window,
+            format_func=lambda p: (
+                f"t={p['timestamp']:.3f}s | GT={p['source_label']} | "
+                f"pred={p['model_prediction'] or 'n/a'} | votes={p['event_votes']}"
+            ),
+            key=f"peak_sel_{selected['id']}"
+        )
+
+        scene_meta = run_meta.get('scene_metadata', {}) if isinstance(run_meta, dict) else {}
+        raw_audio_file = run_meta.get('raw_audio_file', '') if isinstance(run_meta, dict) else ''
+        warmup_s = float(run_meta.get('warmup_seconds', scene_meta.get('warmup_seconds', 0.0))) if isinstance(run_meta, dict) else 0.0
+        sr = int(scene_meta.get('sample_rate', 16000)) if isinstance(scene_meta, dict) else 16000
+        n_channels = int(scene_meta.get('n_channels', 6)) if isinstance(scene_meta, dict) else 6
+        scene_file = run_meta.get('scene_file') if isinstance(run_meta, dict) else None
+
+        peak_ts = float(sel_peak['timestamp'])
+        peak_track_start = float(sel_peak.get('track_start', peak_ts))
+        assoc_start = max(win_start, peak_track_start)
+        assoc_end = min(win_end, peak_ts)
+        if assoc_end <= assoc_start:
+            # Fallback to a small fixed context if interval is degenerate.
+            assoc_start = max(win_start, peak_ts - 0.96)
+            assoc_end = min(win_end, peak_ts)
+
+        st.caption(
+            f"Associated interval for selected peak: {assoc_start:.3f}s → {assoc_end:.3f}s "
+            f"(track_start={peak_track_start:.3f}s, peak={peak_ts:.3f}s)"
+        )
+
+        # Selected peak spectrogram/audio
+        if not hasattr(self, '_window_reconstructor'):
+            self._window_reconstructor = AudioReconstructor(sample_rate=16000, n_fft=512, hop_length=128)
+        recon = self._window_reconstructor
+
+        if sel_peak.get('has_spectra'):
+            raw_sel = np.fromfile(sel_peak['spectra_file'], dtype=np.float32)
+            n_sel = raw_sel.size // 257
+            if n_sel > 0:
+                spec_sel = raw_sel[:n_sel * 257].reshape(n_sel, 257).T
+                self._plot_spectrogram(spec_sel, f"Selected peak spectrogram ({n_sel} frames)", key=f"selected_peak_{selected['id']}_{peak_ts:.3f}")
+                try:
+                    rr_sel = recon.reconstruct_from_spectra_file(sel_peak['spectra_file'])
+                    if rr_sel is not None and rr_sel.get('audio') is not None and len(rr_sel.get('audio')) > 0:
+                        st.audio(rr_sel['audio'], sample_rate=16000)
+                except Exception:
+                    pass
+        else:
+            st.caption("Selected peak has no ODAS spectra sidecar, so only metadata is available.")
+
+        # GT rendered mix associated with selected peak interval
+        st.markdown("**Associated GT rendered mix (selected peak interval)**")
+        assoc_render_audio = self._extract_mono_from_raw_window(
+            raw_audio_file, assoc_start, assoc_end,
+            warmup_seconds=warmup_s, sr=sr, n_channels=n_channels
+        )
+        assoc_render_spec = self._waveform_to_spectrogram(assoc_render_audio, sr=sr)
+        self._plot_spectrogram(assoc_render_spec, "Associated GT rendered mix", sr=sr, key=f"assoc_render_{selected['id']}_{peak_ts:.3f}")
+        if assoc_render_audio is not None and len(assoc_render_audio) > 0:
+            st.audio(assoc_render_audio, sample_rate=sr)
+
+        # Individual GT sounds associated with selected peak interval
+        st.markdown("**Individual GT source clips associated with selected peak**")
+        associated_source_clips = self._extract_gt_source_clips(
+            scene_file, assoc_start, assoc_end, target_sr=sr
+        )
+        if not associated_source_clips:
+            st.caption("No GT source overlaps this selected peak interval.")
+        else:
+            for i, clip in enumerate(associated_source_clips):
+                st.markdown(
+                    f"GT source {i+1}: {clip['label']} ({clip['start']:.3f}s→{clip['end']:.3f}s)"
+                )
+                clip_spec = self._waveform_to_spectrogram(clip['audio'], sr=clip['sample_rate'])
+                self._plot_spectrogram(clip_spec, f"Associated GT source: {clip['label']}", sr=clip['sample_rate'], key=f"assoc_src_{selected['id']}_{i}_{clip['label']}")
+                st.audio(clip['audio'], sample_rate=clip['sample_rate'])
+
+        max_peaks = st.slider("Max peaks to display", min_value=1, max_value=20, value=min(6, max(1, len(peaks_in_window))))
+        show_peaks = peaks_in_window[:max_peaks]
+
+        # 1) Spectrogram for each peak
+        st.markdown("#### 1) ODAS peak spectrogram(s)")
+        if not hasattr(self, '_window_reconstructor'):
+            self._window_reconstructor = AudioReconstructor(sample_rate=16000, n_fft=512, hop_length=128)
+        recon = self._window_reconstructor
+
+        payload_peaks = []
+        for i, p in enumerate(show_peaks):
+            st.markdown(
+                f"**Peak {i+1}** · t={p['timestamp']:.3f}s · GT={p['source_label']} · "
+                f"Pred={p['model_prediction'] or 'n/a'} · votes={p['event_votes']}"
+            )
+
+            peak_audio = None
+            if p.get('has_spectra'):
+                raw = np.fromfile(p['spectra_file'], dtype=np.float32)
+                n_frames = raw.size // 257
+                if n_frames > 0:
+                    spec_frames = raw[:n_frames * 257].reshape(n_frames, 257)
+                    spec = spec_frames.T  # (257, T)
+                    self._plot_spectrogram(spec, f"Peak {i+1} spectrogram ({n_frames} frames)", key=f"window_{selected['id']}_peak_{i}_spec")
+                try:
+                    rr = recon.reconstruct_from_spectra_file(p['spectra_file'])
+                    if rr is not None:
+                        peak_audio = rr.get('audio')
+                except Exception:
+                    peak_audio = None
+            else:
+                st.caption("No ODAS spectra sidecar available for this peak.")
+
+            if peak_audio is not None and len(peak_audio) > 0:
+                st.audio(peak_audio, sample_rate=16000)
+
+            payload_peaks.append({
+                'timestamp': p['timestamp'],
+                'audio': peak_audio,
+                'sample_rate': 16000
+            })
+
+        # 2) Spectrogram of GT rendered audio in that window
+        st.markdown("#### 2) GT rendered mix spectrogram (window) ")
+        scene_meta = run_meta.get('scene_metadata', {}) if isinstance(run_meta, dict) else {}
+        raw_audio_file = run_meta.get('raw_audio_file', '') if isinstance(run_meta, dict) else ''
+        warmup_s = float(run_meta.get('warmup_seconds', scene_meta.get('warmup_seconds', 0.0))) if isinstance(run_meta, dict) else 0.0
+        sr = int(scene_meta.get('sample_rate', 16000)) if isinstance(scene_meta, dict) else 16000
+        n_channels = int(scene_meta.get('n_channels', 6)) if isinstance(scene_meta, dict) else 6
+
+        rendered_gt_audio = self._extract_mono_from_raw_window(
+            raw_audio_file, win_start, win_end, warmup_seconds=warmup_s, sr=sr, n_channels=n_channels
+        )
+        rendered_spec = self._waveform_to_spectrogram(rendered_gt_audio, sr=sr)
+        self._plot_spectrogram(rendered_spec, "GT rendered mix (raw render window)", sr=sr, key=f"window_{selected['id']}_render_mix")
+        if rendered_gt_audio is not None and len(rendered_gt_audio) > 0:
+            st.audio(rendered_gt_audio, sample_rate=sr)
+        else:
+            st.caption("Rendered GT window audio is unavailable (run metadata/raw file missing).")
+
+        # 3) Spectrogram of source-local GT audio used to render this window
+        st.markdown("#### 3) Source-local GT audio used in this window")
+        scene_file = run_meta.get('scene_file') if isinstance(run_meta, dict) else None
+        gt_source_clips = self._extract_gt_source_clips(scene_file, win_start, win_end, target_sr=sr)
+        if not gt_source_clips:
+            st.caption("No overlapping source-local GT clips found for this window.")
+        else:
+            for i, clip in enumerate(gt_source_clips):
+                st.markdown(
+                    f"**GT clip {i+1}** · {clip['label']} · {clip['start']:.2f}s→{clip['end']:.2f}s"
+                )
+                clip_spec = self._waveform_to_spectrogram(clip['audio'], sr=clip['sample_rate'])
+                self._plot_spectrogram(clip_spec, f"GT source clip: {clip['label']}", sr=clip['sample_rate'], key=f"window_{selected['id']}_gtclip_{i}_{clip['label']}")
+                st.audio(clip['audio'], sample_rate=clip['sample_rate'])
+
+        # Export WAV bundle + lookup JSON for this window.
+        if st.button("💾 Export WAV bundle for this window"):
+            out_dir, lookup_path = self._save_window_bundle(
+                run_id=run_id,
+                window_id=selected['id'],
+                payload={
+                    'window': selected,
+                    'peaks': payload_peaks,
+                    'rendered_gt_audio': rendered_gt_audio,
+                    'source_clips': gt_source_clips,
+                    'sample_rate': sr,
+                }
+            )
+            st.success(f"Saved window bundle to: {out_dir}")
+            st.caption(f"Lookup JSON: {lookup_path}")
 
     def _show_recent_analyses(self):
         """Show table of recent analyses"""

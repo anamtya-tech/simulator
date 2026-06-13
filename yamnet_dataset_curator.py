@@ -81,6 +81,7 @@ class YAMNetDatasetCurator:
             'min_spectral_bins': 1,   # Min real spectral frames in ODAS buffer; < 1 = no spectral data
             'save_unknown': True,
             'echo_pad_seconds': 0.5,  # Extra PCM to read past gt_end — captures natural decay/reverb tail
+            'allow_render_fallback': False,  # If True, use raw render PCM when .bin peak spectra are unavailable
         }
         if self.config_path.exists():
             with open(self.config_path, 'r') as f:
@@ -115,7 +116,8 @@ class YAMNetDatasetCurator:
                 'min_activity': 0.01,  # Minimum activity level (near-zero filters only dead tracks)
                 'min_spectral_bins': 1,  # Min real spectral frames; < 1 means no spectral data at all
                 'echo_pad_seconds': 0.5,  # Extra PCM past gt_end — captures natural reverb/decay tail
-                'save_unknown': True  # Save non-matching samples for manual labeling
+                'save_unknown': True,  # Save non-matching samples for manual labeling
+                'allow_render_fallback': False  # Use raw render only if explicitly enabled
             },
             'audio_params': {
                 'sample_rate': 16000,
@@ -498,10 +500,12 @@ class YAMNetDatasetCurator:
                 elif fallback_bins:
                     audio_waveform = self._reconstruct_audio_from_bins(fallback_bins)
 
-                # ── Priority 2 fallback: raw render extraction ────────────────
-                # Only triggered when .bin reconstruction yielded nothing (weak
-                # source, sc=0/1, empty buffer).  Saves one file per GT window.
-                if audio_waveform is None:
+                # ── Priority 2 fallback: raw render extraction (opt-in) ───────
+                # Disabled by default to avoid using original GT waveform data
+                # when ODAS did not produce usable peak spectra.  Enable only
+                # for diagnostics via curation_criteria.allow_render_fallback.
+                allow_render_fallback = bool(criteria.get('allow_render_fallback', False))
+                if audio_waveform is None and allow_render_fallback:
                     run_meta      = analysis_results.get('run_metadata', {})
                     raw_audio_file = run_meta.get('raw_audio_file')
                     if (raw_audio_file
