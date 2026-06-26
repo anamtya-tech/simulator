@@ -46,6 +46,52 @@ class AudioRenderer:
         # Audio parameters
         self.sample_rate = 16000
         self.n_channels_output = 6  # 6 channels total (1, 2-5 (mics), 6)
+
+    def _resolve_source_level(self, source_cfg):
+        """Return (mode, value) where mode is 'spl' or 'dbfs', else (None, None).
+
+        Preferred field is `spl_db_1m` (physical dB SPL @ 1 m).
+        Backward compatibility:
+        - old scenes may use `ref_dbfs` (digital RMS target in dBFS)
+        - if `ref_dbfs` looks like SPL (>20 dB), treat it as SPL
+        """
+        spl_db_1m = source_cfg.get('spl_db_1m', None)
+        if spl_db_1m is not None:
+            return 'spl', float(spl_db_1m)
+
+        legacy_ref = source_cfg.get('ref_dbfs', None)
+        if legacy_ref is None:
+            return None, None
+
+        legacy_ref = float(legacy_ref)
+        if legacy_ref > 20.0:
+            return 'spl', legacy_ref
+        return 'dbfs', legacy_ref
+
+    def _apply_level_normalization(self, audio, source_cfg, spl_baseline_db, base_target_dbfs=-24.0):
+        """Normalise clip RMS using SPL@1m metadata when available.
+
+        Uncalibrated user clips can have arbitrary loudness. We first measure each
+        clip RMS, then scale it to a target RMS derived from class SPL metadata.
+        This enforces consistent relative loudness between labels while keeping
+        overall digital levels bounded.
+        """
+        mode, level_value = self._resolve_source_level(source_cfg)
+        if mode is None:
+            return audio
+
+        current_rms = float(np.sqrt(np.mean(audio ** 2)))
+        if current_rms <= 1e-10:
+            return audio
+
+        if mode == 'spl':
+            target_dbfs = base_target_dbfs + (level_value - spl_baseline_db)
+        else:
+            target_dbfs = level_value
+
+        target_rms = 10.0 ** (target_dbfs / 20.0)
+        audio *= target_rms / current_rms
+        return audio
     
     def _find_existing_renders(self, scene_name):
         """Find all existing renders for a scene"""
@@ -256,6 +302,20 @@ class AudioRenderer:
         """Render the scene using pyroomacoustics"""
         duration = scene['duration']
         n_samples = int(duration * self.sample_rate)
+
+        # Scene-level SPL anchor (median of known class SPLs @ 1 m).
+        # This lets us preserve relative loudness between classes without
+        # requiring absolute calibration of uploaded clips.
+        spl_values = []
+        for src in scene.get('directional_sources', []):
+            mode, value = self._resolve_source_level(src)
+            if mode == 'spl':
+                spl_values.append(value)
+        for src in scene.get('ambient_sources', []):
+            mode, value = self._resolve_source_level(src)
+            if mode == 'spl':
+                spl_values.append(value)
+        spl_baseline_db = float(np.median(spl_values)) if spl_values else 70.0
         
         # Memory safety check — streaming renderer never holds all sources at once.
         # Peak RAM = 2 mmaps (mic + ambient, both paged) + one source window + FFT temps.
@@ -345,23 +405,13 @@ class AudioRenderer:
             # Ensure audio is exactly the right length
             audio = audio[:duration_samples]
 
-            # ── Reference-level normalisation ────────────────────────────────
-            # If the source has a `ref_dbfs` value (read from label.txt line 3),
-            # normalise the signal so that a mic at 1 m in free-field would
-            # receive that RMS level (dBFS).  This removes recording-quality
-            # variation between different WAV files and gives pyroomacoustics
-            # a physically consistent starting amplitude; distance attenuation
-            # (≈ 1/r in amplitude) then falls out naturally from the RIR.
-            ref_dbfs = source_config.get('ref_dbfs', None)
-            if ref_dbfs is not None:
-                current_rms = float(np.sqrt(np.mean(audio ** 2)))
-                if current_rms > 1e-10:
-                    target_rms = 10.0 ** (ref_dbfs / 20.0)
-                    audio *= target_rms / current_rms
+            # Normalise by per-class SPL metadata (label.txt line 3) so clips
+            # recorded at arbitrary loudness become comparable before rendering.
+            audio = self._apply_level_normalization(audio, source_config, spl_baseline_db)
 
             # Apply per-source volume gain (default 1.0) — acts as a fine-tune
             # trim on top of the reference level above (or as an absolute gain
-            # when no ref_dbfs is set).
+            # when no SPL/reference metadata is set).
             audio *= source_config.get('volume', 1.0)
 
             # Windowed signal: only allocate an array for the active window
@@ -519,13 +569,8 @@ class AudioRenderer:
                         audio = np.tile(audio, n_repeats)
                     audio = audio[:actual_samples]
 
-                    # Reference-level normalisation (same logic as directional sources)
-                    ref_dbfs = amb_source.get('ref_dbfs', None)
-                    if ref_dbfs is not None:
-                        current_rms = float(np.sqrt(np.mean(audio ** 2)))
-                        if current_rms > 1e-10:
-                            target_rms = 10.0 ** (ref_dbfs / 20.0)
-                            audio *= target_rms / current_rms
+                    # Same SPL-aware normalisation for ambient clips.
+                    audio = self._apply_level_normalization(audio, amb_source, spl_baseline_db)
 
                     audio *= amb_source.get('volume', 0.5)
                     ambient_mix += audio

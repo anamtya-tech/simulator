@@ -27,6 +27,7 @@ import random
 
 DEFAULT_SOUNDS_DIR = Path('/home/azureuser/sounds')
 CAPTURES_DIR       = Path('/home/azureuser/audio_cache/ambient_captures')
+DEFAULT_SPL_DB_1M  = 80.0
 
 class SceneConfigurator:
     def __init__(self, scenes_dir, sounds_dir=None):
@@ -84,7 +85,7 @@ class SceneConfigurator:
           - Files with no ancestor label.txt are silently skipped
           - Same label name in multiple branches → files merged under one key
         """
-        label_cache: dict = {}  # folder Path → (label, source_type) | None
+        label_cache: dict = {}  # folder Path → (label, source_type, spl_db_1m, spl_defaulted) | None
 
         def find_label(folder: Path):
             current = folder
@@ -98,18 +99,19 @@ class SceneConfigurator:
                     stype = lines[1].strip() if len(lines) > 1 else 'directional'
                     if stype not in ('directional', 'ambient'):
                         stype = 'directional'
-                    # Line 3 (optional): reference dBFS RMS level at 1 m
-                    # e.g. "-18" means the source should produce -18 dBFS RMS
-                    # at a mic placed 1 m away (free-field).  pyroomacoustics
-                    # then applies realistic distance + room attenuation beyond
-                    # that reference distance.
-                    ref_dbfs = None
+                    # Line 3 (optional): average SPL at 1 m in dB
+                    # e.g. "70" means a typical call is ~70 dB SPL @ 1 m.
+                    spl_defaulted = False
                     if len(lines) > 2:
                         try:
-                            ref_dbfs = float(lines[2].strip())
+                            spl_db_1m = float(lines[2].strip())
                         except ValueError:
-                            ref_dbfs = None
-                    result = (lbl, stype, ref_dbfs) if lbl else None
+                            spl_db_1m = DEFAULT_SPL_DB_1M
+                            spl_defaulted = True
+                    else:
+                        spl_db_1m = DEFAULT_SPL_DB_1M
+                        spl_defaulted = True
+                    result = (lbl, stype, spl_db_1m, spl_defaulted) if lbl else None
                     label_cache[current] = result
                     return result
                 if current == root or current.parent == current:
@@ -124,9 +126,19 @@ class SceneConfigurator:
             if entry is None:
                 skipped.append(wav.name)
                 continue
-            lbl, stype, ref_dbfs = entry
+            lbl, stype, spl_db_1m, spl_defaulted = entry
             if lbl not in library:
-                library[lbl] = {'source_type': stype, 'files': [], 'ref_dbfs': ref_dbfs}
+                library[lbl] = {
+                    'source_type': stype,
+                    'files': [],
+                    'spl_db_1m': spl_db_1m,
+                    'spl_defaulted': spl_defaulted,
+                }
+            # Prefer explicit SPL values over fallback defaults when the same
+            # label appears in multiple branches.
+            elif library[lbl].get('spl_defaulted', False) and not spl_defaulted:
+                library[lbl]['spl_db_1m'] = spl_db_1m
+                library[lbl]['spl_defaulted'] = False
             library[lbl]['files'].append(str(wav))
         return library, skipped
 
@@ -138,8 +150,12 @@ class SceneConfigurator:
         self.library_path = str(p)
         if not p.exists():
             self.library = {}
+            self.labels_with_default_spl = []
             return f'Path not found: {p}'
         self.library, skipped = self._scan_library(p)
+        self.labels_with_default_spl = sorted(
+            lbl for lbl, e in self.library.items() if e.get('spl_defaulted', False)
+        )
         return None
 
     def _list_captures(self):
@@ -220,6 +236,12 @@ class SceneConfigurator:
                 f'📂 `{self.library_path}` — **{len(self.library)}** labels '
                 f'({dir_count} directional, {amb_count} ambient)'
             )
+            if getattr(self, 'labels_with_default_spl', None):
+                labels = ', '.join(self.labels_with_default_spl)
+                st.warning(
+                    f'⚠️ Missing or invalid line 3 in label.txt for: {labels}. '
+                    f'Using default SPL {DEFAULT_SPL_DB_1M:.0f} dB @ 1 m until updated.'
+                )
 
         # Scene parameters
         st.subheader("Scene Parameters")
@@ -627,14 +649,23 @@ class SceneConfigurator:
             key=f"dir_repeat_{idx}"
         )
 
+        # Sync SPL metadata from library when label changes.
+        lib_entry = self.library.get(source['label'], {})
+        spl_db_1m = lib_entry.get('spl_db_1m')
+        if spl_db_1m is not None:
+            source['spl_db_1m'] = spl_db_1m
+            source['spl_defaulted'] = bool(lib_entry.get('spl_defaulted', False))
+        else:
+            source.pop('spl_db_1m', None)
+            source.pop('spl_defaulted', None)
+
         # Per-source volume
-        ref_dbfs = source.get('ref_dbfs')
         _vol_help = (
-            f'Fine-tune gain on top of the {ref_dbfs:+.0f} dBFS reference level '
-            f'set in label.txt (1.0 = use reference as-is).'
-            if ref_dbfs is not None
-            else 'Multiply signal amplitude. Add a ref_dbfs line to label.txt for '
-                 'physics-based level normalisation.'
+            f'Fine-tune gain on top of the {spl_db_1m:.0f} dB SPL @ 1 m reference '
+            f'from label.txt (1.0 = use reference as-is).'
+            if spl_db_1m is not None
+            else 'Multiply signal amplitude. Add SPL@1m as line 3 in label.txt '
+                 'for physics-based level normalisation.'
         )
         source['volume'] = st.slider(
             'Volume (gain)', 0.1, 10.0,
@@ -642,8 +673,13 @@ class SceneConfigurator:
             step=0.1, key=f'dir_volume_{idx}',
             help=_vol_help
         )
-        if ref_dbfs is not None:
-            st.caption(f'📐 Reference level: {ref_dbfs:+.1f} dBFS @ 1 m (from label.txt)')
+        if spl_db_1m is not None:
+            st.caption(f'📐 Reference level: {spl_db_1m:.1f} dB SPL @ 1 m (from label.txt)')
+            if source.get('spl_defaulted', False):
+                st.warning(
+                    f'Line 3 missing/invalid for this label. Using default '
+                    f'{DEFAULT_SPL_DB_1M:.0f} dB SPL @ 1 m.'
+                )
     
     def _visualize_capture(self, path, start_offset_s=0.0, preview_s=10.0):
         """Show per-channel waveform + RMS bar chart for a .raw capture file.
@@ -906,6 +942,16 @@ class SceneConfigurator:
             if st.button("🗑️ Remove", key=f"remove_amb_{idx}"):
                 scene['ambient_sources'].pop(idx)
                 st.rerun()
+
+        # Sync SPL metadata from library when label changes.
+        lib_entry = self.library.get(source['label'], {})
+        spl_db_1m = lib_entry.get('spl_db_1m')
+        if spl_db_1m is not None:
+            source['spl_db_1m'] = spl_db_1m
+            source['spl_defaulted'] = bool(lib_entry.get('spl_defaulted', False))
+        else:
+            source.pop('spl_db_1m', None)
+            source.pop('spl_defaulted', None)
         
         # File selection
         available_files = self._get_available_files_for_label(source['label'], 'ambient')
@@ -930,6 +976,13 @@ class SceneConfigurator:
             step=0.05,
             key=f"amb_volume_{idx}"
         )
+        if spl_db_1m is not None:
+            st.caption(f'📐 Reference level: {spl_db_1m:.1f} dB SPL @ 1 m (from label.txt)')
+            if source.get('spl_defaulted', False):
+                st.warning(
+                    f'Line 3 missing/invalid for this label. Using default '
+                    f'{DEFAULT_SPL_DB_1M:.0f} dB SPL @ 1 m.'
+                )
     
     def _add_directional_source(self, scene, randomize=False, constraints=None):
         """Add a new directional source.
@@ -1003,10 +1056,11 @@ class SceneConfigurator:
             'end_time':   round(end_time,   2),
             'repeat':     do_repeat,
         }
-        # Carry the reference level from label.txt into the scene JSON so the
-        # renderer can normalise this source to a consistent physical level.
-        if lib_entry.get('ref_dbfs') is not None:
-            source['ref_dbfs'] = lib_entry['ref_dbfs']
+        # Carry class SPL metadata from label.txt into scene JSON so renderer
+        # can normalise uncalibrated source clips consistently.
+        if lib_entry.get('spl_db_1m') is not None:
+            source['spl_db_1m'] = lib_entry['spl_db_1m']
+            source['spl_defaulted'] = bool(lib_entry.get('spl_defaulted', False))
         
         scene['directional_sources'].append(source)
     
@@ -1029,8 +1083,9 @@ class SceneConfigurator:
             'wav_path': 'Random',
             'volume': volume
         }
-        if lib_entry.get('ref_dbfs') is not None:
-            source['ref_dbfs'] = lib_entry['ref_dbfs']
+        if lib_entry.get('spl_db_1m') is not None:
+            source['spl_db_1m'] = lib_entry['spl_db_1m']
+            source['spl_defaulted'] = bool(lib_entry.get('spl_defaulted', False))
         
         scene['ambient_sources'].append(source)
 
