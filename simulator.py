@@ -75,6 +75,7 @@ def _get_sim_state():
             "status": "idle",
             "log_lines": [],
             "socket_process": None,
+            "tracked_sink_process": None,
             "odas_process": None,
             "run_name": None,
             "log_file": None,
@@ -408,14 +409,24 @@ class SimulationRunner:
                 )
                 text = text[:match.start(2)] + socket_block + text[match.end(2):]
 
-            # In simulator mode we do not require tracked-sink socket export.
-            # If left as socket without a receiver, ODAS can exit at startup.
+            # Write classifier artifacts into simulator logs directory so run metadata
+            # can resolve files deterministically.
+            text = re.sub(
+                r'(?m)^(\s*classifier_log_dir\s*=\s*)"[^"]*"\s*;',
+                rf'\1"{str(self.odas_logs_dir)}";',
+                text,
+                count=1,
+            )
+
+            # Force tracked sink to a dedicated local socket for simulator runs.
             tracked_if_pattern = r'(tracked\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)'
             tracked_if_match = re.search(tracked_if_pattern, text, flags=re.S)
             if tracked_if_match:
                 tracked_block = (
                     "\n"
-                    "            type = \"blackhole\";\n"
+                    "            type = \"socket\";\n"
+                    "            ip = \"127.0.0.1\";\n"
+                    f"            port = {int(port) + 2};\n"
                     "\n"
                 )
                 text = text[:tracked_if_match.start(2)] + tracked_block + text[tracked_if_match.end(2):]
@@ -454,6 +465,28 @@ class SimulationRunner:
         except Exception as exc:
             st.warning(f"⚠️ Could not prepare runtime socket config, using original file: {exc}")
             return str(src_path)
+
+    def _start_socket_drain_server(self, port: int):
+        """Start a tiny TCP sink that accepts and discards tracked socket output."""
+        sink_code = (
+            "import socket,sys\n"
+            "port=int(sys.argv[1])\n"
+            "s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)\n"
+            "s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n"
+            "s.bind(('127.0.0.1',port))\n"
+            "s.listen(1)\n"
+            "while True:\n"
+            "    conn,_=s.accept()\n"
+            "    with conn:\n"
+            "        while conn.recv(65536):\n"
+            "            pass\n"
+        )
+        return subprocess.Popen(
+            ["python3", "-u", "-c", sink_code, str(int(port))],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(self.project_root),
+        )
 
     def _run_simulation(self, raw_file_path, port, metadata,
                         preset_name: str = "Balanced (default)",
@@ -513,12 +546,22 @@ class SimulationRunner:
             return False
 
         # ── release stale port ───────────────────────────────────────────────
+        tracked_sink_port = int(port) + 2
         try:
             subprocess.run(["fuser", "-k", f"{port}/tcp"],
+                           capture_output=True, timeout=5)
+            subprocess.run(["fuser", "-k", f"{tracked_sink_port}/tcp"],
                            capture_output=True, timeout=5)
             time.sleep(1)
         except Exception:
             pass
+
+        # ── start tracked sink receiver (ODAS tracked socket consumer) ───────
+        tracked_sink_process = self._start_socket_drain_server(tracked_sink_port)
+        time.sleep(0.5)
+        if tracked_sink_process.poll() is not None:
+            st.error(f"Tracked sink receiver failed on port {tracked_sink_port}.")
+            return False
 
         # ── start socket server ──────────────────────────────────────────────
         socket_cmd = [
@@ -539,6 +582,7 @@ class SimulationRunner:
             stdout, stderr = socket_process.communicate()
             st.error("Socket server failed to start!")
             st.code(stderr.decode())
+            tracked_sink_process.terminate()
             return False
 
         # ── start ODAS ───────────────────────────────────────────────────────
@@ -565,14 +609,20 @@ class SimulationRunner:
             st.error("❌ ODAS crashed during initialisation.")
             st.code(tail)
             socket_process.terminate()
+            tracked_sink_process.terminate()
             return False
 
         # ── persist handles in session state ─────────────────────────────────
         sim.update({
             "running": True,
             "status": "running",
-            "log_lines": ["✅ Socket server started", "✅ ODAS started"],
+            "log_lines": [
+                f"✅ Tracked sink receiver started on {tracked_sink_port}",
+                "✅ Socket server started",
+                "✅ ODAS started"
+            ],
             "socket_process": socket_process,
+            "tracked_sink_process": tracked_sink_process,
             "odas_process": odas_process,
             "run_name": run_name,
             "log_file": log_file_path,
@@ -608,6 +658,7 @@ class SimulationRunner:
         progress without touching the processes.
         """
         socket_process = sim["socket_process"]
+        tracked_sink_process = sim.get("tracked_sink_process")
         odas_process   = sim["odas_process"]
         start_time     = sim["start_time"]
 
@@ -653,17 +704,38 @@ class SimulationRunner:
 
         finally:
             log_fh.close()
+            if tracked_sink_process:
+                try:
+                    tracked_sink_process.terminate()
+                    tracked_sink_process.wait(timeout=3)
+                except Exception:
+                    try:
+                        tracked_sink_process.kill()
+                    except Exception:
+                        pass
 
         # ── collect output files ──────────────────────────────────────────
         time.sleep(2)
-        classify_events_files = sorted(
-            Path(self.odas_logs_dir).glob("sst_classify_events_*.json"),
-            key=os.path.getmtime, reverse=True
-        )
-        session_live_files = sorted(
-            Path(self.odas_logs_dir).glob("sst_session_live.json_*.json"),
-            key=os.path.getmtime, reverse=True
-        )
+        log_dirs = [
+            Path(self.odas_logs_dir),
+            self.odas_build_dir / 'ClassifierLogs',
+            self.odas_root / 'build' / 'ClassifierLogs',
+        ]
+
+        classify_events_files = []
+        session_live_files = []
+        for d in log_dirs:
+            if d.exists():
+                classify_events_files.extend(d.glob("sst_classify_events_*.json"))
+                session_live_files.extend(d.glob("sst_session_live.json_*.json"))
+
+        classify_events_files = sorted(classify_events_files, key=os.path.getmtime, reverse=True)
+        session_live_files = sorted(session_live_files, key=os.path.getmtime, reverse=True)
+
+        # Prefer files produced during/after this run.
+        classify_events_files = [p for p in classify_events_files if os.path.getmtime(p) >= run_start_time] or classify_events_files
+        session_live_files = [p for p in session_live_files if os.path.getmtime(p) >= run_start_time] or session_live_files
+
         classify_events_file = str(classify_events_files[0]) if classify_events_files else None
         session_live_file    = str(session_live_files[0])    if session_live_files    else None
 
@@ -706,13 +778,14 @@ class SimulationRunner:
             "running": False,
             "status": "done",
             "socket_process": None,
+            "tracked_sink_process": None,
             "odas_process": None,
         })
     
     def _stop_simulation(self):
         """Stop running processes and clear session state."""
         sim = _get_sim_state()
-        for key in ("socket_process", "odas_process"):
+        for key in ("socket_process", "tracked_sink_process", "odas_process"):
             proc = sim.get(key)
             if proc:
                 try:
