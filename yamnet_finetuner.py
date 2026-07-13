@@ -41,8 +41,21 @@ from typing import Optional
 
 import pandas as pd
 
+def _first_existing(paths: list[Path]) -> Path:
+    for candidate in paths:
+        if candidate.exists():
+            return candidate
+    return paths[0]
+
+
+_THIS_DIR = Path(__file__).resolve().parent
+
 # ── Paths inside the yamnet repo ──────────────────────────────────────────────
-YAMNET_REPO      = Path('/home/azureuser/yamnet')
+YAMNET_REPO      = Path(os.getenv('YAMNET_REPO', str(_first_existing([
+    Path.home() / 'yamnet',
+    _THIS_DIR.parent / 'yamnet',
+    _THIS_DIR.parent.parent / 'yamnet',
+]))))
 SAVEDMODEL_PATH  = YAMNET_REPO / 'integration' / 'yamnet_core'
 TRAIN_SCRIPT     = YAMNET_REPO / 'training' / 'train_yamnet.py'
 EXPORT_SCRIPT    = YAMNET_REPO / 'training' / 'export_finetuned.py'
@@ -51,7 +64,11 @@ CHECKPOINTS_DIR  = YAMNET_REPO / 'model_store' / 'checkpoints'
 RELEASES_DIR     = YAMNET_REPO / 'model_store' / 'releases'
 
 # ODAS deployment target
-ODAS_MODELS_DIR  = Path('/home/azureuser/z_odas_newbeamform/models')
+ODAS_MODELS_DIR  = Path(os.getenv('ODAS_MODELS_DIR', str(_first_existing([
+    Path.home() / 'chatak-odas' / 'models',
+    _THIS_DIR.parent / 'chatak-odas' / 'models',
+    _THIS_DIR.parent.parent / 'chatak-odas' / 'models',
+]))))
 
 # PYTHONPATH additions for yamnet layer defs (train_yamnet.py also sets these,
 # but we add them to the subprocess env as well for belt-and-suspenders)

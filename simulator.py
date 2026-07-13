@@ -88,12 +88,22 @@ class SimulationRunner:
         self.renders_dir = self.base_output_dir / 'renders'
         self.runs_dir = self.base_output_dir / 'runs'
         self.runs_dir.mkdir(parents=True, exist_ok=True)
-        self.odas_logs_dir = odas_logs_dir
-        
+        self.odas_logs_dir = Path(odas_logs_dir)
+        self.odas_logs_dir.mkdir(parents=True, exist_ok=True)
+
+        odas_root_candidates = [
+            Path(os.getenv('ODAS_ROOT', '')) if os.getenv('ODAS_ROOT') else None,
+            Path.home() / 'chatak-odas',
+            self.base_output_dir.parent.parent / 'chatak-odas',
+        ]
+        odas_root_candidates = [p for p in odas_root_candidates if p is not None]
+        self.odas_root = next((p for p in odas_root_candidates if p.exists()), odas_root_candidates[0])
+        self.odas_build_dir = Path(os.getenv('ODAS_BUILD_DIR', str(self.odas_root / 'build')))
+
         # Paths
-        self.socket_emit_script = "/home/azureuser/z_odas_newbeamform/vm_socket_emit.py"
-        self.odas_config = "/home/azureuser/z_odas_newbeamform/config/runtime/local_socket.cfg"
-        self.odaslive_bin = "/home/azureuser/z_odas_newbeamform/build/bin/odaslive"
+        self.socket_emit_script = os.getenv('ODAS_SOCKET_EMIT_SCRIPT', str(self.odas_root / 'vm_socket_emit.py'))
+        self.odas_config = os.getenv('ODAS_CONFIG_PATH', str(self.odas_root / 'config' / 'runtime' / 'local_socket.cfg'))
+        self.odaslive_bin = os.getenv('ODASLIVE_BIN', str(self.odas_build_dir / 'bin' / 'odaslive'))
 
     # ── convenience: pull live process handles from session state ────────────
     @property
@@ -386,6 +396,17 @@ class SimulationRunner:
         duration = metadata.get('duration', 10) + warmup_seconds + tail_seconds
         log_file_path = str(self.runs_dir / f"odas_log_{run_timestamp}.txt")
 
+        required_paths = [
+            self.socket_emit_script,
+            self.odas_config,
+            self.odaslive_bin,
+        ]
+        missing = [p for p in required_paths if not Path(p).exists()]
+        if missing:
+            st.error("Missing ODAS runtime files. Set ODAS_ROOT/ODAS_BUILD_DIR/ODAS_CONFIG_PATH to valid paths.")
+            st.code("\n".join(missing))
+            return
+
         # ── release stale port ───────────────────────────────────────────────
         try:
             subprocess.run(["fuser", "-k", f"{port}/tcp"],
@@ -405,7 +426,7 @@ class SimulationRunner:
             socket_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            cwd="/home/azureuser/sodas"
+            cwd=str(self.odas_root)
         )
         time.sleep(2)
 
@@ -427,7 +448,7 @@ class SimulationRunner:
             odas_cmd,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
-            cwd="/home/azureuser/z_odas_newbeamform/build",
+            cwd=str(self.odas_build_dir),
         )
 
         # early crash check

@@ -55,10 +55,18 @@ CONFIG = {
 class ResultAnalyzer:
     def __init__(self, output_dir, odas_logs_dir):
         self.base_output_dir = Path(output_dir)
+        self.project_root = self.base_output_dir.parent
         self.runs_dir = self.base_output_dir / 'runs'
         self.analysis_dir = self.base_output_dir / 'analysis'
         self.analysis_dir.mkdir(parents=True, exist_ok=True)
-        self.odas_logs_dir = odas_logs_dir
+        self.odas_logs_dir = Path(odas_logs_dir)
+
+        models_candidates = [
+            Path.home() / 'chatak-odas' / 'models',
+            self.project_root.parent / 'chatak-odas' / 'models',
+        ]
+        default_models_dir = next((p for p in models_candidates if p.exists()), models_candidates[0])
+        self.odas_models_dir = Path(os.getenv('ODAS_MODELS_DIR', str(default_models_dir)))
         
         # Initialize YAMNet curator (writes audio/spectrograms to yamnet_datasets/)
         self.yamnet_curator = YAMNetDatasetCurator(
@@ -67,6 +75,43 @@ class ResultAnalyzer:
         
         # Initialize timing compensator for interval-based matching
         self.timing_compensator = TimingCompensator()
+
+    def _map_legacy_path(self, raw_path):
+        """Map legacy absolute paths from older runs to current workspace paths."""
+        if not raw_path:
+            return ''
+
+        mapped_path = str(raw_path)
+        replacements = {
+            '/home/azureuser/z_odas_newbeamform/build/ClassifierLogs': str(self.odas_logs_dir),
+            '/home/azureuser/sodas/ClassifierLogs': str(self.odas_logs_dir),
+            '/home/azureuser/simulator': str(self.project_root),
+            '/home/azureuser/config/scenes': str(self.project_root / 'config' / 'scenes'),
+        }
+        for legacy_prefix, current_prefix in replacements.items():
+            if mapped_path.startswith(legacy_prefix):
+                return mapped_path.replace(legacy_prefix, current_prefix, 1)
+        return mapped_path
+
+    def _resolve_run_path(self, raw_path, search_dirs=None):
+        """Resolve stale run metadata path to an existing local file when possible."""
+        if not raw_path:
+            return ''
+
+        mapped = self._map_legacy_path(raw_path)
+        for candidate in [str(raw_path), mapped]:
+            if candidate and os.path.exists(candidate):
+                return os.path.abspath(candidate)
+
+        filename = os.path.basename(mapped)
+        if filename and search_dirs:
+            for directory in search_dirs:
+                candidate = Path(directory) / filename
+                if candidate.exists():
+                    return str(candidate.resolve())
+
+        # Return mapped path even when missing so errors point to the new location.
+        return os.path.abspath(mapped)
     
     def render(self):
         """Render the analyzer interface"""
@@ -438,13 +483,27 @@ class ResultAnalyzer:
         """Analyze a simulation run"""
         try:
             # Get session_live file
-            session_live_file = run_data.get('session_live_file')
+            session_live_file = self._resolve_run_path(
+                run_data.get('session_live_file'),
+                search_dirs=[
+                    self.odas_logs_dir,
+                    self.project_root / 'ClassifierLogs',
+                    Path.home() / 'simulator' / 'ClassifierLogs',
+                    Path.home() / 'Git_Dev' / 'simulator' / 'ClassifierLogs',
+                ]
+            )
             if not session_live_file or not os.path.exists(session_live_file):
                 st.error(f"Session live file not found: {session_live_file}")
                 return None
             
             # Get scene file
-            scene_file = run_data.get('scene_file')
+            scene_file = self._resolve_run_path(
+                run_data.get('scene_file'),
+                search_dirs=[
+                    self.project_root / 'config' / 'scenes',
+                    self.project_root / 'config',
+                ]
+            )
             if not scene_file or not os.path.exists(scene_file):
                 st.error(f"Scene file not found: {scene_file}")
                 return None
@@ -923,9 +982,12 @@ class ResultAnalyzer:
                     import numpy as np
                     from yamnet_helper.yamnet_spectrum_classifier import YAMNetSpectrumClassifier
                     if not hasattr(self, '_py_yamnet'):
-                        MODEL = '/home/azureuser/z_odas_newbeamform/models/yamnet_core.tflite'
-                        CSV   = '/home/azureuser/z_odas_newbeamform/models/yamnet_class_map.csv'
-                        self._py_yamnet = YAMNetSpectrumClassifier(MODEL, CSV)
+                        model = self.odas_models_dir / 'yamnet_core.tflite'
+                        class_map = self.odas_models_dir / 'yamnet_class_map.csv'
+                        if not model.exists() or not class_map.exists():
+                            return dict(class_id=-1, class_name='missing_model_files', confidence=0.0,
+                                        votes=0, strategy_used='python_yamnet_missing_model')
+                        self._py_yamnet = YAMNetSpectrumClassifier(str(model), str(class_map))
                     patch = np.fromfile(spectra_file, dtype=np.float32).reshape(96, 257)
                     cid, cname, conf = self._py_yamnet.classify_patch(patch)
                     return dict(class_id=cid, class_name=cname, confidence=float(conf),

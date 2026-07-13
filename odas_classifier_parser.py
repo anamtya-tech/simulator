@@ -35,8 +35,11 @@ class TrackClassification:
 class OdasClassifierParser:
     """Parser for ODAS classifier JSON output."""
     
-    def __init__(self, log_dir: str = "/home/azureuser/sodas/ClassifierLogs"):
-        self.log_dir = Path(log_dir)
+    def __init__(self, log_dir: Optional[str] = None):
+        if log_dir:
+            self.log_dir = Path(log_dir)
+        else:
+            self.log_dir = Path(__file__).resolve().parent / "ClassifierLogs"
     
     def parse_session_file(self, filepath: str) -> List[Dict[str, Any]]:
         """
