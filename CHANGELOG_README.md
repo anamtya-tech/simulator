@@ -34,3 +34,9 @@
  M simulator.py
 ?? odas_config/bandpass.cfg
 
+## Commit on 2026-07-13_19-41
+
+ M CHANGELOG_README.md
+ M odas_config/yammnetsocket_sensitive.cfg
+ M simulator.py
+
