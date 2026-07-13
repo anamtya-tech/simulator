@@ -30,10 +30,13 @@ from datetime import datetime
 import pyroomacoustics as pra
 
 class AudioRenderer:
-    def __init__(self, scenes_dir, output_dir):
+    def __init__(self, scenes_dir, output_dir, odas_config_dir=None, models_dir=None):
         self.scenes_dir = scenes_dir
         self.output_dir = Path(output_dir) / 'renders'
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        project_root = Path(__file__).resolve().parent
+        self.odas_config_dir = Path(odas_config_dir) if odas_config_dir else (project_root / 'odas_config')
+        self.models_dir = Path(models_dir) if models_dir else (project_root / 'models')
         
         # Mic array geometry (ReSpeaker USB 4 Mic Array)
         self.mic_positions = np.array([
@@ -46,6 +49,20 @@ class AudioRenderer:
         # Audio parameters
         self.sample_rate = 16000
         self.n_channels_output = 6  # 6 channels total (1, 2-5 (mics), 6)
+
+    def _list_odas_configs(self):
+        """Return sorted .cfg files under odas_config directory (recursive)."""
+        if not self.odas_config_dir.exists():
+            return []
+        cfg_files = [p for p in self.odas_config_dir.rglob('*') if p.is_file() and p.suffix.lower() == '.cfg']
+        return sorted(cfg_files, key=lambda p: p.name.lower())
+
+    def _list_models(self):
+        """Return sorted model directories under models directory."""
+        if not self.models_dir.exists():
+            return []
+        model_dirs = [p for p in self.models_dir.iterdir() if p.is_dir()]
+        return sorted(model_dirs, key=lambda p: p.name.lower())
 
     def _resolve_source_level(self, source_cfg):
         """Return (mode, value) where mode is 'spl' or 'dbfs', else (None, None).
@@ -231,6 +248,34 @@ class AudioRenderer:
             add_noise = st.checkbox("Add background noise", value=False)
             if add_noise:
                 noise_level = st.slider("Noise level (dB)", -60, -20, -40, 5)
+
+        st.markdown("#### ODAS Runtime Selection")
+        runtime_col1, runtime_col2 = st.columns(2)
+        with runtime_col1:
+            odas_cfg_options = self._list_odas_configs()
+            if odas_cfg_options:
+                selected_odas_cfg = st.selectbox(
+                    "ODAS Config (.cfg)",
+                    odas_cfg_options,
+                    format_func=lambda p: p.name,
+                    help=f"Configs from {self.odas_config_dir}"
+                )
+            else:
+                selected_odas_cfg = None
+                st.warning(f"No .cfg files found in {self.odas_config_dir}")
+
+        with runtime_col2:
+            model_options = self._list_models()
+            if model_options:
+                selected_model_dir = st.selectbox(
+                    "Model Directory",
+                    model_options,
+                    format_func=lambda p: p.name,
+                    help=f"Models from {self.models_dir}"
+                )
+            else:
+                selected_model_dir = None
+                st.warning(f"No model directories found in {self.models_dir}")
         
         # ── Pre-flight warnings (outside button — checkboxes must live at top level) ──
         # Real peak RAM with the streaming/memmap renderer:
@@ -282,7 +327,10 @@ class AudioRenderer:
                         absorption, 
                         max_order,
                         add_noise if add_noise else False,
-                        noise_level if add_noise else -40
+                        noise_level if add_noise else -40,
+                        selected_odas_cfg=str(selected_odas_cfg) if selected_odas_cfg else '',
+                        selected_model_dir=str(selected_model_dir) if selected_model_dir else '',
+                        selected_model_name=selected_model_dir.name if selected_model_dir else ''
                     )
                     st.success(f"✅ Audio rendered successfully!")
                     st.info(f"Output: {output_path}")
@@ -298,7 +346,8 @@ class AudioRenderer:
                     import traceback
                     st.code(traceback.format_exc())
     
-    def _render_scene(self, scene, room_x, room_y, room_z, absorption, max_order, add_noise, noise_level):
+    def _render_scene(self, scene, room_x, room_y, room_z, absorption, max_order, add_noise, noise_level,
+                      selected_odas_cfg='', selected_model_dir='', selected_model_name=''):
         """Render the scene using pyroomacoustics"""
         duration = scene['duration']
         n_samples = int(duration * self.sample_rate)
@@ -673,6 +722,9 @@ class AudioRenderer:
             'tail_silence_seconds': TAIL_SECONDS,
             'source_sidecars': source_sidecars,
             'ambient_sidecar_path': amb_sidecar_path,
+            'selected_odas_config': selected_odas_cfg,
+            'selected_model_dir': selected_model_dir,
+            'selected_model_name': selected_model_name,
         }
         
         metadata_path = str(output_path).replace('.raw', '.json')

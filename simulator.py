@@ -90,6 +90,9 @@ class SimulationRunner:
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.odas_logs_dir = Path(odas_logs_dir)
         self.odas_logs_dir.mkdir(parents=True, exist_ok=True)
+        self.project_root = Path(__file__).resolve().parent
+        self.odas_config_dir = self.project_root / 'odas_config'
+        self.models_dir = self.project_root / 'models'
 
         odas_root_candidates = [
             Path(os.getenv('ODAS_ROOT', '')) if os.getenv('ODAS_ROOT') else None,
@@ -104,6 +107,20 @@ class SimulationRunner:
         self.socket_emit_script = os.getenv('ODAS_SOCKET_EMIT_SCRIPT', str(self.odas_root / 'vm_socket_emit.py'))
         self.odas_config = os.getenv('ODAS_CONFIG_PATH', str(self.odas_root / 'config' / 'runtime' / 'local_socket.cfg'))
         self.odaslive_bin = os.getenv('ODASLIVE_BIN', str(self.odas_build_dir / 'bin' / 'odaslive'))
+
+    def _list_odas_configs(self):
+        """Return sorted .cfg files from project odas_config directory."""
+        if not self.odas_config_dir.exists():
+            return []
+        cfgs = [p for p in self.odas_config_dir.rglob('*') if p.is_file() and p.suffix.lower() == '.cfg']
+        return sorted(cfgs, key=lambda p: p.name.lower())
+
+    def _list_models(self):
+        """Return sorted model directories from project models directory."""
+        if not self.models_dir.exists():
+            return []
+        models = [p for p in self.models_dir.iterdir() if p.is_dir()]
+        return sorted(models, key=lambda p: p.name.lower())
 
     # ── convenience: pull live process handles from session state ────────────
     @property
@@ -168,6 +185,57 @@ class SimulationRunner:
                 st.metric("Duration", f"{metadata.get('duration', 0)}s")
             with col3:
                 st.metric("Sample Rate", f"{metadata.get('sample_rate', 16000)} Hz")
+
+        st.markdown("#### Runtime Model & Config")
+        cfg_options = self._list_odas_configs()
+        model_options = self._list_models()
+
+        selected_cfg_from_render = metadata.get('selected_odas_config', '')
+        default_cfg = Path(selected_cfg_from_render) if selected_cfg_from_render else None
+        cfg_default_idx = 0
+        if cfg_options and default_cfg is not None:
+            for i, cfg in enumerate(cfg_options):
+                try:
+                    if cfg.resolve() == default_cfg.resolve():
+                        cfg_default_idx = i
+                        break
+                except Exception:
+                    continue
+
+        selected_model_name_from_render = metadata.get('selected_model_name', '')
+        model_default_idx = 0
+        if model_options and selected_model_name_from_render:
+            for i, model_dir in enumerate(model_options):
+                if model_dir.name == selected_model_name_from_render:
+                    model_default_idx = i
+                    break
+
+        runtime_col1, runtime_col2 = st.columns(2)
+        with runtime_col1:
+            if cfg_options:
+                selected_odas_cfg = st.selectbox(
+                    "ODAS Config (.cfg)",
+                    cfg_options,
+                    index=cfg_default_idx,
+                    format_func=lambda p: p.name,
+                    help=f"Configs from {self.odas_config_dir}"
+                )
+            else:
+                selected_odas_cfg = Path(self.odas_config)
+                st.warning(f"No .cfg files found in {self.odas_config_dir}. Using default: {self.odas_config}")
+
+        with runtime_col2:
+            if model_options:
+                selected_model_dir = st.selectbox(
+                    "Model Directory",
+                    model_options,
+                    index=model_default_idx,
+                    format_func=lambda p: p.name,
+                    help=f"Models from {self.models_dir}"
+                )
+            else:
+                selected_model_dir = None
+                st.warning(f"No model directories found in {self.models_dir}")
         
         # ── Experiment settings ───────────────────────────────────────────────
         with st.expander("🧪 Experiment Settings", expanded=True):
@@ -300,7 +368,10 @@ class SimulationRunner:
             self._run_simulation(str(selected_raw_file), port, metadata,
                                  preset_name=preset_name,
                                  sst_overrides=sst_overrides,
-                                 experiment_tag=experiment_tag.strip() or None)
+                                 experiment_tag=experiment_tag.strip() or None,
+                                 odas_config_path=str(selected_odas_cfg),
+                                 selected_model_dir=str(selected_model_dir) if selected_model_dir else '',
+                                 selected_model_name=selected_model_dir.name if selected_model_dir else '')
             st.rerun()  # switch to the status view immediately
 
         if stop_button:
@@ -342,10 +413,9 @@ class SimulationRunner:
         time.sleep(5)
         st.rerun()
     
-    def _apply_sst_preset(self, preset: dict):
+    def _apply_sst_preset(self, cfg_path: str, preset: dict):
         """Patch the SST parameters in the ODAS config file to match the selected preset."""
         import re as _re
-        cfg_path = self.odas_config
         try:
             text = Path(cfg_path).read_text()
             param_map = {
@@ -371,7 +441,10 @@ class SimulationRunner:
     def _run_simulation(self, raw_file_path, port, metadata,
                         preset_name: str = "Balanced (default)",
                         sst_overrides: dict | None = None,
-                        experiment_tag: str | None = None):
+                        experiment_tag: str | None = None,
+                        odas_config_path: str | None = None,
+                        selected_model_dir: str = '',
+                        selected_model_name: str = ''):
         """Start the ODAS simulation — processes run in a background thread so
         Streamlit re-renders cannot kill them prematurely."""
 
@@ -383,7 +456,8 @@ class SimulationRunner:
         # ── apply SST config — overrides take precedence over preset ─────────
         base_preset = SST_PRESETS.get(preset_name, SST_PRESETS["Balanced (default)"])
         effective = {**base_preset, **(sst_overrides or {})}
-        self._apply_sst_preset(effective)
+        odas_cfg = odas_config_path or self.odas_config
+        self._apply_sst_preset(odas_cfg, effective)
         st.info(f"⚙️ ODAS SST preset applied: **{preset_name}**")
 
         # ── derive names / durations ────────────────────────────────────────
@@ -398,7 +472,7 @@ class SimulationRunner:
 
         required_paths = [
             self.socket_emit_script,
-            self.odas_config,
+            odas_cfg,
             self.odaslive_bin,
         ]
         missing = [p for p in required_paths if not Path(p).exists()]
@@ -441,7 +515,7 @@ class SimulationRunner:
         odas_cmd = [
             self.odaslive_bin,
             "-v",
-            "-c", self.odas_config
+            "-c", odas_cfg
         ]
         log_fh = open(log_file_path, 'w')
         odas_process = subprocess.Popen(
@@ -482,7 +556,8 @@ class SimulationRunner:
             args=(sim, log_fh, run_name, render_id, scene_name,
                   metadata, raw_file_path, log_file_path,
                   run_start_time, run_timestamp, duration,
-                  preset_name, experiment_tag),
+                preset_name, experiment_tag, odas_cfg,
+                selected_model_dir, selected_model_name),
             daemon=True,
         )
         monitor_thread.start()
@@ -492,7 +567,10 @@ class SimulationRunner:
                              metadata, raw_file_path, log_file_path,
                              run_start_time, run_timestamp, duration,
                              preset_name: str = "Balanced (default)",
-                             experiment_tag: str | None = None):
+                             experiment_tag: str | None = None,
+                             odas_cfg: str | None = None,
+                             selected_model_dir: str = '',
+                             selected_model_name: str = ''):
         """Runs in a daemon thread — waits for socket to finish, then cleans up.
         Updates sim dict in-place so the Streamlit polling loop can display
         progress without touching the processes.
@@ -577,10 +655,12 @@ class SimulationRunner:
             'classify_events_file': classify_events_file,
             'session_live_file': session_live_file,
             'port': 10000,
-            'odas_config': self.odas_config,
+            'odas_config': odas_cfg or self.odas_config,
             'warmup_seconds': metadata.get('warmup_seconds', 0),
             'odas_preset': preset_name,
             'experiment_tag': experiment_tag or '',
+            'selected_model_dir': selected_model_dir,
+            'selected_model_name': selected_model_name,
         }
         run_file_path = str(self.runs_dir / f"{run_name}.json")
         with open(run_file_path, 'w') as f:

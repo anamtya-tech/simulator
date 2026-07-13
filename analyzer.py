@@ -306,12 +306,12 @@ class ResultAnalyzer:
                 "🔄 Regenerate Session Analysis" if active_mic_session else
                 "🔍 Analyze Run" if not analysis_exists else "🔄 Regenerate Analysis",
                 type="primary",
-                use_container_width=True,
+                  width="stretch",
                 disabled=disable_analyze
             )
         with col2:
             if analysis_exists:
-                if st.button("🗑️ Delete", use_container_width=True):
+                  if st.button("🗑️ Delete", width="stretch"):
                     self._delete_analysis(analysis_id)
                     st.rerun()
 
@@ -2895,70 +2895,108 @@ class ResultAnalyzer:
         gt_pos = [m for m in gt_matches
                   if m.get('source_position') and len(m['source_position']) == 3]
         dist_stats = []
-        for lo, hi, band in DIST_BANDS:
-            bm = [m for m in gt_pos if lo <= _d3(m['source_position']) < hi]
-            if not bm:
-                continue
-            dists  = [_d3(m['source_position']) for m in bm]
-            b_errs = [m.get('angular_error', 0) for m in bm]
-            b_pred = [m for m in bm
-                      if m.get('model_prediction') not in (None, 'unclassified', '')]
-            b_corr = sum(1 for m in b_pred
-                         if m['model_prediction'] == m['source_label'])
-            b_lats = [m['detection_latency'] for m in bm
-                      if m.get('detection_latency') is not None]
-            top    = Counter(m.get('source_label', '?') for m in bm).most_common(3)
-            dist_stats.append({
-                'label':    band,
-                'n':        len(bm),
-                'avg_dist': sum(dists) / len(dists),
-                'avg_err':  sum(b_errs) / len(b_errs),
-                'max_err':  max(b_errs),
-                'acc':      b_corr / len(b_pred) * 100 if b_pred else 0.0,
-                'avg_lat':  sum(b_lats) / len(b_lats) if b_lats else 0.0,
-                'top':      ', '.join(f'{l}×{c}' for l, c in top),
-            })
+        if has_ground_truth:
+            for lo, hi, band in DIST_BANDS:
+                bm = [m for m in gt_pos if lo <= _d3(m['source_position']) < hi]
+                if not bm:
+                    continue
+                dists  = [_d3(m['source_position']) for m in bm]
+                b_errs = [m.get('angular_error', 0) for m in bm]
+                b_pred = [m for m in bm
+                          if m.get('model_prediction') not in (None, 'unclassified', '')]
+                b_corr = sum(1 for m in b_pred
+                             if m['model_prediction'] == m['source_label'])
+                b_lats = [m['detection_latency'] for m in bm
+                          if m.get('detection_latency') is not None]
+                top    = Counter(m.get('source_label', '?') for m in bm).most_common(3)
+                dist_stats.append({
+                    'label':    band,
+                    'n':        len(bm),
+                    'avg_dist': sum(dists) / len(dists),
+                    'avg_err':  sum(b_errs) / len(b_errs),
+                    'max_err':  max(b_errs),
+                    'acc':      b_corr / len(b_pred) * 100 if b_pred else 0.0,
+                    'avg_lat':  sum(b_lats) / len(b_lats) if b_lats else 0.0,
+                    'top':      ', '.join(f'{l}×{c}' for l, c in top),
+                })
+        else:
+            det_pos = [m for m in matches if m.get('position') and len(m.get('position', [])) == 3]
+            for lo, hi, band in DIST_BANDS:
+                bm = [m for m in det_pos if lo <= _d3(m['position']) < hi]
+                dists = [_d3(m['position']) for m in bm] if bm else []
+                top = Counter(
+                    m.get('model_prediction')
+                    for m in bm
+                    if m.get('model_prediction') not in (None, '', 'unclassified')
+                ).most_common(3)
+                dist_stats.append({
+                    'label':    band,
+                    'n':        len(bm),
+                    'avg_dist': (sum(dists) / len(dists)) if dists else None,
+                    'avg_err':  None,
+                    'max_err':  None,
+                    'acc':      None,
+                    'avg_lat':  None,
+                    'top':      ', '.join(f'{l}×{c}' for l, c in top),
+                })
 
         if dist_stats:
             # Insight: is angular error flat or increasing with distance?
-            first_err = dist_stats[0]['avg_err']
-            last_err  = dist_stats[-1]['avg_err']
-            if last_err > first_err * 1.25:
-                insight_d = (f"⚠️ <b>Angular error grows with distance</b> — "
-                             f"{dist_stats[0]['label']} avg {first_err:.1f}° vs "
-                             f"{dist_stats[-1]['label']} avg {last_err:.1f}°. "
-                             f"Consider tightening thresholds for near sources.")
+            if has_ground_truth and dist_stats[0]['avg_err'] is not None and dist_stats[-1]['avg_err'] is not None:
+                first_err = dist_stats[0]['avg_err']
+                last_err  = dist_stats[-1]['avg_err']
+                if last_err > first_err * 1.25:
+                    insight_d = (f"⚠️ <b>Angular error grows with distance</b> — "
+                                 f"{dist_stats[0]['label']} avg {first_err:.1f}° vs "
+                                 f"{dist_stats[-1]['label']} avg {last_err:.1f}°. "
+                                 f"Consider tightening thresholds for near sources.")
+                else:
+                    insight_d = (f"✅ <b>Angular accuracy is distance-agnostic</b> — "
+                                 f"error only {first_err:.1f}°–{last_err:.1f}° across all bands. "
+                                 f"ODAS spatial localisation is robust to range.")
+            elif has_ground_truth:
+                insight_d = "ℹ️ <b>Ground truth available</b> — insufficient angular samples in one or more distance buckets."
             else:
-                insight_d = (f"✅ <b>Angular accuracy is distance-agnostic</b> — "
-                             f"error only {first_err:.1f}°–{last_err:.1f}° across all bands. "
-                             f"ODAS spatial localisation is robust to range.")
+                insight_d = "ℹ️ <b>No ground truth uploaded</b> — showing ODAS frame counts per distance bucket and top predicted classes."
 
             dist_rows = ''
             for b in dist_stats:
-                p = 'green' if b['acc'] >= 60 else 'amber' if b['acc'] >= 30 else 'red'
+                p = 'green' if (b['acc'] is not None and b['acc'] >= 60) else 'amber' if (b['acc'] is not None and b['acc'] >= 30) else 'red'
+                avg_dist_txt = f"{b['avg_dist']:.0f} m" if b['avg_dist'] is not None else "NA"
+                avg_err_txt = f"{b['avg_err']:.1f}°" if b['avg_err'] is not None else "NA"
+                max_err_txt = f"{b['max_err']:.1f}°" if b['max_err'] is not None else "NA"
+                avg_lat_txt = f"{b['avg_lat']:.2f} s" if b['avg_lat'] is not None else "NA"
+                acc_txt = f"<span class=\"pill {p}\">{b['acc']:.1f}%</span>" if b['acc'] is not None else "NA"
+                top_txt = b['top'] if b['top'] else "NA"
                 dist_rows += f"""
         <tr>
           <td><b>{b['label']}</b></td>
           <td style="text-align:right">{b['n']}</td>
-          <td style="text-align:right">{b['avg_dist']:.0f} m</td>
-          <td style="text-align:right">{b['avg_err']:.1f}°</td>
-          <td style="text-align:right">{b['max_err']:.1f}°</td>
-          <td style="text-align:right">{b['avg_lat']:.2f} s</td>
-          <td style="text-align:right"><span class="pill {p}">{b['acc']:.1f}%</span></td>
-          <td style="font-size:12px">{b['top']}</td>
+          <td style="text-align:right">{avg_dist_txt}</td>
+          <td style="text-align:right">{avg_err_txt}</td>
+          <td style="text-align:right">{max_err_txt}</td>
+          <td style="text-align:right">{avg_lat_txt}</td>
+          <td style="text-align:right">{acc_txt}</td>
+          <td style="font-size:12px">{top_txt}</td>
         </tr>"""
+        else:
+            insight_d = "ℹ️ <b>No detections available</b> — distance analysis has no rows for this run."
+            dist_rows = '<tr><td colspan="8" style="text-align:center;color:#636e72">No distance data available.</td></tr>'
 
-            html_parts.append(f"""
+        frames_col_name = "GT Frames" if has_ground_truth else "ODAS Frames"
+        dist_sub = "Does ODAS detect nearer events more reliably? Is classification accuracy distance-dependent?" if has_ground_truth else "No GT mode: only ODAS frame counts (blue bars) and top predicted classes by distance bucket."
+
+        html_parts.append(f"""
   <div class="sec-lbl">02 — Distance Analysis</div>
   <div class="card">
     <h2>📏 Detection &amp; Accuracy vs Source Distance</h2>
-    <p class="sub">Does ODAS detect nearer events more reliably? Is classification accuracy distance-dependent?</p>
+    <p class="sub">{dist_sub}</p>
     <div id="ch_dist" style="height:330px"></div>
     <div class="insight">{insight_d}</div>
     <table>
       <tr>
         <th>Distance Band</th>
-        <th style="text-align:right">GT Frames</th>
+        <th style="text-align:right">{frames_col_name}</th>
         <th style="text-align:right">Avg Distance</th>
         <th style="text-align:right">Avg Ang. Err</th>
         <th style="text-align:right">Max Ang. Err</th>
@@ -2974,8 +3012,9 @@ class ResultAnalyzer:
         # ═══════════════════════════════════════════════════════════════════════
         # SECTION 3 – Simultaneous Sources (existing helper)
         # ═══════════════════════════════════════════════════════════════════════
-        html_parts.append('\n  <div class="sec-lbl">03 — Simultaneous Sources</div>')
-        self._add_concurrent_source_section(html_parts, results)
+        if has_ground_truth:
+            html_parts.append('\n  <div class="sec-lbl">03 — Simultaneous Sources</div>')
+            self._add_concurrent_source_section(html_parts, results)
 
         # ═══════════════════════════════════════════════════════════════════════
         # SECTION 4 – Timing
@@ -3266,8 +3305,9 @@ class ResultAnalyzer:
         })
         _errs_json   = json.dumps(sorted(errs))
         _dist_json   = json.dumps([
-            {'label': b['label'], 'n': b['n'], 'err': round(b['avg_err'], 1),
-             'acc': round(b['acc'], 1)} for b in dist_stats
+            {'label': b['label'], 'n': b['n'], 'err': round(b['avg_err'], 1) if b['avg_err'] is not None else None,
+               'acc': round(b['acc'], 1) if b['acc'] is not None else None,
+               'has_gt': has_ground_truth} for b in dist_stats
         ] if dist_stats else [])
         _lat_json    = json.dumps(lats)
         _pq_json     = json.dumps({'labels': pq_labels, 'values': pq_vals})
@@ -3376,32 +3416,42 @@ class ResultAnalyzer:
 
 // Ch3 · Distance: frames + angular error + model accuracy
 (function() {{
+    if (!document.getElementById('ch_dist')) return;
   var d = {_dist_json};
   if (!d.length) return;
   var lbl = d.map(function(x){{ return x.label; }});
-  Plotly.newPlot('ch_dist', [
-    {{ x:lbl, y:d.map(function(x){{return x.n;}}), name:'ODAS Frames', type:'bar',
-       marker:{{color:'#0984e3',opacity:.8}},
-       hovertemplate:'<b>%{{x}}</b><br>Frames: %{{y}}<extra></extra>' }},
-    {{ x:lbl, y:d.map(function(x){{return x.err;}}), name:'Avg Ang. Err (°)',
-       type:'scatter', mode:'lines+markers', yaxis:'y2',
-       marker:{{color:'#e17055',size:9}}, line:{{width:2}},
-       hovertemplate:'<b>%{{x}}</b><br>Err: %{{y:.1f}}°<extra></extra>' }},
-    {{ x:lbl, y:d.map(function(x){{return x.acc;}}), name:'Model Acc (%)',
-       type:'scatter', mode:'lines+markers', yaxis:'y2',
-       marker:{{color:'#00b894',size:9,symbol:'diamond'}},
-       line:{{width:2,dash:'dot'}},
-       hovertemplate:'<b>%{{x}}</b><br>Acc: %{{y:.1f}}%<extra></extra>' }}
-  ], {{
-    height:330,
-    title:{{text:'ODAS Frames · Angular Error · Model Accuracy vs Distance',font:{{size:13}}}},
-    xaxis:{{title:'Distance from mic array'}},
-    yaxis:{{title:'ODAS Detection Frames', gridcolor:'#f1f3f5'}},
-    yaxis2:{{title:'Degrees / Accuracy %', overlaying:'y', side:'right', range:[0,100]}},
-    legend:{{orientation:'h', y:-0.3}},
-    plot_bgcolor:'#fafafa', paper_bgcolor:'white',
-    margin:{{l:50, r:65, t:40, b:100}}
-  }});
+    var hasGT = d.some(function(x){{ return !!x.has_gt; }});
+    var traces = [
+        {{ x:lbl, y:d.map(function(x){{return x.n;}}), name:'ODAS Frames', type:'bar',
+             marker:{{color:'#0984e3',opacity:.8}},
+             hovertemplate:'<b>%{{x}}</b><br>Frames: %{{y}}<extra></extra>' }}
+    ];
+    var layout = {{
+        height:330,
+        title:{{text: hasGT ? 'ODAS Frames · Angular Error · Model Accuracy vs Distance' : 'ODAS Frames by Distance Bucket', font:{{size:13}}}},
+        xaxis:{{title:'Distance from mic array'}},
+        yaxis:{{title:'ODAS Detection Frames', gridcolor:'#f1f3f5'}},
+        legend:{{orientation:'h', y:-0.3}},
+        plot_bgcolor:'#fafafa', paper_bgcolor:'white',
+        margin:{{l:50, r:65, t:40, b:100}}
+    }};
+
+    if (hasGT) {{
+        traces.push(
+            {{ x:lbl, y:d.map(function(x){{return x.err;}}), name:'Avg Ang. Err (°)',
+                 type:'scatter', mode:'lines+markers', yaxis:'y2',
+                 marker:{{color:'#e17055',size:9}}, line:{{width:2}},
+                 hovertemplate:'<b>%{{x}}</b><br>Err: %{{y:.1f}}°<extra></extra>' }},
+            {{ x:lbl, y:d.map(function(x){{return x.acc;}}), name:'Model Acc (%)',
+                 type:'scatter', mode:'lines+markers', yaxis:'y2',
+                 marker:{{color:'#00b894',size:9,symbol:'diamond'}},
+                 line:{{width:2,dash:'dot'}},
+                 hovertemplate:'<b>%{{x}}</b><br>Acc: %{{y:.1f}}%<extra></extra>' }}
+        );
+        layout.yaxis2 = {{title:'Degrees / Accuracy %', overlaying:'y', side:'right', range:[0,100]}};
+    }}
+
+    Plotly.newPlot('ch_dist', traces, layout);
 }})();
 
 // Ch4 · Detection latency histogram
@@ -3893,7 +3943,7 @@ class ResultAnalyzer:
         if cm:
             st.markdown("#### Confusion Matrix")
             import pandas as pd
-            st.dataframe(pd.DataFrame(cm), use_container_width=True)
+            st.dataframe(pd.DataFrame(cm), width="stretch")
 
         # ── Per-label breakdown ──────────────────────────────────────────────
         per_label = dep.get("per_label")
@@ -3910,7 +3960,7 @@ class ResultAnalyzer:
                     "Precision": f"{stats.get('precision', 0):.2%}",
                     "Recall":    f"{stats.get('recall', 0):.2%}",
                 })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch")
 
         # ── Raw JSON dump for debugging ──────────────────────────────────────
         with st.expander("📄 Raw deployment metrics JSON"):
@@ -4021,7 +4071,7 @@ class ResultAnalyzer:
             height=320,
             margin=dict(l=10, r=10, t=45, b=10)
         )
-        st.plotly_chart(fig, use_container_width=True, key=key)
+        st.plotly_chart(fig, width="stretch", key=key)
 
     def _plot_slice_gt_direction_radar(self, scene_file, slice_start, slice_end, key=None):
         """Plot a simple polar (radar-style) chart of GT source directions in a slice."""
@@ -4086,7 +4136,7 @@ class ResultAnalyzer:
             margin=dict(l=10, r=10, t=45, b=10),
             showlegend=False
         )
-        st.plotly_chart(fig, use_container_width=True, key=key)
+        st.plotly_chart(fig, width="stretch", key=key)
 
     def _extract_gt_source_clips(self, scene_file, win_start, win_end, target_sr=16000):
         """Extract source-local GT clips that overlap a selected window."""
@@ -4395,19 +4445,26 @@ class ResultAnalyzer:
             step=0.05,
             key="slice_duration_slider"
         )
-        slice_start = st.slider(
-            "Slice start (s)",
-            min_value=float(overall_start),
-            max_value=float(max(overall_start, overall_end - slice_duration)),
-            value=float(overall_start),
-            step=0.05,
-            key="slice_start_slider"
-        )
+        slice_start_min = float(overall_start)
+        slice_start_max = float(max(overall_start, overall_end - slice_duration))
+        if slice_start_max <= slice_start_min:
+            # Zero-duration sessions/ranges can make slider bounds equal.
+            slice_start = slice_start_min
+            st.caption(f"Slice start fixed at {slice_start:.3f}s (no selectable range).")
+        else:
+            slice_start = st.slider(
+                "Slice start (s)",
+                min_value=slice_start_min,
+                max_value=slice_start_max,
+                value=slice_start_min,
+                step=0.05,
+                key="slice_start_slider"
+            )
         slice_end = min(float(overall_end), float(slice_start + slice_duration))
         st.caption(f"Selected slice: {slice_start:.3f}s → {slice_end:.3f}s")
 
         slice_fig = self._build_slice_timeline_figure(windows, peaks, slice_start=slice_start, slice_end=slice_end)
-        st.plotly_chart(slice_fig, use_container_width=True)
+        st.plotly_chart(slice_fig, width="stretch")
 
         slice_peaks = [p for p in peaks if slice_start <= p['timestamp'] <= slice_end]
         slice_windows = [w for w in windows if not (w['end'] < slice_start or w['start'] > slice_end)]
