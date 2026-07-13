@@ -21,6 +21,8 @@ import subprocess
 import os
 import time
 import json
+import shutil
+import re
 from pathlib import Path
 from datetime import datetime
 import threading
@@ -94,19 +96,53 @@ class SimulationRunner:
         self.odas_config_dir = self.project_root / 'odas_config'
         self.models_dir = self.project_root / 'models'
 
+        odas_root_env = os.getenv('ODAS_ROOT')
         odas_root_candidates = [
-            Path(os.getenv('ODAS_ROOT', '')) if os.getenv('ODAS_ROOT') else None,
+            Path(odas_root_env) if odas_root_env else None,
             Path.home() / 'chatak-odas',
-            self.base_output_dir.parent.parent / 'chatak-odas',
+            self.project_root.parent / 'chatak-odas',
+            self.project_root.parent.parent / 'chatak-odas',
         ]
         odas_root_candidates = [p for p in odas_root_candidates if p is not None]
         self.odas_root = next((p for p in odas_root_candidates if p.exists()), odas_root_candidates[0])
-        self.odas_build_dir = Path(os.getenv('ODAS_BUILD_DIR', str(self.odas_root / 'build')))
+
+        odas_build_env = os.getenv('ODAS_BUILD_DIR')
+        odas_build_candidates = [
+            Path(odas_build_env) if odas_build_env else None,
+            self.odas_root / 'build',
+            self.odas_root / 'build-release',
+            self.odas_root / 'build-debug',
+        ]
+        odas_build_candidates = [p for p in odas_build_candidates if p is not None]
+        self.odas_build_dir = next((p for p in odas_build_candidates if p.exists()), odas_build_candidates[0])
 
         # Paths
         self.socket_emit_script = os.getenv('ODAS_SOCKET_EMIT_SCRIPT', str(self.odas_root / 'vm_socket_emit.py'))
-        self.odas_config = os.getenv('ODAS_CONFIG_PATH', str(self.odas_root / 'config' / 'runtime' / 'local_socket.cfg'))
-        self.odaslive_bin = os.getenv('ODASLIVE_BIN', str(self.odas_build_dir / 'bin' / 'odaslive'))
+
+        odas_cfg_env = os.getenv('ODAS_CONFIG_PATH')
+        cfg_candidates = [Path(odas_cfg_env)] if odas_cfg_env else []
+        cfg_candidates.extend([
+            self.odas_config_dir / 'yammnetsocket.cfg',
+            self.odas_config_dir / 'yammnetterminal.cfg',
+            self.odas_root / 'config' / 'runtime' / 'local_socket.cfg',
+        ])
+        first_project_cfg = next((p for p in self._list_odas_configs() if p.exists()), None)
+        if first_project_cfg is not None:
+            cfg_candidates.append(first_project_cfg)
+        self.odas_config = str(next((p for p in cfg_candidates if p.exists()), cfg_candidates[0]))
+
+        odaslive_env = os.getenv('ODASLIVE_BIN')
+        odaslive_candidates = [Path(odaslive_env)] if odaslive_env else []
+        odaslive_candidates.extend([
+            self.odas_build_dir / 'bin' / 'odaslive',
+            self.odas_root / 'build' / 'bin' / 'odaslive',
+            self.odas_root / 'build-release' / 'bin' / 'odaslive',
+            self.odas_root / 'build-debug' / 'bin' / 'odaslive',
+        ])
+        odaslive_from_path = shutil.which('odaslive')
+        if odaslive_from_path:
+            odaslive_candidates.append(Path(odaslive_from_path))
+        self.odaslive_bin = str(next((p for p in odaslive_candidates if p.exists()), odaslive_candidates[0]))
 
     def _list_odas_configs(self):
         """Return sorted .cfg files from project odas_config directory."""
@@ -237,122 +273,30 @@ class SimulationRunner:
                 selected_model_dir = None
                 st.warning(f"No model directories found in {self.models_dir}")
         
-        # ── Experiment settings ───────────────────────────────────────────────
-        with st.expander("🧪 Experiment Settings", expanded=True):
-            exp_col1, exp_col2 = st.columns(2)
-            with exp_col1:
+        # ── Experiment settings (stub) ───────────────────────────────────────
+        user_selected_cfg = bool(cfg_options)
+        preset_name = "Balanced (default)"
+        experiment_tag = ""
+        sst_overrides = None
+        apply_sst_preset = not user_selected_cfg
+
+        with st.expander("🧪 Experiment Settings", expanded=False):
+            st.caption("Stub: this section is kept for future experiment workflows.")
+            if user_selected_cfg:
+                st.info("Using SST parameters directly from the selected ODAS config file. Preset patching is bypassed.")
+            else:
+                st.info("No project config file selected; preset-based SST patching remains enabled.")
                 preset_name = st.selectbox(
                     "ODAS SST Preset",
                     list(SST_PRESETS.keys()),
                     index=0,
-                    help=(
-                        "Quick-start configuration for ODAS Sound Source Tracking (SST).  "
-                        "Each preset is a named combination of the 7 parameters below — "
-                        "expand **Advanced** to inspect or override individual values.\n\n"
-                        "**Balanced (default)** — `N_prob=6 / theta_prob=0.65 / Pnew=0.06` — "
-                        "best for general dataset collection; ~0.63 FP/s.\n\n"
-                        "**High-Recall** — `N_prob=3 / theta_prob=0.60 / Pnew=0.15` — "
-                        "catches short/quiet events at the cost of more FPs (~1.3/s); "
-                        "use *only* for building training datasets (EXP-A/B).\n\n"
-                        "**Low-FP (deployment test)** — `N_prob=8 / theta_prob=0.75 / Pnew=0.03` — "
-                        "suppresses geometry-driven hotspot FPs; higher miss rate; "
-                        "use to simulate live-device conditions (EXP-C/D)."
-                    )
                 )
                 preset = SST_PRESETS[preset_name]
                 st.caption(f"ℹ️ {preset['description']}")
-            with exp_col2:
                 experiment_tag = st.text_input(
                     "Experiment tag (optional)",
                     placeholder="e.g. exp_b4_hard_negatives",
-                    help=(
-                        "Free-text tag written into the run JSON and propagated to datasets/models. "
-                        "Use the tags from docs/experiments.md so results are traceable."
-                    )
                 )
-
-            # ── Advanced per-parameter overrides ─────────────────────────────
-            with st.expander("⚙️ Advanced — override individual SST parameters"):
-                st.caption(
-                    "Values are pre-filled from the chosen preset. "
-                    "Any change here overrides the preset for this run only — the preset name is "
-                    "still saved in the run JSON for traceability."
-                )
-                adv_col1, adv_col2 = st.columns(2)
-                with adv_col1:
-                    ov_Pnew = st.slider(
-                        "Pnew — track-birth probability",
-                        0.01, 0.30, float(preset["Pnew"]), 0.01,
-                        help=(
-                            "Probability threshold for spawning a *new* tracked source. "
-                            "Lower → more new tracks born (higher recall, more FPs). "
-                            "Higher → only strong candidates become tracks (fewer FPs, miss quiet sources)."
-                        )
-                    )
-                    ov_theta_new = st.slider(
-                        "theta_new — spatial gate for new tracks",
-                        0.40, 0.99, float(preset["theta_new"]), 0.01,
-                        help=(
-                            "Angular coherence required before a candidate SSL peak is promoted "
-                            "to a new SST track. Higher → stricter spatial gate."
-                        )
-                    )
-                    ov_Pfalse = st.slider(
-                        "Pfalse — false-source probability",
-                        0.01, 0.30, float(preset["Pfalse"]), 0.01,
-                        help=(
-                            "Prior probability that any given observation is a false alarm. "
-                            "Higher → tracker is more sceptical, prunes more aggressively."
-                        )
-                    )
-                    ov_gainMin = st.slider(
-                        "gainMin — minimum beamformer gain",
-                        0.10, 0.90, float(preset["gainMin"]), 0.05,
-                        help=(
-                            "Minimum gain applied to the beamformed output for each tracked source. "
-                            "Lower → more aggressive noise suppression; may clip quiet signals. "
-                            "Higher → more signal retained but also more residual noise in the clip."
-                        )
-                    )
-                with adv_col2:
-                    ov_N_prob = st.slider(
-                        "N_prob — confirmation frames",
-                        1, 15, int(preset["N_prob"]), 1,
-                        help=(
-                            "Number of consecutive ODAS frames a candidate must remain active "
-                            "before being confirmed as a real source. "
-                            "Higher → fewer FPs but misses short events. "
-                            "Lower → catches brief sounds but increases FP rate."
-                        )
-                    )
-                    ov_theta_prob = st.slider(
-                        "theta_prob — confirmation coherence",
-                        0.40, 0.99, float(preset["theta_prob"]), 0.01,
-                        help=(
-                            "Minimum spatial coherence required during the N_prob confirmation "
-                            "window. Higher → stricter confirmation gate."
-                        )
-                    )
-                    ov_theta_inactive = st.slider(
-                        "theta_inactive — track-death threshold",
-                        0.40, 0.99, float(preset["theta_inactive"]), 0.01,
-                        help=(
-                            "A confirmed track is killed when its coherence drops below this "
-                            "value for several frames. Higher → tracks die sooner after the "
-                            "source stops (less trailing FP activity)."
-                        )
-                    )
-
-                # Build override dict — passed to _run_simulation
-                sst_overrides = {
-                    "Pnew":           ov_Pnew,
-                    "theta_new":      ov_theta_new,
-                    "N_prob":         ov_N_prob,
-                    "theta_prob":     ov_theta_prob,
-                    "Pfalse":         ov_Pfalse,
-                    "gainMin":        ov_gainMin,
-                    "theta_inactive": ov_theta_inactive,
-                }
 
         # Port configuration
         port = st.number_input("Socket Port", 10000, 20000, 10000, 1)
@@ -365,14 +309,16 @@ class SimulationRunner:
             stop_button = st.button("⏹️ Stop Simulation", type="secondary")
         
         if run_button:
-            self._run_simulation(str(selected_raw_file), port, metadata,
-                                 preset_name=preset_name,
-                                 sst_overrides=sst_overrides,
-                                 experiment_tag=experiment_tag.strip() or None,
-                                 odas_config_path=str(selected_odas_cfg),
-                                 selected_model_dir=str(selected_model_dir) if selected_model_dir else '',
-                                 selected_model_name=selected_model_dir.name if selected_model_dir else '')
-            st.rerun()  # switch to the status view immediately
+            started = self._run_simulation(str(selected_raw_file), port, metadata,
+                                           preset_name=preset_name,
+                                           sst_overrides=sst_overrides,
+                                           apply_sst_preset=apply_sst_preset,
+                                           experiment_tag=experiment_tag.strip() or None,
+                                           odas_config_path=str(selected_odas_cfg),
+                                           selected_model_dir=str(selected_model_dir) if selected_model_dir else '',
+                                           selected_model_name=selected_model_dir.name if selected_model_dir else '')
+            if started:
+                st.rerun()  # switch to the status view immediately
 
         if stop_button:
             self._stop_simulation()
@@ -438,9 +384,81 @@ class SimulationRunner:
         except Exception as exc:
             st.warning(f"⚠️ Could not patch ODAS config with preset: {exc}")
 
+    def _prepare_runtime_cfg_for_simulation(self, cfg_path: str, port: int, run_timestamp: str) -> str:
+        """Create a run-local cfg that enforces raw.interface socket replay.
+
+        The user-selected config remains the source of truth for SST and all other
+        ODAS sections; only the RAW transport is normalized for simulator runs.
+        """
+        src_path = Path(cfg_path)
+        runtime_cfg = self.runs_dir / f"runtime_cfg_{run_timestamp}.cfg"
+
+        try:
+            text = src_path.read_text()
+            pattern = r'(raw\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*)'
+            match = re.search(pattern, text, flags=re.S)
+
+            if match:
+                socket_block = (
+                    "\n"
+                    "        type = \"socket\";\n"
+                    "        ip = \"127.0.0.1\";\n"
+                    f"        port = {int(port)};\n"
+                    "\n"
+                )
+                text = text[:match.start(2)] + socket_block + text[match.end(2):]
+
+            # In simulator mode we do not require tracked-sink socket export.
+            # If left as socket without a receiver, ODAS can exit at startup.
+            tracked_if_pattern = r'(tracked\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)'
+            tracked_if_match = re.search(tracked_if_pattern, text, flags=re.S)
+            if tracked_if_match:
+                tracked_block = (
+                    "\n"
+                    "            type = \"blackhole\";\n"
+                    "\n"
+                )
+                text = text[:tracked_if_match.start(2)] + tracked_block + text[tracked_if_match.end(2):]
+
+            def _remap_section_socket_port(cfg_text: str, section_name: str, desired_port: int) -> tuple[str, bool]:
+                section_pattern = (
+                    rf'({section_name}\s*:\s*\{{.*?interface\s*:\s*\{{.*?'
+                    rf'type\s*=\s*"socket"\s*;.*?port\s*=\s*)(\d+)(\s*;)'
+                )
+
+                changed = False
+
+                def _repl(m):
+                    nonlocal changed
+                    old_port = int(m.group(2))
+                    # Only remap when this section collides with RAW input socket.
+                    if old_port == int(port):
+                        changed = True
+                        return f"{m.group(1)}{desired_port}{m.group(3)}"
+                    return m.group(0)
+
+                updated = re.sub(section_pattern, _repl, cfg_text, count=1, flags=re.S)
+                return updated, changed
+
+            text, tracked_changed = _remap_section_socket_port(text, 'tracked', int(port) + 2)
+            text, potential_changed = _remap_section_socket_port(text, 'potential', int(port) + 3)
+
+            if tracked_changed or potential_changed:
+                st.caption(
+                    f"Adjusted ODAS socket sinks to avoid RAW port collision (RAW={int(port)}, "
+                    f"tracked={int(port)+2}, potential={int(port)+3})."
+                )
+
+            runtime_cfg.write_text(text)
+            return str(runtime_cfg)
+        except Exception as exc:
+            st.warning(f"⚠️ Could not prepare runtime socket config, using original file: {exc}")
+            return str(src_path)
+
     def _run_simulation(self, raw_file_path, port, metadata,
                         preset_name: str = "Balanced (default)",
                         sst_overrides: dict | None = None,
+                        apply_sst_preset: bool = True,
                         experiment_tag: str | None = None,
                         odas_config_path: str | None = None,
                         selected_model_dir: str = '',
@@ -451,14 +469,9 @@ class SimulationRunner:
         sim = _get_sim_state()
         if sim["running"]:
             st.warning("A simulation is already running.")
-            return
+            return False
 
-        # ── apply SST config — overrides take precedence over preset ─────────
-        base_preset = SST_PRESETS.get(preset_name, SST_PRESETS["Balanced (default)"])
-        effective = {**base_preset, **(sst_overrides or {})}
-        odas_cfg = odas_config_path or self.odas_config
-        self._apply_sst_preset(odas_cfg, effective)
-        st.info(f"⚙️ ODAS SST preset applied: **{preset_name}**")
+        odas_cfg_source = odas_config_path or self.odas_config
 
         # ── derive names / durations ────────────────────────────────────────
         render_id = metadata.get('render_id', Path(raw_file_path).stem)
@@ -470,6 +483,18 @@ class SimulationRunner:
         duration = metadata.get('duration', 10) + warmup_seconds + tail_seconds
         log_file_path = str(self.runs_dir / f"odas_log_{run_timestamp}.txt")
 
+        # Force simulator transport to socket replay, regardless of cfg capture mode.
+        odas_cfg = self._prepare_runtime_cfg_for_simulation(odas_cfg_source, port, run_timestamp)
+
+        if apply_sst_preset:
+            # Overrides take precedence over preset when patching is enabled.
+            base_preset = SST_PRESETS.get(preset_name, SST_PRESETS["Balanced (default)"])
+            effective = {**base_preset, **(sst_overrides or {})}
+            self._apply_sst_preset(odas_cfg, effective)
+            st.info(f"⚙️ ODAS SST preset applied: **{preset_name}**")
+        else:
+            st.info(f"⚙️ Using SST settings from selected config: **{Path(odas_cfg_source).name}**")
+
         required_paths = [
             self.socket_emit_script,
             odas_cfg,
@@ -478,8 +503,14 @@ class SimulationRunner:
         missing = [p for p in required_paths if not Path(p).exists()]
         if missing:
             st.error("Missing ODAS runtime files. Set ODAS_ROOT/ODAS_BUILD_DIR/ODAS_CONFIG_PATH to valid paths.")
+            st.caption(
+                f"Resolved paths -> ODAS_ROOT: {self.odas_root}, "
+                f"ODAS_BUILD_DIR: {self.odas_build_dir}, "
+                f"ODAS_CONFIG_PATH: {odas_cfg}, "
+                f"ODASLIVE_BIN: {self.odaslive_bin}"
+            )
             st.code("\n".join(missing))
-            return
+            return False
 
         # ── release stale port ───────────────────────────────────────────────
         try:
@@ -508,7 +539,7 @@ class SimulationRunner:
             stdout, stderr = socket_process.communicate()
             st.error("Socket server failed to start!")
             st.code(stderr.decode())
-            return
+            return False
 
         # ── start ODAS ───────────────────────────────────────────────────────
         run_start_time = time.time()
@@ -534,7 +565,7 @@ class SimulationRunner:
             st.error("❌ ODAS crashed during initialisation.")
             st.code(tail)
             socket_process.terminate()
-            return
+            return False
 
         # ── persist handles in session state ─────────────────────────────────
         sim.update({
@@ -561,6 +592,7 @@ class SimulationRunner:
             daemon=True,
         )
         monitor_thread.start()
+        return True
 
     # ── background monitor ────────────────────────────────────────────────────
     def _monitor_background(self, sim, log_fh, run_name, render_id, scene_name,
@@ -723,10 +755,23 @@ class SimulationRunner:
             try:
                 with open(run_file, 'r') as f:
                     run_data = json.load(f)
+
+                odas_cfg_path = run_data.get('odas_config', '')
+                cfg_name = Path(odas_cfg_path).name if odas_cfg_path else ''
+
+                model_name = (
+                    run_data.get('selected_model_name')
+                    or run_data.get('scene_metadata', {}).get('selected_model_name')
+                    or (Path(run_data.get('selected_model_dir', '')).name if run_data.get('selected_model_dir') else '')
+                    or 'N/A'
+                )
+
                 run_data_list.append({
                     'Run ID': run_data.get('run_id', run_data.get('run_name', '')),
                     'Scene': run_data.get('scene_name', run_data.get('scene_metadata', {}).get('scene_name', 'Unknown')),
                     'Render ID': run_data.get('render_id', 'N/A'),
+                    'Config': cfg_name or 'N/A',
+                    'Model': model_name,
                     'Duration': f"{run_data.get('scene_metadata', {}).get('duration', 0)}s",
                     'Timestamp': run_data.get('timestamp', '')
                 })

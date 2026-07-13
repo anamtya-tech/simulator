@@ -119,6 +119,60 @@ class ResultAnalyzer:
 
         # Return mapped path even when missing so errors point to the new location.
         return os.path.abspath(mapped)
+
+    def _discover_session_live_file(self, run_data):
+        """Find the best session_live file when metadata path is missing/stale.
+
+        Strategy:
+        1) Search known ClassifierLogs directories.
+        2) If run timestamp exists, pick nearest filename timestamp.
+        3) Otherwise use newest file.
+        """
+        search_dirs = [
+            self.odas_logs_dir,
+            self.project_root / 'ClassifierLogs',
+            Path.home() / 'chatak-odas' / 'build' / 'ClassifierLogs',
+            self.project_root.parent / 'chatak-odas' / 'build' / 'ClassifierLogs',
+            Path.home() / 'simulator' / 'ClassifierLogs',
+            Path.home() / 'Git_Dev' / 'simulator' / 'ClassifierLogs',
+        ]
+
+        candidates = []
+        for d in search_dirs:
+            d = Path(d)
+            if d.exists():
+                candidates.extend(d.glob('sst_session_live.json_*.json'))
+
+        candidates = [c for c in candidates if c.exists()]
+        if not candidates:
+            return ''
+
+        run_ts = run_data.get('timestamp', '')
+        if not run_ts:
+            newest = max(candidates, key=lambda p: p.stat().st_mtime)
+            return str(newest.resolve())
+
+        try:
+            target = datetime.strptime(run_ts, '%Y%m%d_%H%M%S')
+            best = None
+            best_diff = None
+            for c in candidates:
+                m = re.search(r'sst_session_live\.json_(\d{8}_\d{6})\.json$', c.name)
+                if not m:
+                    continue
+                c_ts = datetime.strptime(m.group(1), '%Y%m%d_%H%M%S')
+                diff = abs((c_ts - target).total_seconds())
+                if best is None or diff < best_diff:
+                    best = c
+                    best_diff = diff
+
+            if best is not None:
+                return str(best.resolve())
+        except Exception:
+            pass
+
+        newest = max(candidates, key=lambda p: p.stat().st_mtime)
+        return str(newest.resolve())
     
     def render(self):
         """Render the analyzer interface"""
@@ -211,7 +265,20 @@ class ResultAnalyzer:
             format_func=lambda x: x.stem
         )
 
-        mic_array_context = self._render_mic_array_inputs()
+        use_mic_array_imports = st.toggle(
+            "Use Mic Array Imports (optional)",
+            value=False,
+            help=(
+                "Enable only when analyzing external Live/Passive mic-array sessions. "
+                "For normal rendered runs, keep this off."
+            ),
+            key="use_mic_array_imports",
+        )
+
+        if use_mic_array_imports:
+            mic_array_context = self._render_mic_array_inputs()
+        else:
+            mic_array_context = {'active_session': None}
         
         # Load run data
         with open(selected_run_file, 'r') as f:
@@ -888,13 +955,20 @@ class ResultAnalyzer:
                 search_dirs=[
                     self.odas_logs_dir,
                     self.project_root / 'ClassifierLogs',
+                    Path.home() / 'chatak-odas' / 'build' / 'ClassifierLogs',
+                    self.project_root.parent / 'chatak-odas' / 'build' / 'ClassifierLogs',
                     Path.home() / 'simulator' / 'ClassifierLogs',
                     Path.home() / 'Git_Dev' / 'simulator' / 'ClassifierLogs',
                 ]
             )
             if not session_live_file or not os.path.exists(session_live_file):
+                session_live_file = self._discover_session_live_file(run_data)
+
+            if not session_live_file or not os.path.exists(session_live_file):
                 st.error(f"Session live file not found: {session_live_file}")
                 return None
+
+            st.caption(f"Using session_live file: {session_live_file}")
             
             # Get scene file
             scene_file = self._resolve_run_path(
