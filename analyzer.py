@@ -19,6 +19,8 @@ import streamlit as st
 import numpy as np
 import json
 import os
+import re
+import zipfile
 import pandas as pd
 import soundfile as sf
 from pathlib import Path
@@ -60,6 +62,11 @@ class ResultAnalyzer:
         self.analysis_dir = self.base_output_dir / 'analysis'
         self.analysis_dir.mkdir(parents=True, exist_ok=True)
         self.odas_logs_dir = Path(odas_logs_dir)
+        self.mic_array_root = self.project_root / 'Mic_Array'
+        self.live_audio_dir = self.mic_array_root / 'Live_Audio'
+        self.passive_audio_dir = self.mic_array_root / 'Passive_Audio'
+        self.mic_array_cache_dir = self.base_output_dir / 'mic_array_imports'
+        self.mic_array_cache_dir.mkdir(parents=True, exist_ok=True)
 
         models_candidates = [
             Path.home() / 'chatak-odas' / 'models',
@@ -203,23 +210,38 @@ class ResultAnalyzer:
             run_files,
             format_func=lambda x: x.stem
         )
+
+        mic_array_context = self._render_mic_array_inputs()
         
         # Load run data
         with open(selected_run_file, 'r') as f:
             run_data = json.load(f)
         
         run_id = run_data.get('run_id', run_data.get('run_name', selected_run_file.stem))
+        active_mic_session = mic_array_context.get('active_session')
+        analysis_id = mic_array_context.get('analysis_id') if active_mic_session else run_id
         
         # Display run info
         col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Run ID", run_id)
-        with col2:
-            st.metric("Scene", run_data.get('scene_name', 'Unknown'))
-        with col3:
-            st.metric("Render ID", run_data.get('render_id', 'N/A'))
-        with col4:
-            st.metric("Duration", f"{run_data.get('scene_metadata', {}).get('duration', 0)}s")
+        if active_mic_session:
+            with col1:
+                st.metric("Session ID", mic_array_context.get('session_name', 'Unknown'))
+            with col2:
+                st.metric("Source", mic_array_context.get('session_type', 'mic_array').replace('_', ' ').title())
+            with col3:
+                gt_status = "Uploaded" if mic_array_context.get('ground_truth_scene') else "None"
+                st.metric("Ground Truth", gt_status)
+            with col4:
+                st.metric("Model", mic_array_context.get('selected_model_name', 'default'))
+        else:
+            with col1:
+                st.metric("Run ID", run_id)
+            with col2:
+                st.metric("Scene", run_data.get('scene_name', 'Unknown'))
+            with col3:
+                st.metric("Render ID", run_data.get('render_id', 'N/A'))
+            with col4:
+                st.metric("Duration", f"{run_data.get('scene_metadata', {}).get('duration', 0)}s")
 
         # Show experiment provenance if tagged
         exp_tag   = run_data.get('experiment_tag', '')
@@ -229,7 +251,7 @@ class ResultAnalyzer:
             if exp_tag:    tag_parts.append(f"🧪 `{exp_tag}`")
             if odas_preset: tag_parts.append(f"⚙️ preset: *{odas_preset}*")
             st.caption("  ·  ".join(tag_parts))
-        
+
         # Configuration
         with st.expander("⚙️ Analysis Settings", expanded=False):
             col1, col2 = st.columns(2)
@@ -266,48 +288,61 @@ class ResultAnalyzer:
                     help="Accept ODAS detections up to this many seconds AFTER the GT source ends. "
                          "Handles Kalman persistence tail (observed: up to 12.75s for Wolfhowl)."
                 )
-        
+
         # Check if analysis exists
-        analysis_path = self._get_analysis_path(run_id)
-        report_path = self._get_report_path(run_id)
-        dataset_path = self._get_dataset_path(run_id)
-        
+        analysis_path = self._get_analysis_path(analysis_id)
+        report_path = self._get_report_path(analysis_id)
+        dataset_path = self._get_dataset_path(analysis_id)
+
         analysis_exists = analysis_path.exists()
-        
+        generated_analysis_data = None
+
         # Analyze button
         col1, col2 = st.columns([3, 1])
         with col1:
+            disable_analyze = bool(active_mic_session) and not bool(mic_array_context.get('tracks_path'))
             analyze_button = st.button(
+                "🔍 Analyze Session" if active_mic_session and not analysis_exists else
+                "🔄 Regenerate Session Analysis" if active_mic_session else
                 "🔍 Analyze Run" if not analysis_exists else "🔄 Regenerate Analysis",
                 type="primary",
-                use_container_width=True
+                use_container_width=True,
+                disabled=disable_analyze
             )
         with col2:
             if analysis_exists:
                 if st.button("🗑️ Delete", use_container_width=True):
-                    self._delete_analysis(run_id)
+                    self._delete_analysis(analysis_id)
                     st.rerun()
-        
+
         # Run analysis
         if analyze_button:
             with st.spinner("Analyzing..."):
-                results = self._analyze_run(run_data, angle_threshold, save_unmatched,
-                                            time_pre=time_pre, time_post=time_post)
-                
+                if active_mic_session:
+                    results = self._analyze_mic_array_session(
+                        mic_array_context,
+                        angle_threshold,
+                        time_pre=time_pre,
+                        time_post=time_post,
+                    )
+                else:
+                    results = self._analyze_run(run_data, angle_threshold, save_unmatched,
+                                                time_pre=time_pre, time_post=time_post)
+
                 if results:
                     # Use YAMNet classifications instead of custom model
                     strategy = st.session_state.get('label_strategy', 'ODAS event voting')
                     results = self._apply_yamnet_classifications(results, label_strategy=strategy)
-                    
+
                     # Save analysis JSON
-                    self._save_analysis(run_id, results, angle_threshold)
-                    
+                    self._save_analysis(analysis_id, results, angle_threshold)
+
                     # Generate HTML report
-                    self._generate_html_report(run_id, results)
-                    
+                    self._generate_html_report(analysis_id, results)
+
                     # Create dataset CSV
-                    self._create_dataset(results, run_id, save_unmatched)
-                    
+                    self._create_dataset(results, analysis_id, save_unmatched)
+
                     # Save to YAMNet training dataset if enabled
                     if save_to_dataset:
                         try:
@@ -316,37 +351,39 @@ class ResultAnalyzer:
                             if ambient_only_mode:
                                 # Ambient-only run: label all peaks as 'background' hard negatives
                                 bg_stats = self.yamnet_curator.curate_ambient_as_background(
-                                    results, run_id)
+                                    results, analysis_id)
                                 saved_bg = bg_stats.get('saved', 0)
                                 st.info(f"🌿 Ambient-only mode: {saved_bg} peaks saved as 'background' hard negatives")
                             else:
-                                yamnet_stats = self.yamnet_curator.curate_from_analysis(results, run_id)
+                                yamnet_stats = self.yamnet_curator.curate_from_analysis(results, analysis_id)
                                 saved_t = yamnet_stats.get('saved', 0)
                                 saved_u = yamnet_stats.get('unknown_saved', 0)
                                 if saved_t or saved_u:
                                     st.info(f"🎵 YAMNet dataset: {saved_t} training + {saved_u} unknown samples saved")
                         except Exception as e:
                             st.warning(f"⚠️ YAMNet curation skipped: {e}")
-                    
+
                     st.success("✅ Analysis complete!")
-                    st.session_state['analysis_just_completed'] = True
-            # st.rerun() must be OUTSIDE the spinner context — calling it inside
-            # keeps the spinner open forever on the next render.
-            if st.session_state.pop('analysis_just_completed', False):
-                st.rerun()
-        
+                    analysis_exists = True
+                    generated_analysis_data = self._convert_to_native(results)
+                    if active_mic_session:
+                        st.session_state[f'auto_open_report_{analysis_id}'] = True
+
         # Display results if analysis exists
         if analysis_exists:
-            try:
-                with open(analysis_path, 'r') as f:
-                    analysis_data = json.load(f)
-            except json.JSONDecodeError as e:
-                st.error(f"❌ Analysis file is corrupted: {e}")
-                st.info("The file may have been corrupted due to an interrupted save. Try deleting and regenerating the analysis.")
-                if st.button("🗑️ Delete Corrupted Analysis", key="delete_corrupted"):
-                    self._delete_analysis(run_id)
-                    st.rerun()
-                return
+            if generated_analysis_data is not None:
+                analysis_data = generated_analysis_data
+            else:
+                try:
+                    with open(analysis_path, 'r') as f:
+                        analysis_data = json.load(f)
+                except json.JSONDecodeError as e:
+                    st.error(f"❌ Analysis file is corrupted: {e}")
+                    st.info("The file may have been corrupted due to an interrupted save. Try deleting and regenerating the analysis.")
+                    if st.button("🗑️ Delete Corrupted Analysis", key="delete_corrupted"):
+                        self._delete_analysis(analysis_id)
+                        st.rerun()
+                    return
 
             # ── Tabs: standard results + deployment evaluation + window explorer ─
             res_tab, deploy_tab, windows_tab = st.tabs([
@@ -363,10 +400,11 @@ class ResultAnalyzer:
 
                 if report_path.exists():
                     st.success("📊 Interactive Report Generated!")
+                    auto_open_report = bool(st.session_state.pop(f'auto_open_report_{analysis_id}', False))
 
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        view_report = st.button("🔍 Open Report (Full Page)", key=f"open_{run_id}", width='stretch', type="primary")
+                        view_report = st.button("🔍 Open Report (Full Page)", key=f"open_{analysis_id}", width='stretch', type="primary") or auto_open_report
 
                     with col2:
                         with open(report_path, 'rb') as f:
@@ -382,7 +420,7 @@ class ResultAnalyzer:
                         st.text_input(
                             "File Path",
                             value=str(report_path),
-                            key=f"path_{run_id}",
+                            key=f"path_{analysis_id}",
                             label_visibility="collapsed"
                         )
 
@@ -406,7 +444,7 @@ class ResultAnalyzer:
                         except Exception as _e:
                             st.error(f"Could not load report: {_e}")
                         st.markdown("---")
-                        if st.button("⬆️ Back to Top", key=f"back_{run_id}"):
+                        if st.button("⬆️ Back to Top", key=f"back_{analysis_id}"):
                             st.rerun()
 
                 st.markdown("---")
@@ -444,18 +482,380 @@ class ResultAnalyzer:
                                     f,
                                     file_name=analysis_path.name,
                                     mime='application/json',
-                                    key=f'dl_json_{run_id}'
+                                    key=f'dl_json_{analysis_id}'
                                 )
 
             with deploy_tab:
-                self._render_deployment_eval(analysis_data, run_id)
+                self._render_deployment_eval(analysis_data, analysis_id)
 
             with windows_tab:
-                self._render_window_explorer(analysis_data, run_id)
-        
+                self._render_window_explorer(analysis_data, analysis_id)
+
         # Show recent analyses
         st.markdown("---")
         self._show_recent_analyses()
+
+    def _list_mic_array_sources(self, base_dir):
+        """Return zip files and session folders for a Mic Array source directory."""
+        base_path = Path(base_dir)
+        if not base_path.exists():
+            return []
+
+        entries = []
+        for path in sorted(base_path.iterdir()):
+            if path.is_dir() or path.suffix.lower() == '.zip':
+                entries.append(path)
+        return entries
+
+    def _list_local_model_dirs(self):
+        """Return model directories containing a TFLite + class map pair."""
+        model_roots = [
+            Path.home() / 'chatak-odas' / 'models',
+            self.project_root.parent / 'chatak-odas' / 'models',
+        ]
+        discovered = []
+        for root in model_roots:
+            if not root.exists():
+                continue
+            if (root / 'yamnet_core.tflite').exists() and (root / 'yamnet_class_map.csv').exists():
+                discovered.append(root)
+            for child in sorted(root.iterdir()):
+                if child.is_dir() and (child / 'yamnet_core.tflite').exists() and (child / 'yamnet_class_map.csv').exists():
+                    discovered.append(child)
+        unique = []
+        seen = set()
+        for path in discovered:
+            resolved = str(path.resolve())
+            if resolved not in seen:
+                unique.append(path)
+                seen.add(resolved)
+        return unique
+
+    def _extract_model_path_from_cfg(self, cfg_text):
+        match = re.search(r'model_path\s*=\s*"([^"]+)"', cfg_text)
+        return match.group(1).strip() if match else ''
+
+    def _extract_mic_array_source(self, source_path):
+        """Return discovered files for a Mic Array folder/zip, extracting zips into cache."""
+        source_path = Path(source_path)
+        session_root = source_path
+        if source_path.suffix.lower() == '.zip':
+            extract_dir = self.mic_array_cache_dir / source_path.stem
+            if not extract_dir.exists():
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(source_path, 'r') as zf:
+                    zf.extractall(extract_dir)
+            children = [p for p in extract_dir.iterdir() if p.is_dir()]
+            session_root = children[0] if len(children) == 1 else extract_dir
+
+        tracks_files = sorted(session_root.rglob('*_tracks.json'))
+        cfg_files = sorted(session_root.rglob('*.cfg'))
+        latlong_files = sorted(session_root.rglob('*_latlong.txt'))
+        txt_files = sorted(session_root.rglob('*.txt'))
+
+        return {
+            'session_root': session_root,
+            'tracks_path': tracks_files[0] if tracks_files else None,
+            'cfg_path': cfg_files[0] if cfg_files else None,
+            'latlong_path': latlong_files[0] if latlong_files else None,
+            'notes_path': next((p for p in txt_files if p not in latlong_files), None),
+        }
+
+    def _coerce_ground_truth_scene(self, raw_data, scene_name='uploaded_ground_truth'):
+        """Coerce uploaded GT JSON into the scene structure expected by the matcher."""
+        if isinstance(raw_data, dict) and 'directional_sources' in raw_data:
+            return raw_data
+
+        if isinstance(raw_data, dict):
+            items = raw_data.get('sources') or raw_data.get('events') or []
+        elif isinstance(raw_data, list):
+            items = raw_data
+        else:
+            items = []
+
+        directional_sources = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            label = item.get('label') or item.get('class') or item.get('name') or 'unknown'
+            start_time = float(item.get('start_time', item.get('start', 0.0)))
+            end_time = float(item.get('end_time', item.get('end', start_time)))
+            if 'position' in item and isinstance(item['position'], (list, tuple)) and len(item['position']) >= 3:
+                position = [float(item['position'][0]), float(item['position'][1]), float(item['position'][2])]
+            elif all(key in item for key in ('x', 'y', 'z')):
+                position = [float(item['x']), float(item['y']), float(item['z'])]
+            elif 'azimuth_deg' in item:
+                az = np.radians(float(item.get('azimuth_deg', 0.0)))
+                el = np.radians(float(item.get('elevation_deg', 0.0)))
+                position = [float(np.cos(el) * np.cos(az)), float(np.cos(el) * np.sin(az)), float(np.sin(el))]
+            else:
+                position = [0.0, 0.0, 1.0]
+            directional_sources.append({
+                'label': label,
+                'start_time': start_time,
+                'end_time': end_time,
+                'position': position,
+            })
+
+        return {'scene_name': scene_name, 'directional_sources': directional_sources}
+
+    def _parse_concatenated_json_objects(self, text):
+        decoder = json.JSONDecoder()
+        idx = 0
+        objects = []
+        while idx < len(text):
+            while idx < len(text) and text[idx].isspace():
+                idx += 1
+            if idx >= len(text):
+                break
+            obj, next_idx = decoder.raw_decode(text, idx)
+            objects.append(obj)
+            idx = next_idx
+        return objects
+
+    def _parse_mic_array_tracks(self, tracks_path):
+        """Parse Mic Array *_tracks.json into analyzer detection records."""
+        text = Path(tracks_path).read_text(encoding='utf-8', errors='replace')
+        frames = self._parse_concatenated_json_objects(text)
+        detections = []
+        first_ts = None
+        timestamp_scale = 1.0
+        for frame_index, frame in enumerate(frames, 1):
+            raw_ts = frame.get('timeStamp', frame_index)
+            if first_ts is None:
+                first_ts = raw_ts
+                timestamp_scale = 0.001 if raw_ts > 1_000_000 else 1.0
+            rel_ts = max(0.0, (raw_ts - first_ts) * timestamp_scale)
+            for src in frame.get('src', []):
+                class_name = src.get('class') or 'unclassified'
+                class_conf = float(src.get('class_conf', 0.0))
+                event_votes = 1 if class_name and class_name != 'unclassified' else 0
+                detections.append({
+                    'timestamp': float(rel_ts),
+                    'frame_count': 1,
+                    'line_number': frame_index,
+                    'odas_timestamp': raw_ts,
+                    'x': float(src.get('x', 0.0)),
+                    'y': float(src.get('y', 0.0)),
+                    'z': float(src.get('z', 0.0)),
+                    'activity': float(src.get('activity', 0.0)),
+                    'bins': [],
+                    'class_id': -1,
+                    'class_name': class_name,
+                    'class_confidence': class_conf,
+                    'class_timestamp': raw_ts,
+                    'event_class_id': -1,
+                    'event_class_name': class_name,
+                    'event_votes': event_votes,
+                    'event_avg_confidence': class_conf,
+                    'event_max_confidence': class_conf,
+                    'event_candidates': [],
+                    'spectra_file': '',
+                    'spectral_count': 0,
+                    'topk_history': [],
+                    'track_id': int(src.get('id', 0)),
+                    'track_tag': src.get('tag', ''),
+                    'track_type': src.get('type', src.get('tag', '')),
+                })
+        return detections
+
+    def _build_unmatched_records(self, detections):
+        matches = []
+        for det in detections:
+            matches.append({
+                'detection': det,
+                'source': None,
+                'angular_error': None,
+                'confidence': 0.0,
+                'spatial_confidence': 0.0,
+                'temporal_confidence': 0.0,
+                'temporal_overlap_percent': 0.0,
+                'detection_interval': 'N/A',
+                'label': 'unknown',
+                'match_type': 'unmatched'
+            })
+        return matches
+
+    def _analyze_mic_array_session(self, mic_array_context, angle_threshold, time_pre=None, time_post=None):
+        """Analyze a selected Mic Array session using uploaded GT when available."""
+        tracks_path = mic_array_context.get('tracks_path')
+        if not tracks_path or not Path(tracks_path).exists():
+            st.error('Mic Array tracks JSON not found for the selected session.')
+            return None
+
+        detections = self._parse_mic_array_tracks(tracks_path)
+        st.info(f"Parsed {len(detections)} detections from Mic Array tracks JSON")
+        if not detections:
+            st.warning('No detections found in the selected Mic Array session.')
+            return None
+
+        scene = mic_array_context.get('ground_truth_scene') or {
+            'scene_name': mic_array_context.get('session_name', 'mic_array_session'),
+            'directional_sources': [],
+        }
+        if scene.get('directional_sources'):
+            matches, unmatched = self._match_detections_to_sources(
+                detections, scene, angle_threshold, time_pre=time_pre, time_post=time_post
+            )
+        else:
+            unmatched = list(detections)
+            matches = self._build_unmatched_records(detections)
+
+        stats = self._calculate_statistics(matches, unmatched, scene)
+        return {
+            'run_id': mic_array_context.get('analysis_id'),
+            'render_id': mic_array_context.get('session_name', 'mic_array_session'),
+            'scene_name': scene.get('scene_name', mic_array_context.get('session_name', 'mic_array_session')),
+            'timestamp': datetime.now().isoformat(),
+            'config': {
+                'angular_threshold': angle_threshold,
+                'save_unmatched': True,
+                'source_type': mic_array_context.get('session_type'),
+                'source_path': str(mic_array_context.get('active_session')),
+                'tracks_path': str(tracks_path),
+                'config_model_path': mic_array_context.get('config_model_path', ''),
+                'selected_model_dir': mic_array_context.get('selected_model_dir', ''),
+                'ground_truth_name': mic_array_context.get('ground_truth_name', ''),
+            },
+            'summary': stats['summary'],
+            'by_source': stats['by_source'],
+            'matches': matches,
+            'unmatched': unmatched,
+            'scene': scene,
+            'run_metadata': {
+                'mic_array': True,
+                'latlong_path': str(mic_array_context.get('latlong_path', '')),
+                'cfg_path': str(mic_array_context.get('cfg_path', '')),
+                'notes_path': str(mic_array_context.get('notes_path', '')),
+            }
+        }
+
+    def _render_mic_array_inputs(self):
+        """Render Live/Passive Mic Array source selectors below the run picker."""
+        st.markdown("**Mic Array Imports**")
+
+        live_sources = self._list_mic_array_sources(self.live_audio_dir)
+        passive_sources = self._list_mic_array_sources(self.passive_audio_dir)
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            live_selection = st.selectbox(
+                "Live Session",
+                options=live_sources,
+                format_func=lambda path: path.name,
+                index=None,
+                placeholder="Select a live session zip/folder",
+                key="mic_array_live_session",
+            )
+            if live_selection is not None:
+                st.caption(f"Selected: {live_selection}")
+            elif not live_sources:
+                st.caption(f"No live sessions found in {self.live_audio_dir}")
+
+        with col2:
+            passive_selection = st.selectbox(
+                "Passive Session",
+                options=passive_sources,
+                format_func=lambda path: path.name,
+                index=None,
+                placeholder="Select a passive session zip/folder",
+                key="mic_array_passive_session",
+            )
+            if passive_selection is not None:
+                st.caption(f"Selected: {passive_selection}")
+            elif not passive_sources:
+                st.caption(f"No passive sessions found in {self.passive_audio_dir}")
+
+        if live_selection and passive_selection:
+            st.error('Select either a Live Session or a Passive Session, not both.')
+            return {'active_session': None}
+
+        active_session = live_selection or passive_selection
+        if active_session is None:
+            return {'active_session': None}
+
+        session_type = 'live_session' if live_selection else 'passive_session'
+        discovered = self._extract_mic_array_source(active_session)
+        cfg_text = ''
+        if discovered.get('cfg_path') and Path(discovered['cfg_path']).exists():
+            cfg_text = Path(discovered['cfg_path']).read_text(encoding='utf-8', errors='replace')
+        config_model_path = self._extract_model_path_from_cfg(cfg_text)
+        config_model_name = Path(config_model_path).name if config_model_path else ''
+
+        st.caption(f"Tracks JSON: {discovered.get('tracks_path') or 'Not found'}")
+        st.caption(f"Config file: {discovered.get('cfg_path') or 'Not found'}")
+
+        gt_upload = st.file_uploader(
+            'Ground truth JSON',
+            type=['json'],
+            key=f'mic_array_gt_{session_type}',
+            help='Optional. Upload GT JSON to enable source matching and richer reports.'
+        )
+        ground_truth_scene = None
+        ground_truth_name = ''
+        if gt_upload is not None:
+            try:
+                ground_truth_name = gt_upload.name
+                ground_truth_scene = self._coerce_ground_truth_scene(
+                    json.loads(gt_upload.getvalue().decode('utf-8')),
+                    scene_name=Path(gt_upload.name).stem,
+                )
+                st.caption(f"Ground truth loaded: {ground_truth_name}")
+            except Exception as exc:
+                st.warning(f"Could not parse ground truth JSON: {exc}")
+
+        local_model_dirs = self._list_local_model_dirs()
+        model_mode = st.radio(
+            'Model source',
+            ['Use model from session config', 'Choose local model folder'],
+            horizontal=True,
+            key=f'mic_array_model_mode_{session_type}',
+        )
+        selected_model_dir = None
+        selected_model_name = config_model_name or 'default'
+        if model_mode == 'Use model from session config':
+            if config_model_name:
+                selected_model_dir = next((p for p in local_model_dirs if p.name == config_model_name), None)
+                st.caption(f"Config model_path: {config_model_path}")
+            else:
+                st.caption('No model_path found in session config; using current reporter model path.')
+        else:
+            if local_model_dirs:
+                selected_model_dir = st.selectbox(
+                    'Local model folder',
+                    options=local_model_dirs,
+                    format_func=lambda p: p.name,
+                    key=f'mic_array_local_model_{session_type}',
+                )
+                selected_model_name = selected_model_dir.name
+            else:
+                st.warning(f'No local model folders found under {self.odas_models_dir.parent}')
+
+        if selected_model_dir is None:
+            selected_model_dir = self.odas_models_dir
+            selected_model_name = selected_model_name or selected_model_dir.name
+
+        st.session_state['odas_model_override_dir'] = str(selected_model_dir)
+        st.caption(f"Reporter TFLite path: {selected_model_dir / 'yamnet_core.tflite'}")
+
+        session_name = active_session.stem if active_session.suffix.lower() == '.zip' else active_session.name
+        analysis_id = f"mic_{session_type}_{session_name}"
+        return {
+            'active_session': active_session,
+            'session_type': session_type,
+            'session_name': session_name,
+            'analysis_id': analysis_id,
+            'tracks_path': discovered.get('tracks_path'),
+            'cfg_path': discovered.get('cfg_path'),
+            'latlong_path': discovered.get('latlong_path'),
+            'notes_path': discovered.get('notes_path'),
+            'ground_truth_scene': ground_truth_scene,
+            'ground_truth_name': ground_truth_name,
+            'config_model_path': config_model_path,
+            'selected_model_dir': str(selected_model_dir),
+            'selected_model_name': selected_model_name,
+        }
     
     def _get_analysis_path(self, run_id):
         """Get path to analysis JSON file"""
@@ -981,13 +1381,16 @@ class ResultAnalyzer:
                 try:
                     import numpy as np
                     from yamnet_helper.yamnet_spectrum_classifier import YAMNetSpectrumClassifier
-                    if not hasattr(self, '_py_yamnet'):
-                        model = self.odas_models_dir / 'yamnet_core.tflite'
-                        class_map = self.odas_models_dir / 'yamnet_class_map.csv'
+                    model_dir = Path(st.session_state.get('odas_model_override_dir', str(self.odas_models_dir)))
+                    if (not hasattr(self, '_py_yamnet') or
+                            st.session_state.get('_py_yamnet_model_dir') != str(model_dir)):
+                        model = model_dir / 'yamnet_core.tflite'
+                        class_map = model_dir / 'yamnet_class_map.csv'
                         if not model.exists() or not class_map.exists():
                             return dict(class_id=-1, class_name='missing_model_files', confidence=0.0,
                                         votes=0, strategy_used='python_yamnet_missing_model')
                         self._py_yamnet = YAMNetSpectrumClassifier(str(model), str(class_map))
+                        st.session_state['_py_yamnet_model_dir'] = str(model_dir)
                     patch = np.fromfile(spectra_file, dtype=np.float32).reshape(96, 257)
                     cid, cname, conf = self._py_yamnet.classify_patch(patch)
                     return dict(class_id=cid, class_name=cname, confidence=float(conf),
@@ -1824,6 +2227,7 @@ class ResultAnalyzer:
             'scene_name': results['scene_name'],
             'created_at': results['timestamp'],
             'config': results['config'],
+            'run_metadata': self._convert_to_native(results.get('run_metadata', {})),
             'summary': self._convert_to_native(results['summary']),
             'by_source': self._convert_to_native(results['by_source']),
             'model_stats': self._convert_to_native(results.get('model_stats', {})),
@@ -2169,6 +2573,55 @@ class ResultAnalyzer:
                    if m.get('detection_latency') is not None]
         avg_lat = sum(lats) / len(lats) if lats else 0.0
 
+        # ── No-GT fallback metrics ────────────────────────────────────────────
+        classified_labels = [
+            m.get('model_prediction') for m in matches
+            if m.get('model_prediction') not in (None, '', 'unclassified')
+        ]
+        class_counter = Counter(classified_labels)
+        classified_count = len(classified_labels)
+        unclassified_count = max(len(matches) - classified_count, 0)
+        ts_vals = [float(m.get('timestamp', 0.0)) for m in matches if m.get('timestamp') is not None]
+        ts_min = min(ts_vals) if ts_vals else 0.0
+        ts_max = max(ts_vals) if ts_vals else 0.0
+        per_sec_counts = Counter(int(t) for t in ts_vals)
+        no_gt_det_x = sorted(per_sec_counts.keys())
+        no_gt_det_y = [per_sec_counts[k] for k in no_gt_det_x]
+        class_rows_html = ''
+        total_cls = max(classified_count, 1)
+        for lbl, cnt in class_counter.most_common(12):
+            pct = cnt / total_cls * 100
+            class_rows_html += (
+                f'<tr><td><b>{lbl}</b></td>'
+                f'<td style="text-align:right">{cnt}</td>'
+                f'<td style="text-align:right">{pct:.1f}%</td></tr>'
+            )
+
+        # ── Mic Array wall-clock timestamps (optional) ──────────────────────
+        run_meta = results.get('run_metadata', {})
+        notes_path = run_meta.get('notes_path', '')
+        wallclock_start_iso = ''
+        wallclock_points_iso = []
+        wallclock_axis_for_classification = False
+        if notes_path and os.path.exists(notes_path):
+            try:
+                with open(notes_path, 'r', encoding='utf-8', errors='replace') as nf:
+                    note_lines = [ln.strip() for ln in nf.readlines() if ln.strip()]
+                for ln in note_lines:
+                    if ln.startswith('Recording started at:'):
+                        wallclock_start_iso = ln.split('Recording started at:', 1)[1].strip()
+                        break
+                for ln in note_lines:
+                    if 'T' in ln and len(ln) >= 19 and ln[:4].isdigit():
+                        wallclock_points_iso.append(ln)
+                wallclock_axis_for_classification = len(wallclock_points_iso) > 0
+            except Exception:
+                wallclock_start_iso = ''
+                wallclock_points_iso = []
+                wallclock_axis_for_classification = False
+
+        has_ground_truth = len(gt_matches) > 0 and total_gt > 0
+
         # ── Helpers ───────────────────────────────────────────────────────────
         def pill(val, good, mid, fmt='%d%%'):
             cls = 'green' if val >= good else 'amber' if val >= mid else 'red'
@@ -2271,7 +2724,8 @@ class ResultAnalyzer:
         # ── KPI Cards ─────────────────────────────────────────────────────────
         gt_str    = str(total_gt) if total_gt else 'N/A'
         det_str   = f'{odas_det_rate:.0f}%' if total_gt else f"{summary.get('match_rate',0)*100:.0f}%"
-        html_parts.append(f"""
+        if has_ground_truth:
+            html_parts.append(f"""
   <!-- KPI Cards -->
   <div class="kpi-row">
     <div class="kpi purple">
@@ -2300,6 +2754,37 @@ class ResultAnalyzer:
       <div class="kpi-sub">{len(correct_m)} correct · {len(pred_m)} classified</div>
     </div>
   </div>
+""")
+        else:
+            html_parts.append(f"""
+    <!-- KPI Cards (No Ground Truth) -->
+    <div class="kpi-row">
+        <div class="kpi blue">
+            <div class="kpi-lbl">ODAS Frames</div>
+            <div class="kpi-val">{len(matches)}</div>
+            <div class="kpi-sub">Total detection frames in session</div>
+        </div>
+        <div class="kpi green">
+            <div class="kpi-lbl">Classified Frames</div>
+            <div class="kpi-val">{classified_count}</div>
+            <div class="kpi-sub">Frames with non-empty class label</div>
+        </div>
+        <div class="kpi amber">
+            <div class="kpi-lbl">Unclassified Frames</div>
+            <div class="kpi-val">{unclassified_count}</div>
+            <div class="kpi-sub">Frames without confident class output</div>
+        </div>
+        <div class="kpi purple">
+            <div class="kpi-lbl">Time Span</div>
+            <div class="kpi-val">{summary.get('time_span_seconds', 0):.1f}s</div>
+            <div class="kpi-sub">Relative detection time range</div>
+        </div>
+        <div class="kpi blue">
+            <div class="kpi-lbl">Detection Range</div>
+            <div class="kpi-val">{ts_min:.1f}–{ts_max:.1f}s</div>
+            <div class="kpi-sub">Min/max detection timestamps</div>
+        </div>
+    </div>
 """)
 
         # ═══════════════════════════════════════════════════════════════════════
@@ -2347,7 +2832,8 @@ class ResultAnalyzer:
             ch_err.append(round(ae, 2))
             ch_acc.append(round(src_acc, 1))
 
-        html_parts.append(f"""
+        if has_ground_truth:
+            html_parts.append(f"""
   <div class="sec-lbl">01 — ODAS Spatial Detection</div>
   <div class="card">
     <h2>📡 Detection Quality by Source</h2>
@@ -2369,7 +2855,27 @@ class ResultAnalyzer:
       </tr>
       {src_rows_html}
     </table>
-  </div>
+    </div>
+""")
+        else:
+                        html_parts.append(f"""
+    <div class="sec-lbl">01 — ODAS Spatial Detection</div>
+    <div class="card">
+                <h2>📡 Detection Overview (No Ground Truth)</h2>
+                <p class="sub">Ground truth not provided. Showing detection volume and class distribution from the session JSON.</p>
+                <div class="two-col">
+                    <div id="ch_no_gt_det" style="height:310px"></div>
+                    <div id="ch_no_gt_cls" style="height:310px"></div>
+                </div>
+                <table>
+                    <tr>
+                        <th>Class</th>
+                        <th style="text-align:right">Frames</th>
+                        <th style="text-align:right">Share</th>
+                    </tr>
+                    {class_rows_html}
+                </table>
+    </div>
 """)
 
         # ═══════════════════════════════════════════════════════════════════════
@@ -2495,20 +3001,9 @@ class ResultAnalyzer:
                         f'<td style="color:#636e72">{pq_desc.get(k,"—")}</td></tr>')
 
         lt100 = sum(1 for l in lats if l < 0.1)
-        html_parts.append(f"""
-  <div class="sec-lbl">04 — Timing</div>
-  <div class="card">
-    <h2>⏱️ Detection Timing</h2>
-    <p class="sub">How quickly does ODAS detect events? Are detections temporally aligned with the GT windows?</p>
-    <div class="two-col">
-      <div id="ch_latency"  style="height:290px"></div>
-      <div id="ch_patch_q"  style="height:290px"></div>
-    </div>
-    <table>
-      <tr><th>Patch Quality</th><th style="text-align:right">Frames</th>
-          <th style="text-align:right">%</th><th>Meaning</th></tr>
-      {pq_rows}
-    </table>
+        if has_ground_truth:
+            timing_sub = "How quickly does ODAS detect events? Are detections temporally aligned with the GT windows?"
+            timing_insight = f"""
     <div class="insight" style="margin-top:14px">
       <b>Avg latency:</b> {avg_lat:.2f} s &nbsp;·&nbsp;
       <b>Within 100 ms:</b> {lt100}/{len(lats)} ({lt100/max(len(lats),1)*100:.0f}% of GT frames) &nbsp;·&nbsp;
@@ -2522,16 +3017,43 @@ class ResultAnalyzer:
            When a GT source activates, an existing noise track that happens to point the right way is
            promoted rather than a new track started, so the "first seen" timestamp is earlier than GT start.<br>
         2. <b>YAMNet 960 ms buffer</b> — ODAS waits until its rolling audio buffer is full before
-           emitting a classification.  That buffer spans up to 960 ms, so a detection reported at
+           emitting a classification. That buffer spans up to 960 ms, so a detection reported at
            time T contains audio from as far back as T&minus;960 ms — bridging back before GT start.<br>
         3. <b>Room acoustics / reverb</b> — early reflections from walls can reach the mic array
            slightly before the direct wavefront, letting ODAS lock onto the direction a fraction
            of a second before the sound source officially begins.<br>
         4. <b>Pre-window tolerance</b> — the matcher deliberately accepts detections
            up to <code>time_pre</code> seconds before GT start (default 10 s) to catch exactly
-           these early starts.  Only a tiny fraction (&lt;5 %) of frames fall in this bucket.
+           these early starts. Only a tiny fraction (&lt;5 %) of frames fall in this bucket.
       </div>
     </details>
+"""
+        else:
+            timing_sub = "Track activity over relative session time. Wall-clock timestamps are shown when available from session text logs."
+            wc_note = f"Wall-clock start: {wallclock_start_iso}" if wallclock_start_iso else "Wall-clock start unavailable"
+            timing_insight = f"""
+    <div class="insight" style="margin-top:14px">
+      <b>Detection frames:</b> {len(matches)} &nbsp;·&nbsp;
+      <b>Time span:</b> {summary.get('time_span_seconds', 0):.1f}s &nbsp;·&nbsp;
+      <b>{wc_note}</b>
+    </div>
+"""
+
+        html_parts.append(f"""
+  <div class="sec-lbl">04 — Timing</div>
+  <div class="card">
+    <h2>⏱️ Detection Timing</h2>
+    <p class="sub">{timing_sub}</p>
+    <div class="two-col">
+      <div id="ch_latency"  style="height:290px"></div>
+      <div id="ch_patch_q"  style="height:290px"></div>
+    </div>
+    <table>
+      <tr><th>Patch Quality</th><th style="text-align:right">Frames</th>
+          <th style="text-align:right">%</th><th>Meaning</th></tr>
+      {pq_rows}
+    </table>
+        {timing_insight}
   </div>
 """)
 
@@ -2578,7 +3100,8 @@ class ResultAnalyzer:
         wrong_conf = [round(m.get('model_confidence', 0) or 0, 3)
                       for m in pred_m if m['model_prediction'] != m['source_label']]
 
-        html_parts.append(f"""
+        if has_ground_truth:
+            html_parts.append(f"""
   <div class="sec-lbl">05 — Model Classification</div>
   <div class="card">
     <h2>🤖 Classification Performance</h2>
@@ -2763,12 +3286,16 @@ class ResultAnalyzer:
         _tl_odas_gt_json   = json.dumps(tl_odas_gt)
         _tl_odas_fp_json   = json.dumps(tl_odas_fp)
         _tl_sources_json   = json.dumps(_tl_src_set)
+        _wallclock_points_json = json.dumps(wallclock_points_iso)
+        _no_gt_det_json = json.dumps({'x': no_gt_det_x, 'y': no_gt_det_y})
+        _no_gt_cls_json = json.dumps({'labels': list(class_counter.keys()), 'values': list(class_counter.values())})
 
         html_parts.append(f"""
 <script>
 // ─────────────────────────────────────────────────────────────────────────────
 // Ch1 · Detection rate per source (stacked bar + angular error overlay)
 (function() {{
+    if (!document.getElementById('ch_det_rate') || !document.getElementById('ch_ang_cdf')) return;
   var d = {_ch_det_rate_data};
   Plotly.newPlot('ch_det_rate', [
     {{ x:d.labels, y:d.det,  name:'Detected', type:'bar',
@@ -2791,6 +3318,36 @@ class ResultAnalyzer:
     plot_bgcolor:'#fafafa', paper_bgcolor:'white',
     margin:{{l:50, r:55, t:40, b:90}}
   }});
+}})();
+
+// Ch1b · No-GT detection overview
+(function() {{
+    if (!document.getElementById('ch_no_gt_det') || !document.getElementById('ch_no_gt_cls')) return;
+    var d = {_no_gt_det_json};
+    var c = {_no_gt_cls_json};
+    Plotly.newPlot('ch_no_gt_det', [
+        {{ x:d.x, y:d.y, type:'bar', marker:{{color:'#0984e3'}},
+             hovertemplate:'t=%{{x}}s<br>Frames: %{{y}}<extra></extra>' }}
+    ], {{
+        height:310,
+        title:{{text:'Detections per Second',font:{{size:13}}}},
+        xaxis:{{title:'Relative Time (s)'}},
+        yaxis:{{title:'Detection Frames', gridcolor:'#f1f3f5'}},
+        plot_bgcolor:'#fafafa', paper_bgcolor:'white',
+        margin:{{l:50, r:20, t:44, b:60}}
+    }});
+
+    Plotly.newPlot('ch_no_gt_cls', [
+        {{ labels:c.labels, values:c.values, type:'pie', hole:0.45,
+             marker:{{colors:['#00b894','#6c5ce7','#0984e3','#e17055','#d63031','#636e72']}},
+             textinfo:'label+percent',
+             hovertemplate:'<b>%{{label}}</b><br>%{{value}} frames (%{{percent}})<extra></extra>' }}
+    ], {{
+        height:310,
+        title:{{text:'Class Distribution (classified frames)',font:{{size:13}}}},
+        plot_bgcolor:'#fafafa', paper_bgcolor:'white',
+        margin:{{l:20, r:20, t:44, b:20}}
+    }});
 }})();
 
 // Ch2 · Angular error histogram + CDF
@@ -2849,15 +3406,23 @@ class ResultAnalyzer:
 
 // Ch4 · Detection latency histogram
 (function() {{
-  var lat = {_lat_json};
+    if (!document.getElementById('ch_latency') || !document.getElementById('ch_patch_q')) return;
+    var lat = {_lat_json};
+    var wc = {_wallclock_points_json};
+    var latSeries = lat;
+    var xTitle = 'Latency (s)';
+    if ((!lat || lat.length===0) && wc && wc.length>0) {{
+        latSeries = wc;
+        xTitle = 'Wall-clock timestamp';
+    }}
   Plotly.newPlot('ch_latency', [
-    {{ x:lat, type:'histogram', nbinsx:40, name:'Latency',
+        {{ x:latSeries, type:'histogram', nbinsx:40, name:'Latency',
        marker:{{color:'#6c5ce7',opacity:0.75}},
        hovertemplate:'Latency: %{{x:.2f}}s<br>Count: %{{y}}<extra></extra>' }}
   ], {{
     height:290,
     title:{{text:'Detection Latency (time from GT start to first ODAS frame)',font:{{size:13}}}},
-    xaxis:{{title:'Latency (s)'}},
+        xaxis:{{title:xTitle, type:(wc && wc.length>0 && (!lat || lat.length===0))?'date':'linear'}},
     yaxis:{{title:'Count', gridcolor:'#f1f3f5'}},
     plot_bgcolor:'#fafafa', paper_bgcolor:'white',
     margin:{{l:50, r:20, t:44, b:60}}
@@ -2882,6 +3447,7 @@ class ResultAnalyzer:
 
 // Ch6 · Confusion matrix heatmap (row-normalised %)
 (function() {{
+    if (!document.getElementById('ch_confusion') || !document.getElementById('ch_src_acc') || !document.getElementById('ch_conf_dist')) return;
   var labels = {_conf_labels};
   var z      = {_conf_mat};
   var zp = z.map(function(row) {{
@@ -3116,32 +3682,6 @@ class ResultAnalyzer:
         
         st.subheader("📊 Analysis Summary")
         
-        # Check if YAMNet stats are available
-        has_yamnet_stats = 'yamnet_stats' in analysis_data
-        
-        if has_yamnet_stats:
-            # Show YAMNet stats prominently
-            yamnet_stats = analysis_data['yamnet_stats']
-            st.info(f"🎯 **Using YAMNet classifications**: {yamnet_stats['yamnet_classified']} classified detections")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("YAMNet Classified", yamnet_stats['yamnet_classified'])
-            with col2:
-                st.metric("Correct", yamnet_stats['correct'], help="Matches with ground truth")
-            with col3:
-                st.metric("Incorrect", yamnet_stats['incorrect'], help="Mismatches needing fine-tuning")
-            with col4:
-                accuracy = yamnet_stats.get('accuracy', 0)
-                st.metric("Accuracy", f"{accuracy*100:.1f}%")
-            
-            # Show samples needing fine-tuning
-            needs_training = yamnet_stats.get('needs_training', 0)
-            if needs_training > 0:
-                st.warning(f"⚠️ **{needs_training} samples marked for YAMNet fine-tuning dataset** (mismatches, low confidence, or unclassified)")
-            
-            st.markdown("---")
-        
         # Check if OLD model stats exist (for backwards compatibility)
         has_model_stats = 'model_stats' in analysis_data
         
@@ -3179,26 +3719,65 @@ class ResultAnalyzer:
         except Exception:
             pass
         _fp_rate = len(_fp_m) / max(len(_all_m), 1) * 100
+        has_ground_truth = bool(analysis_data.get('config', {}).get('ground_truth_name') or _gt_m or _total_gt)
 
-        col1, col2, col3, col4, col5 = st.columns(5)
-        with col1:
-            st.metric("ODAS Frames", summary['total_detections'],
-                      help="Total ODAS detection frames (GT-matched + false positives)")
-        with col2:
-            if _total_gt:
-                st.metric("Events Detected", f"{_det_evt}/{_total_gt}",
-                          delta=f"{_det_evt/_total_gt*100:.0f}%",
-                          help="GT sound events that ODAS picked up at least once")
+        # Check if YAMNet stats are available
+        has_yamnet_stats = 'yamnet_stats' in analysis_data
+
+        if has_yamnet_stats:
+            # Show YAMNet stats prominently
+            yamnet_stats = analysis_data['yamnet_stats']
+            st.info(f"🎯 **Using YAMNet classifications**: {yamnet_stats['yamnet_classified']} classified detections")
+
+            if has_ground_truth:
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("YAMNet Classified", yamnet_stats['yamnet_classified'])
+                with col2:
+                    st.metric("Correct", yamnet_stats['correct'], help="Matches with ground truth")
+                with col3:
+                    st.metric("Incorrect", yamnet_stats['incorrect'], help="Mismatches needing fine-tuning")
+                with col4:
+                    accuracy = yamnet_stats.get('accuracy', 0)
+                    st.metric("Accuracy", f"{accuracy*100:.1f}%")
             else:
-                st.metric("GT Frame Coverage", f"{summary['match_rate']*100:.1f}%",
-                          help="Fraction of ODAS frames that matched a GT source")
-        with col3:
-            st.metric("False Positive Rate", f"{_fp_rate:.0f}%",
-                      help="ODAS frames not matched to any GT source")
-        with col4:
-            st.metric("Avg Angular Error", f"{summary['avg_angular_error']:.2f}°")
-        with col5:
-            st.metric("Time Span", f"{summary['time_span_seconds']:.1f}s")
+                st.metric("YAMNet Classified", yamnet_stats['yamnet_classified'])
+                st.caption("Ground-truth-dependent YAMNet metrics are hidden until a GT JSON is uploaded.")
+
+            # Show samples needing fine-tuning
+            needs_training = yamnet_stats.get('needs_training', 0)
+            if needs_training > 0:
+                st.warning(f"⚠️ **{needs_training} samples marked for YAMNet fine-tuning dataset** (mismatches, low confidence, or unclassified)")
+
+            st.markdown("---")
+
+        if has_ground_truth:
+            col1, col2, col3, col4, col5 = st.columns(5)
+            with col1:
+                st.metric("ODAS Frames", summary['total_detections'],
+                          help="Total ODAS detection frames (GT-matched + false positives)")
+            with col2:
+                if _total_gt:
+                    st.metric("Events Detected", f"{_det_evt}/{_total_gt}",
+                              delta=f"{_det_evt/_total_gt*100:.0f}%",
+                              help="GT sound events that ODAS picked up at least once")
+                else:
+                    st.metric("GT Frame Coverage", f"{summary['match_rate']*100:.1f}%",
+                              help="Fraction of ODAS frames that matched a GT source")
+            with col3:
+                st.metric("False Positive Rate", f"{_fp_rate:.0f}%",
+                          help="ODAS frames not matched to any GT source")
+            with col4:
+                st.metric("Avg Angular Error", f"{summary['avg_angular_error']:.2f}°")
+            with col5:
+                st.metric("Time Span", f"{summary['time_span_seconds']:.1f}s")
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("ODAS Frames", summary['total_detections'],
+                          help="Total ODAS detection frames parsed from the session JSON")
+            with col2:
+                st.metric("Time Span", f"{summary['time_span_seconds']:.1f}s")
         
         # Per-source breakdown
         if 'by_source' in analysis_data and analysis_data['by_source']:

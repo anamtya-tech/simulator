@@ -1,0 +1,1400 @@
+{
+  "name": "exp_a1_no_ambient",
+  "duration": 600.0,
+  "max_radius": 50.0,
+  "max_height": 10.0,
+  "min_height": -2.0,
+  "directional_sources": [
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": 6.0,
+      "y": 0.0,
+      "z": 0.5,
+      "start_time": 0.52,
+      "end_time": 2.42,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": -5.898,
+      "y": 5.405,
+      "z": 1.0,
+      "start_time": 8.27,
+      "end_time": 9.52,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 0.872,
+      "y": -9.962,
+      "z": 1.5,
+      "start_time": 6.87,
+      "end_time": 8.32,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 7.305,
+      "y": 9.52,
+      "z": 2.0,
+      "start_time": 6.87,
+      "end_time": 8.32,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -13.787,
+      "y": -2.431,
+      "z": 2.5,
+      "start_time": 15.11,
+      "end_time": 16.09,
+      "repeat": false
+    },
+    {
+      "label": "drone_binary",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 13.494,
+      "y": -8.597,
+      "z": 0.5,
+      "start_time": 20.32,
+      "end_time": 21.34,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -4.659,
+      "y": 17.387,
+      "z": 1.0,
+      "start_time": 21.22,
+      "end_time": 24.61,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -9.235,
+      "y": -17.74,
+      "z": 1.5,
+      "start_time": 21.2,
+      "end_time": 25.1,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 5.638,
+      "y": 2.052,
+      "z": 2.0,
+      "start_time": 30.03,
+      "end_time": 30.42,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -7.391,
+      "y": 3.061,
+      "z": 2.5,
+      "start_time": 29.98,
+      "end_time": 30.42,
+      "repeat": false
+    },
+    {
+      "label": "drone_binary",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 4.226,
+      "y": -9.063,
+      "z": 0.5,
+      "start_time": 35.44,
+      "end_time": 36.4,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": 3.608,
+      "y": 11.445,
+      "z": 1.0,
+      "start_time": 41.45,
+      "end_time": 43.36,
+      "repeat": false
+    },
+    {
+      "label": "drone_binary",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -12.124,
+      "y": -7.0,
+      "z": 1.5,
+      "start_time": 48.48,
+      "end_time": 49.44,
+      "repeat": false
+    },
+    {
+      "label": "drone_binary",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 15.621,
+      "y": -3.463,
+      "z": 2.0,
+      "start_time": 48.25,
+      "end_time": 49.21,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -10.324,
+      "y": 14.745,
+      "z": 2.5,
+      "start_time": 54.18,
+      "end_time": 54.5,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -2.611,
+      "y": -19.829,
+      "z": 0.5,
+      "start_time": 53.96,
+      "end_time": 58.01,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 4.596,
+      "y": 3.857,
+      "z": 1.0,
+      "start_time": 54.03,
+      "end_time": 59.69,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -7.992,
+      "y": 0.349,
+      "z": 1.5,
+      "start_time": 63.76,
+      "end_time": 64.72,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 7.071,
+      "y": -7.071,
+      "z": 2.0,
+      "start_time": 64.52,
+      "end_time": 65.54,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -0.523,
+      "y": 11.989,
+      "z": 2.5,
+      "start_time": 65.12,
+      "end_time": 65.51,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -8.999,
+      "y": -10.725,
+      "z": 0.5,
+      "start_time": 71.54,
+      "end_time": 73.31,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": 15.863,
+      "y": 2.088,
+      "z": 1.0,
+      "start_time": 79.05,
+      "end_time": 82.95,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -14.745,
+      "y": 10.324,
+      "z": 1.5,
+      "start_time": 78.48,
+      "end_time": 80.25,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 4.329,
+      "y": -19.526,
+      "z": 2.0,
+      "start_time": 88.72,
+      "end_time": 89.04,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 3.0,
+      "y": 5.196,
+      "z": 2.5,
+      "start_time": 88.94,
+      "end_time": 89.26,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -7.63,
+      "y": -2.406,
+      "z": 0.5,
+      "start_time": 87.14,
+      "end_time": 89.94,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": 9.063,
+      "y": -4.226,
+      "z": 1.0,
+      "start_time": 95.61,
+      "end_time": 97.21,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -4.592,
+      "y": 11.087,
+      "z": 1.5,
+      "start_time": 95.09,
+      "end_time": 96.09,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -4.788,
+      "y": -13.156,
+      "z": 2.0,
+      "start_time": 94.54,
+      "end_time": 95.76,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": 14.192,
+      "y": 7.388,
+      "z": 2.5,
+      "start_time": 102.68,
+      "end_time": 103.68,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": -17.387,
+      "y": 4.659,
+      "z": 0.5,
+      "start_time": 108.24,
+      "end_time": 113.83,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 10.746,
+      "y": -16.868,
+      "z": 1.0,
+      "start_time": 108.88,
+      "end_time": 117.4,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": 1.042,
+      "y": 5.909,
+      "z": 1.5,
+      "start_time": 108.69,
+      "end_time": 112.59,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -6.347,
+      "y": -4.87,
+      "z": 2.0,
+      "start_time": 121.74,
+      "end_time": 122.63,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 9.962,
+      "y": -0.872,
+      "z": 2.5,
+      "start_time": 122.1,
+      "end_time": 123.0,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -8.107,
+      "y": 8.847,
+      "z": 0.5,
+      "start_time": 127.77,
+      "end_time": 129.05,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": -0.0,
+      "y": -14.0,
+      "z": 1.0,
+      "start_time": 127.62,
+      "end_time": 133.21,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 10.809,
+      "y": 11.796,
+      "z": 1.5,
+      "start_time": 138.16,
+      "end_time": 139.14,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -17.932,
+      "y": -1.569,
+      "z": 2.0,
+      "start_time": 143.36,
+      "end_time": 144.36,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 15.867,
+      "y": -12.175,
+      "z": 2.5,
+      "start_time": 144.93,
+      "end_time": 145.32,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -1.042,
+      "y": 5.909,
+      "z": 0.5,
+      "start_time": 144.16,
+      "end_time": 145.13,
+      "repeat": false
+    },
+    {
+      "label": "drone_binary",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -4.298,
+      "y": -6.747,
+      "z": 1.0,
+      "start_time": 150.06,
+      "end_time": 151.09,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 9.659,
+      "y": 2.588,
+      "z": 1.5,
+      "start_time": 150.49,
+      "end_time": 156.14,
+      "repeat": false
+    },
+    {
+      "label": "drone_binary",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -10.644,
+      "y": 5.541,
+      "z": 2.0,
+      "start_time": 161.44,
+      "end_time": 162.46,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 4.788,
+      "y": -13.156,
+      "z": 2.5,
+      "start_time": 167.88,
+      "end_time": 176.41,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": 6.123,
+      "y": 14.782,
+      "z": 0.5,
+      "start_time": 181.79,
+      "end_time": 182.79,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -16.314,
+      "y": -7.607,
+      "z": 1.0,
+      "start_time": 182.4,
+      "end_time": 182.8,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 19.074,
+      "y": -6.014,
+      "z": 1.5,
+      "start_time": 187.4,
+      "end_time": 188.36,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -3.0,
+      "y": 5.196,
+      "z": 2.0,
+      "start_time": 187.94,
+      "end_time": 188.96,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -1.732,
+      "y": -7.81,
+      "z": 2.5,
+      "start_time": 192.96,
+      "end_time": 201.49,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 8.192,
+      "y": 5.736,
+      "z": 0.5,
+      "start_time": 193.88,
+      "end_time": 197.27,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": -11.897,
+      "y": 1.566,
+      "z": 1.0,
+      "start_time": 206.68,
+      "end_time": 215.21,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 8.999,
+      "y": -10.725,
+      "z": 1.5,
+      "start_time": 206.34,
+      "end_time": 212.0,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 0.698,
+      "y": 15.985,
+      "z": 2.0,
+      "start_time": 205.58,
+      "end_time": 211.24,
+      "repeat": false
+    },
+    {
+      "label": "drone_binary",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -12.728,
+      "y": -12.728,
+      "z": 2.5,
+      "start_time": 220.01,
+      "end_time": 221.03,
+      "repeat": false
+    },
+    {
+      "label": "drone_binary",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 19.981,
+      "y": 0.872,
+      "z": 0.5,
+      "start_time": 219.52,
+      "end_time": 220.54,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -4.596,
+      "y": 3.857,
+      "z": 1.0,
+      "start_time": 221.07,
+      "end_time": 223.86,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 1.044,
+      "y": -7.932,
+      "z": 1.5,
+      "start_time": 228.39,
+      "end_time": 229.42,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 5.736,
+      "y": 8.192,
+      "z": 2.0,
+      "start_time": 228.77,
+      "end_time": 237.3,
+      "repeat": false
+    },
+    {
+      "label": "drone_binary",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -11.716,
+      "y": -2.597,
+      "z": 2.5,
+      "start_time": 241.32,
+      "end_time": 242.28,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 12.124,
+      "y": -7.0,
+      "z": 0.5,
+      "start_time": 247.66,
+      "end_time": 253.25,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -4.811,
+      "y": 15.259,
+      "z": 1.0,
+      "start_time": 246.73,
+      "end_time": 247.95,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -7.607,
+      "y": -16.314,
+      "z": 1.5,
+      "start_time": 247.73,
+      "end_time": 249.63,
+      "repeat": false
+    },
+    {
+      "label": "drone_binary",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 18.478,
+      "y": 7.654,
+      "z": 2.0,
+      "start_time": 257.82,
+      "end_time": 258.78,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -5.638,
+      "y": 2.052,
+      "z": 2.5,
+      "start_time": 264.06,
+      "end_time": 266.15,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 3.694,
+      "y": -7.096,
+      "z": 0.5,
+      "start_time": 270.37,
+      "end_time": 270.69,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 2.588,
+      "y": 9.659,
+      "z": 1.0,
+      "start_time": 275.92,
+      "end_time": 277.37,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -10.121,
+      "y": -6.448,
+      "z": 1.5,
+      "start_time": 276.4,
+      "end_time": 280.3,
+      "repeat": false
+    },
+    {
+      "label": "drone_binary",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 13.787,
+      "y": -2.431,
+      "z": 2.0,
+      "start_time": 274.95,
+      "end_time": 275.91,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -9.74,
+      "y": 12.694,
+      "z": 2.5,
+      "start_time": 286.06,
+      "end_time": 289.45,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -1.569,
+      "y": -17.932,
+      "z": 0.5,
+      "start_time": 295.01,
+      "end_time": 296.22,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": 14.746,
+      "y": 13.512,
+      "z": 1.0,
+      "start_time": 294.94,
+      "end_time": 296.22,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -6.0,
+      "y": 0.0,
+      "z": 1.5,
+      "start_time": 301.0,
+      "end_time": 303.8,
+      "repeat": false
+    },
+    {
+      "label": "drone_binary",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 5.898,
+      "y": -5.405,
+      "z": 2.0,
+      "start_time": 301.46,
+      "end_time": 302.49,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -0.872,
+      "y": 9.962,
+      "z": 2.5,
+      "start_time": 309.72,
+      "end_time": 310.7,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -7.305,
+      "y": -9.52,
+      "z": 0.5,
+      "start_time": 315.1,
+      "end_time": 316.7,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 13.787,
+      "y": 2.431,
+      "z": 1.0,
+      "start_time": 315.52,
+      "end_time": 316.54,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -13.494,
+      "y": 8.597,
+      "z": 1.5,
+      "start_time": 320.9,
+      "end_time": 322.5,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 4.659,
+      "y": -17.387,
+      "z": 2.0,
+      "start_time": 320.76,
+      "end_time": 322.01,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 9.235,
+      "y": 17.74,
+      "z": 2.5,
+      "start_time": 326.79,
+      "end_time": 330.18,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -5.638,
+      "y": -2.052,
+      "z": 0.5,
+      "start_time": 335.33,
+      "end_time": 336.36,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": 7.391,
+      "y": -3.061,
+      "z": 1.0,
+      "start_time": 335.83,
+      "end_time": 337.43,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -4.226,
+      "y": 9.063,
+      "z": 1.5,
+      "start_time": 334.38,
+      "end_time": 337.18,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": -3.608,
+      "y": -11.445,
+      "z": 2.0,
+      "start_time": 342.52,
+      "end_time": 343.96,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 12.124,
+      "y": 7.0,
+      "z": 2.5,
+      "start_time": 349.35,
+      "end_time": 350.25,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -15.621,
+      "y": 3.463,
+      "z": 0.5,
+      "start_time": 349.25,
+      "end_time": 351.02,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": 10.324,
+      "y": -14.745,
+      "z": 1.0,
+      "start_time": 348.49,
+      "end_time": 349.71,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": 2.611,
+      "y": 19.829,
+      "z": 1.5,
+      "start_time": 356.78,
+      "end_time": 358.87,
+      "repeat": false
+    },
+    {
+      "label": "drone_binary",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -4.596,
+      "y": -3.857,
+      "z": 2.0,
+      "start_time": 356.39,
+      "end_time": 357.41,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 7.992,
+      "y": -0.349,
+      "z": 2.5,
+      "start_time": 364.41,
+      "end_time": 365.43,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -7.071,
+      "y": 7.071,
+      "z": 0.5,
+      "start_time": 370.03,
+      "end_time": 374.08,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 0.523,
+      "y": -11.989,
+      "z": 1.0,
+      "start_time": 370.28,
+      "end_time": 370.72,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 8.999,
+      "y": 10.725,
+      "z": 1.5,
+      "start_time": 371.31,
+      "end_time": 371.64,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -15.863,
+      "y": -2.088,
+      "z": 2.0,
+      "start_time": 378.92,
+      "end_time": 381.72,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 14.745,
+      "y": -10.324,
+      "z": 2.5,
+      "start_time": 379.63,
+      "end_time": 383.02,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -4.329,
+      "y": 19.526,
+      "z": 0.5,
+      "start_time": 387.05,
+      "end_time": 387.95,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -3.0,
+      "y": -5.196,
+      "z": 1.0,
+      "start_time": 393.13,
+      "end_time": 395.03,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": 7.63,
+      "y": 2.406,
+      "z": 1.5,
+      "start_time": 401.0,
+      "end_time": 405.05,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -9.063,
+      "y": 4.226,
+      "z": 2.0,
+      "start_time": 410.12,
+      "end_time": 410.56,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 4.592,
+      "y": -11.087,
+      "z": 2.5,
+      "start_time": 409.81,
+      "end_time": 411.06,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": 4.788,
+      "y": 13.156,
+      "z": 0.5,
+      "start_time": 415.55,
+      "end_time": 419.45,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": -14.192,
+      "y": -7.388,
+      "z": 1.0,
+      "start_time": 424.01,
+      "end_time": 432.54,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 17.387,
+      "y": -4.659,
+      "z": 1.5,
+      "start_time": 424.81,
+      "end_time": 430.46,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": -10.746,
+      "y": 16.868,
+      "z": 2.0,
+      "start_time": 437.06,
+      "end_time": 445.58,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -1.042,
+      "y": -5.909,
+      "z": 2.5,
+      "start_time": 451.14,
+      "end_time": 453.04,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 6.347,
+      "y": 4.87,
+      "z": 0.5,
+      "start_time": 458.36,
+      "end_time": 458.75,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -9.962,
+      "y": 0.872,
+      "z": 1.0,
+      "start_time": 458.69,
+      "end_time": 460.59,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 8.107,
+      "y": -8.847,
+      "z": 1.5,
+      "start_time": 458.44,
+      "end_time": 459.47,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": 0.0,
+      "y": 14.0,
+      "z": 2.0,
+      "start_time": 466.4,
+      "end_time": 467.4,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -10.809,
+      "y": -11.796,
+      "z": 2.5,
+      "start_time": 466.42,
+      "end_time": 468.19,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 17.932,
+      "y": 1.569,
+      "z": 0.5,
+      "start_time": 473.02,
+      "end_time": 478.67,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -15.867,
+      "y": 12.175,
+      "z": 1.0,
+      "start_time": 473.55,
+      "end_time": 474.51,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 1.042,
+      "y": -5.909,
+      "z": 1.5,
+      "start_time": 483.28,
+      "end_time": 483.67,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": 4.298,
+      "y": 6.747,
+      "z": 2.0,
+      "start_time": 484.14,
+      "end_time": 486.23,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -9.659,
+      "y": -2.588,
+      "z": 2.5,
+      "start_time": 484.08,
+      "end_time": 492.6,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 10.644,
+      "y": -5.541,
+      "z": 0.5,
+      "start_time": 497.52,
+      "end_time": 498.48,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -4.788,
+      "y": 13.156,
+      "z": 1.0,
+      "start_time": 502.89,
+      "end_time": 503.33,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -6.123,
+      "y": -14.782,
+      "z": 1.5,
+      "start_time": 503.56,
+      "end_time": 505.46,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": 16.314,
+      "y": 7.607,
+      "z": 2.0,
+      "start_time": 502.97,
+      "end_time": 504.57,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -19.074,
+      "y": 6.014,
+      "z": 2.5,
+      "start_time": 509.47,
+      "end_time": 509.91,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 3.0,
+      "y": -5.196,
+      "z": 0.5,
+      "start_time": 510.69,
+      "end_time": 516.28,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 1.732,
+      "y": 7.81,
+      "z": 1.0,
+      "start_time": 510.78,
+      "end_time": 519.3,
+      "repeat": false
+    },
+    {
+      "label": "drone_binary",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -8.192,
+      "y": -5.736,
+      "z": 1.5,
+      "start_time": 523.77,
+      "end_time": 524.79,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 11.897,
+      "y": -1.566,
+      "z": 2.0,
+      "start_time": 528.81,
+      "end_time": 537.33,
+      "repeat": false
+    },
+    {
+      "label": "drone_binary",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -8.999,
+      "y": 10.725,
+      "z": 2.5,
+      "start_time": 529.97,
+      "end_time": 531.0,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": -0.698,
+      "y": -15.985,
+      "z": 0.5,
+      "start_time": 541.48,
+      "end_time": 547.07,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 12.728,
+      "y": 12.728,
+      "z": 1.0,
+      "start_time": 542.43,
+      "end_time": 543.68,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -19.981,
+      "y": -0.872,
+      "z": 1.5,
+      "start_time": 552.42,
+      "end_time": 554.02,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": 4.596,
+      "y": -3.857,
+      "z": 2.0,
+      "start_time": 559.72,
+      "end_time": 560.68,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -1.044,
+      "y": 7.932,
+      "z": 2.5,
+      "start_time": 558.77,
+      "end_time": 562.83,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -5.736,
+      "y": -8.192,
+      "z": 0.5,
+      "start_time": 558.77,
+      "end_time": 559.74,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 11.716,
+      "y": 2.597,
+      "z": 1.0,
+      "start_time": 568.62,
+      "end_time": 568.95,
+      "repeat": false
+    },
+    {
+      "label": "drone_bebop",
+      "wav_path": "/home/makes/backup/audio_cache/yes_drone_binary/B_S2_D1_067-bebop_000_.wav",
+      "x": -12.124,
+      "y": 7.0,
+      "z": 1.5,
+      "start_time": 567.68,
+      "end_time": 568.7,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": 4.811,
+      "y": -15.259,
+      "z": 2.0,
+      "start_time": 574.32,
+      "end_time": 575.54,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 7.607,
+      "y": 16.314,
+      "z": 2.5,
+      "start_time": 574.23,
+      "end_time": 582.75,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -18.478,
+      "y": -7.654,
+      "z": 0.5,
+      "start_time": 572.96,
+      "end_time": 574.24,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": 5.638,
+      "y": -2.052,
+      "z": 1.0,
+      "start_time": 588.73,
+      "end_time": 590.82,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -3.694,
+      "y": 7.096,
+      "z": 1.5,
+      "start_time": 596.42,
+      "end_time": 600.0,
+      "repeat": false
+    }
+  ],
+  "ambient_sources": [
+    {
+      "label": "background",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/axe01.wav",
+      "gain_db": -20.0,
+      "start_time": 0.0,
+      "end_time": 600.0
+    }
+  ],
+  "created_at": "2026-07-07T08:03:03.344557",
+  "version": "1.1-recovered-from-sidecars-approx"
+}

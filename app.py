@@ -27,17 +27,19 @@ from custom_simulator import CustomSimulator
 from odas_simulator import ODASSimulator
 from gt_dataset_builder import GTDatasetBuilder
 
-# Configuration
-SOUNDS_DIR       = "/home/azureuser/sounds"
-SCENES_DIR       = "/home/azureuser/config/scenes"
-OUTPUT_DIR       = "/home/azureuser/simulator/outputs"
-# Classifier logs directory - matches classifier_log_dir = "./ClassifierLogs" in config
-# Since odaslive runs from z_odas_newbeamform/build, the actual path is:
-ODAS_LOGS_DIR = "/home/azureuser/z_odas_newbeamform/build/ClassifierLogs"
+PROJECT_ROOT = Path(__file__).resolve().parent
+HOME_DIR = Path.home()
+
+# Configuration (can be overridden by environment variables)
+SOUNDS_DIR = os.getenv("SOUNDS_DIR", str(HOME_DIR / "sounds"))
+SCENES_DIR = os.getenv("SCENES_DIR", str(PROJECT_ROOT / "config" / "scenes"))
+OUTPUT_DIR = os.getenv("OUTPUT_DIR", str(PROJECT_ROOT / "outputs"))
+ODAS_LOGS_DIR = os.getenv("ODAS_LOGS_DIR", str(PROJECT_ROOT / "ClassifierLogs"))
 
 # Ensure directories exist
 os.makedirs(SCENES_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(ODAS_LOGS_DIR, exist_ok=True)
 
 # Page configuration
 st.set_page_config(

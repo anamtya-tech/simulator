@@ -1,0 +1,19 @@
+{
+  "name": "a0_only_background_180",
+  "duration": 180.0,
+  "max_radius": 50.0,
+  "max_height": 10.0,
+  "min_height": -2.0,
+  "directional_sources": [],
+  "ambient_sources": [
+    {
+      "label": "background",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/axe01.wav",
+      "gain_db": -20.0,
+      "start_time": 0.0,
+      "end_time": 180.0
+    }
+  ],
+  "created_at": "2026-07-07T08:03:03.344253",
+  "version": "1.1-recovered-from-sidecars-approx"
+}

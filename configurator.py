@@ -25,8 +25,9 @@ from datetime import datetime
 from pathlib import Path
 import random
 
-DEFAULT_SOUNDS_DIR = Path('/home/azureuser/sounds')
-CAPTURES_DIR       = Path('/home/azureuser/audio_cache/ambient_captures')
+HOME_DIR = Path.home()
+DEFAULT_SOUNDS_DIR = HOME_DIR / 'sounds'
+CAPTURES_DIR       = HOME_DIR / 'audio_cache' / 'ambient_captures'
 DEFAULT_SPL_DB_1M  = 80.0
 
 class SceneConfigurator:
@@ -1317,7 +1318,7 @@ class SceneConfigurator:
         try:
             import matplotlib.pyplot as plt
             import matplotlib.patches as mpatches
-            import matplotlib.cm as cm
+            from matplotlib import colormaps
 
             sources   = scene['directional_sources']
             ambients  = scene['ambient_sources']
@@ -1326,7 +1327,7 @@ class SceneConfigurator:
 
             # ── colour palette – one colour per unique label ──────────────
             all_labels = sorted({s['label'] for s in sources})
-            cmap       = cm.get_cmap('tab20', max(len(all_labels), 1))
+            cmap       = colormaps.get_cmap('tab20').resampled(max(len(all_labels), 1))
             label_colour = {lbl: cmap(i) for i, lbl in enumerate(all_labels)}
 
             # ── figure: spatial map (left) + timeline (right) ─────────────

@@ -1,0 +1,170 @@
+{
+  "name": "frog_test",
+  "duration": 180.0,
+  "max_radius": 50.0,
+  "max_height": 10.0,
+  "min_height": -2.0,
+  "directional_sources": [
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 6.0,
+      "y": 0.0,
+      "z": 0.5,
+      "start_time": 0.74,
+      "end_time": 5.15,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -5.898,
+      "y": 5.405,
+      "z": 1.0,
+      "start_time": 9.5,
+      "end_time": 23.49,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 0.872,
+      "y": -9.962,
+      "z": 1.5,
+      "start_time": 28.42,
+      "end_time": 37.42,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 7.305,
+      "y": 9.52,
+      "z": 2.0,
+      "start_time": 42.82,
+      "end_time": 49.11,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -13.787,
+      "y": -2.431,
+      "z": 2.5,
+      "start_time": 53.79,
+      "end_time": 57.87,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 13.494,
+      "y": -8.597,
+      "z": 0.5,
+      "start_time": 63.66,
+      "end_time": 76.15,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -4.659,
+      "y": 17.387,
+      "z": 1.0,
+      "start_time": 81.73,
+      "end_time": 86.27,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -9.235,
+      "y": -17.74,
+      "z": 1.5,
+      "start_time": 91.21,
+      "end_time": 100.6,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 5.638,
+      "y": 2.052,
+      "z": 2.0,
+      "start_time": 105.75,
+      "end_time": 120.69,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -7.391,
+      "y": 3.061,
+      "z": 2.5,
+      "start_time": 125.24,
+      "end_time": 126.38,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 4.226,
+      "y": -9.063,
+      "z": 0.5,
+      "start_time": 130.46,
+      "end_time": 143.36,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 3.608,
+      "y": 11.445,
+      "z": 1.0,
+      "start_time": 147.43,
+      "end_time": 151.83,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -12.124,
+      "y": -7.0,
+      "z": 1.5,
+      "start_time": 157.64,
+      "end_time": 159.0,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 15.621,
+      "y": -3.463,
+      "z": 2.0,
+      "start_time": 164.18,
+      "end_time": 170.98,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -10.324,
+      "y": 14.745,
+      "z": 2.5,
+      "start_time": 175.88,
+      "end_time": 179.29,
+      "repeat": false
+    }
+  ],
+  "ambient_sources": [
+    {
+      "label": "background",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/axe01.wav",
+      "gain_db": -20.0,
+      "start_time": 0.0,
+      "end_time": 180.0
+    }
+  ],
+  "created_at": "2026-07-07T08:03:03.345180",
+  "version": "1.1-recovered-from-sidecars-approx"
+}

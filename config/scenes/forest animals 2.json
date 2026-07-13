@@ -1,0 +1,1740 @@
+{
+  "name": "forest animals 2",
+  "duration": 1500.0,
+  "max_radius": 50.0,
+  "max_height": 10.0,
+  "min_height": -2.0,
+  "directional_sources": [
+    {
+      "label": "Cow",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cow/cow01.wav",
+      "x": 6.0,
+      "y": 0.0,
+      "z": 0.5,
+      "start_time": 0.21,
+      "end_time": 9.49,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": -5.898,
+      "y": 5.405,
+      "z": 1.0,
+      "start_time": 0.74,
+      "end_time": 4.77,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": 0.872,
+      "y": -9.962,
+      "z": 1.5,
+      "start_time": 0.0,
+      "end_time": 3.94,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": 7.305,
+      "y": 9.52,
+      "z": 2.0,
+      "start_time": 19.84,
+      "end_time": 29.45,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": -13.787,
+      "y": -2.431,
+      "z": 2.5,
+      "start_time": 18.63,
+      "end_time": 28.25,
+      "repeat": false
+    },
+    {
+      "label": "Wolfhowl",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/wolfhowl01.wav",
+      "x": 13.494,
+      "y": -8.597,
+      "z": 0.5,
+      "start_time": 19.11,
+      "end_time": 24.11,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": -4.659,
+      "y": 17.387,
+      "z": 1.0,
+      "start_time": 38.91,
+      "end_time": 43.46,
+      "repeat": false
+    },
+    {
+      "label": "Wolfhowl",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/wolfhowl01.wav",
+      "x": -9.235,
+      "y": -17.74,
+      "z": 1.5,
+      "start_time": 40.04,
+      "end_time": 45.04,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": 5.638,
+      "y": 2.052,
+      "z": 2.0,
+      "start_time": 39.58,
+      "end_time": 42.08,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -7.391,
+      "y": 3.061,
+      "z": 2.5,
+      "start_time": 56.01,
+      "end_time": 61.17,
+      "repeat": false
+    },
+    {
+      "label": "Monkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Monkey/monkey01.wav",
+      "x": 4.226,
+      "y": -9.063,
+      "z": 0.5,
+      "start_time": 54.54,
+      "end_time": 63.53,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 3.608,
+      "y": 11.445,
+      "z": 1.0,
+      "start_time": 72.66,
+      "end_time": 82.38,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -12.124,
+      "y": -7.0,
+      "z": 1.5,
+      "start_time": 73.66,
+      "end_time": 77.86,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": 15.621,
+      "y": -3.463,
+      "z": 2.0,
+      "start_time": 74.39,
+      "end_time": 83.52,
+      "repeat": false
+    },
+    {
+      "label": "Donkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Donkey/donkey01.wav",
+      "x": -10.324,
+      "y": 14.745,
+      "z": 2.5,
+      "start_time": 94.39,
+      "end_time": 97.64,
+      "repeat": false
+    },
+    {
+      "label": "Donkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Donkey/donkey01.wav",
+      "x": -2.611,
+      "y": -19.829,
+      "z": 0.5,
+      "start_time": 93.12,
+      "end_time": 100.48,
+      "repeat": false
+    },
+    {
+      "label": "Monkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Monkey/monkey01.wav",
+      "x": 4.596,
+      "y": 3.857,
+      "z": 1.0,
+      "start_time": 109.55,
+      "end_time": 118.19,
+      "repeat": false
+    },
+    {
+      "label": "Sheep",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Sheep/sheep01.wav",
+      "x": -7.992,
+      "y": 0.349,
+      "z": 1.5,
+      "start_time": 128.98,
+      "end_time": 137.65,
+      "repeat": false
+    },
+    {
+      "label": "Monkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Monkey/monkey01.wav",
+      "x": 7.071,
+      "y": -7.071,
+      "z": 2.0,
+      "start_time": 127.51,
+      "end_time": 131.71,
+      "repeat": false
+    },
+    {
+      "label": "Cow",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cow/cow01.wav",
+      "x": -0.523,
+      "y": 11.989,
+      "z": 2.5,
+      "start_time": 147.32,
+      "end_time": 151.49,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -8.999,
+      "y": -10.725,
+      "z": 0.5,
+      "start_time": 160.68,
+      "end_time": 162.01,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": 15.863,
+      "y": 2.088,
+      "z": 1.0,
+      "start_time": 161.43,
+      "end_time": 166.17,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": -14.745,
+      "y": 10.324,
+      "z": 1.5,
+      "start_time": 176.23,
+      "end_time": 178.75,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": 4.329,
+      "y": -19.526,
+      "z": 2.0,
+      "start_time": 189.21,
+      "end_time": 198.07,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 3.0,
+      "y": 5.196,
+      "z": 2.5,
+      "start_time": 209.0,
+      "end_time": 212.94,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": -7.63,
+      "y": -2.406,
+      "z": 0.5,
+      "start_time": 208.8,
+      "end_time": 212.97,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": 9.063,
+      "y": -4.226,
+      "z": 1.0,
+      "start_time": 207.9,
+      "end_time": 216.64,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": -4.592,
+      "y": 11.087,
+      "z": 1.5,
+      "start_time": 225.75,
+      "end_time": 226.43,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -4.788,
+      "y": -13.156,
+      "z": 2.0,
+      "start_time": 226.39,
+      "end_time": 234.27,
+      "repeat": false
+    },
+    {
+      "label": "Cow",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cow/cow01.wav",
+      "x": 14.192,
+      "y": 7.388,
+      "z": 2.5,
+      "start_time": 243.58,
+      "end_time": 245.82,
+      "repeat": false
+    },
+    {
+      "label": "Sheep",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Sheep/sheep01.wav",
+      "x": -17.387,
+      "y": 4.659,
+      "z": 0.5,
+      "start_time": 244.96,
+      "end_time": 250.84,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": 10.746,
+      "y": -16.868,
+      "z": 1.0,
+      "start_time": 244.48,
+      "end_time": 254.37,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 1.042,
+      "y": 5.909,
+      "z": 1.5,
+      "start_time": 264.31,
+      "end_time": 270.46,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -6.347,
+      "y": -4.87,
+      "z": 2.0,
+      "start_time": 280.65,
+      "end_time": 289.94,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 9.962,
+      "y": -0.872,
+      "z": 2.5,
+      "start_time": 280.16,
+      "end_time": 287.28,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -8.107,
+      "y": 8.847,
+      "z": 0.5,
+      "start_time": 299.74,
+      "end_time": 307.93,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": -0.0,
+      "y": -14.0,
+      "z": 1.0,
+      "start_time": 300.85,
+      "end_time": 301.18,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": 10.809,
+      "y": 11.796,
+      "z": 1.5,
+      "start_time": 318.06,
+      "end_time": 319.44,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -17.932,
+      "y": -1.569,
+      "z": 2.0,
+      "start_time": 317.67,
+      "end_time": 320.13,
+      "repeat": false
+    },
+    {
+      "label": "Cow",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cow/cow01.wav",
+      "x": 15.867,
+      "y": -12.175,
+      "z": 2.5,
+      "start_time": 330.6,
+      "end_time": 339.75,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -1.042,
+      "y": 5.909,
+      "z": 0.5,
+      "start_time": 329.25,
+      "end_time": 337.17,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": -4.298,
+      "y": -6.747,
+      "z": 1.0,
+      "start_time": 349.07,
+      "end_time": 352.31,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": 9.659,
+      "y": 2.588,
+      "z": 1.5,
+      "start_time": 349.07,
+      "end_time": 350.58,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": -10.644,
+      "y": 5.541,
+      "z": 2.0,
+      "start_time": 362.22,
+      "end_time": 371.95,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 4.788,
+      "y": -13.156,
+      "z": 2.5,
+      "start_time": 382.82,
+      "end_time": 384.43,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": 6.123,
+      "y": 14.782,
+      "z": 0.5,
+      "start_time": 394.14,
+      "end_time": 402.14,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": -16.314,
+      "y": -7.607,
+      "z": 1.0,
+      "start_time": 394.1,
+      "end_time": 400.65,
+      "repeat": false
+    },
+    {
+      "label": "Donkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Donkey/donkey01.wav",
+      "x": 19.074,
+      "y": -6.014,
+      "z": 1.5,
+      "start_time": 412.39,
+      "end_time": 414.75,
+      "repeat": false
+    },
+    {
+      "label": "Monkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Monkey/monkey01.wav",
+      "x": -3.0,
+      "y": 5.196,
+      "z": 2.0,
+      "start_time": 423.99,
+      "end_time": 427.34,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": -1.732,
+      "y": -7.81,
+      "z": 2.5,
+      "start_time": 424.55,
+      "end_time": 425.43,
+      "repeat": false
+    },
+    {
+      "label": "Sheep",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Sheep/sheep01.wav",
+      "x": 8.192,
+      "y": 5.736,
+      "z": 0.5,
+      "start_time": 425.19,
+      "end_time": 433.03,
+      "repeat": false
+    },
+    {
+      "label": "Monkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Monkey/monkey01.wav",
+      "x": -11.897,
+      "y": 1.566,
+      "z": 1.0,
+      "start_time": 442.39,
+      "end_time": 444.64,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": 8.999,
+      "y": -10.725,
+      "z": 1.5,
+      "start_time": 442.25,
+      "end_time": 451.63,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": 0.698,
+      "y": 15.985,
+      "z": 2.0,
+      "start_time": 461.9,
+      "end_time": 470.83,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": -12.728,
+      "y": -12.728,
+      "z": 2.5,
+      "start_time": 480.49,
+      "end_time": 483.82,
+      "repeat": false
+    },
+    {
+      "label": "Cow",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cow/cow01.wav",
+      "x": 19.981,
+      "y": 0.872,
+      "z": 0.5,
+      "start_time": 481.5,
+      "end_time": 488.2,
+      "repeat": false
+    },
+    {
+      "label": "Cow",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cow/cow01.wav",
+      "x": -4.596,
+      "y": 3.857,
+      "z": 1.0,
+      "start_time": 498.08,
+      "end_time": 502.65,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 1.044,
+      "y": -7.932,
+      "z": 1.5,
+      "start_time": 512.87,
+      "end_time": 522.37,
+      "repeat": false
+    },
+    {
+      "label": "Wolfhowl",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/wolfhowl01.wav",
+      "x": 5.736,
+      "y": 8.192,
+      "z": 2.0,
+      "start_time": 513.51,
+      "end_time": 523.51,
+      "repeat": false
+    },
+    {
+      "label": "Monkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Monkey/monkey01.wav",
+      "x": -11.716,
+      "y": -2.597,
+      "z": 2.5,
+      "start_time": 513.18,
+      "end_time": 516.06,
+      "repeat": false
+    },
+    {
+      "label": "Sheep",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Sheep/sheep01.wav",
+      "x": 12.124,
+      "y": -7.0,
+      "z": 0.5,
+      "start_time": 532.78,
+      "end_time": 536.25,
+      "repeat": false
+    },
+    {
+      "label": "Cow",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cow/cow01.wav",
+      "x": -4.811,
+      "y": 15.259,
+      "z": 1.0,
+      "start_time": 533.5,
+      "end_time": 539.95,
+      "repeat": false
+    },
+    {
+      "label": "Donkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Donkey/donkey01.wav",
+      "x": -7.607,
+      "y": -16.314,
+      "z": 1.5,
+      "start_time": 534.3,
+      "end_time": 540.99,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": 18.478,
+      "y": 7.654,
+      "z": 2.0,
+      "start_time": 550.08,
+      "end_time": 550.88,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": -5.638,
+      "y": 2.052,
+      "z": 2.5,
+      "start_time": 560.39,
+      "end_time": 569.52,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 3.694,
+      "y": -7.096,
+      "z": 0.5,
+      "start_time": 578.71,
+      "end_time": 581.42,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": 2.588,
+      "y": 9.659,
+      "z": 1.0,
+      "start_time": 579.17,
+      "end_time": 588.26,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -10.121,
+      "y": -6.448,
+      "z": 1.5,
+      "start_time": 579.95,
+      "end_time": 587.87,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": 13.787,
+      "y": -2.431,
+      "z": 2.0,
+      "start_time": 599.07,
+      "end_time": 607.07,
+      "repeat": false
+    },
+    {
+      "label": "Donkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Donkey/donkey01.wav",
+      "x": -9.74,
+      "y": 12.694,
+      "z": 2.5,
+      "start_time": 598.17,
+      "end_time": 602.19,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -1.569,
+      "y": -17.932,
+      "z": 0.5,
+      "start_time": 617.12,
+      "end_time": 618.75,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": 14.746,
+      "y": 13.512,
+      "z": 1.0,
+      "start_time": 616.19,
+      "end_time": 617.55,
+      "repeat": false
+    },
+    {
+      "label": "Sheep",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Sheep/sheep01.wav",
+      "x": -6.0,
+      "y": 0.0,
+      "z": 1.5,
+      "start_time": 627.87,
+      "end_time": 630.47,
+      "repeat": false
+    },
+    {
+      "label": "Donkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Donkey/donkey01.wav",
+      "x": 5.898,
+      "y": -5.405,
+      "z": 2.0,
+      "start_time": 628.27,
+      "end_time": 630.63,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": -0.872,
+      "y": 9.962,
+      "z": 2.5,
+      "start_time": 629.29,
+      "end_time": 632.62,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": -7.305,
+      "y": -9.52,
+      "z": 0.5,
+      "start_time": 643.59,
+      "end_time": 649.01,
+      "repeat": false
+    },
+    {
+      "label": "Wolfhowl",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/wolfhowl01.wav",
+      "x": 13.787,
+      "y": 2.431,
+      "z": 1.0,
+      "start_time": 641.96,
+      "end_time": 646.96,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": -13.494,
+      "y": 8.597,
+      "z": 1.5,
+      "start_time": 642.85,
+      "end_time": 652.46,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": 4.659,
+      "y": -17.387,
+      "z": 2.0,
+      "start_time": 662.38,
+      "end_time": 664.56,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 9.235,
+      "y": 17.74,
+      "z": 2.5,
+      "start_time": 661.5,
+      "end_time": 661.91,
+      "repeat": false
+    },
+    {
+      "label": "Cow",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cow/cow01.wav",
+      "x": -5.638,
+      "y": -2.052,
+      "z": 0.5,
+      "start_time": 662.14,
+      "end_time": 670.2,
+      "repeat": false
+    },
+    {
+      "label": "Wolfhowl",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/wolfhowl01.wav",
+      "x": 7.391,
+      "y": -3.061,
+      "z": 1.0,
+      "start_time": 679.3,
+      "end_time": 684.3,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": -4.226,
+      "y": 9.063,
+      "z": 1.5,
+      "start_time": 693.78,
+      "end_time": 694.58,
+      "repeat": false
+    },
+    {
+      "label": "Wolfhowl",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/wolfhowl01.wav",
+      "x": -3.608,
+      "y": -11.445,
+      "z": 2.0,
+      "start_time": 694.64,
+      "end_time": 704.64,
+      "repeat": false
+    },
+    {
+      "label": "Sheep",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Sheep/sheep01.wav",
+      "x": 12.124,
+      "y": 7.0,
+      "z": 2.5,
+      "start_time": 715.3,
+      "end_time": 723.19,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -15.621,
+      "y": 3.463,
+      "z": 0.5,
+      "start_time": 715.49,
+      "end_time": 724.88,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": 10.324,
+      "y": -14.745,
+      "z": 1.0,
+      "start_time": 735.15,
+      "end_time": 738.31,
+      "repeat": false
+    },
+    {
+      "label": "Donkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Donkey/donkey01.wav",
+      "x": 2.611,
+      "y": 19.829,
+      "z": 1.5,
+      "start_time": 734.66,
+      "end_time": 739.67,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -4.596,
+      "y": -3.857,
+      "z": 2.0,
+      "start_time": 734.36,
+      "end_time": 740.68,
+      "repeat": false
+    },
+    {
+      "label": "Monkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Monkey/monkey01.wav",
+      "x": 7.992,
+      "y": -0.349,
+      "z": 2.5,
+      "start_time": 751.54,
+      "end_time": 757.3,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": -7.071,
+      "y": 7.071,
+      "z": 0.5,
+      "start_time": 750.03,
+      "end_time": 757.93,
+      "repeat": false
+    },
+    {
+      "label": "Donkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Donkey/donkey01.wav",
+      "x": 0.523,
+      "y": -11.989,
+      "z": 1.0,
+      "start_time": 768.47,
+      "end_time": 773.49,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 8.999,
+      "y": 10.725,
+      "z": 1.5,
+      "start_time": 768.92,
+      "end_time": 774.36,
+      "repeat": false
+    },
+    {
+      "label": "Monkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Monkey/monkey01.wav",
+      "x": -15.863,
+      "y": -2.088,
+      "z": 2.0,
+      "start_time": 768.46,
+      "end_time": 771.81,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": 14.745,
+      "y": -10.324,
+      "z": 2.5,
+      "start_time": 783.86,
+      "end_time": 793.2,
+      "repeat": false
+    },
+    {
+      "label": "Sheep",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Sheep/sheep01.wav",
+      "x": -4.329,
+      "y": 19.526,
+      "z": 0.5,
+      "start_time": 785.18,
+      "end_time": 788.65,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": -3.0,
+      "y": -5.196,
+      "z": 1.0,
+      "start_time": 784.01,
+      "end_time": 793.63,
+      "repeat": false
+    },
+    {
+      "label": "Monkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Monkey/monkey01.wav",
+      "x": 7.63,
+      "y": 2.406,
+      "z": 1.5,
+      "start_time": 804.18,
+      "end_time": 809.94,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -9.063,
+      "y": 4.226,
+      "z": 2.0,
+      "start_time": 804.09,
+      "end_time": 809.52,
+      "repeat": false
+    },
+    {
+      "label": "Monkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Monkey/monkey01.wav",
+      "x": 4.592,
+      "y": -11.087,
+      "z": 2.5,
+      "start_time": 820.82,
+      "end_time": 825.31,
+      "repeat": false
+    },
+    {
+      "label": "Wolfhowl",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/wolfhowl01.wav",
+      "x": 4.788,
+      "y": 13.156,
+      "z": 0.5,
+      "start_time": 820.71,
+      "end_time": 825.71,
+      "repeat": false
+    },
+    {
+      "label": "Sheep",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Sheep/sheep01.wav",
+      "x": -14.192,
+      "y": -7.388,
+      "z": 1.0,
+      "start_time": 819.91,
+      "end_time": 823.85,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 17.387,
+      "y": -4.659,
+      "z": 1.5,
+      "start_time": 836.45,
+      "end_time": 843.58,
+      "repeat": false
+    },
+    {
+      "label": "Sheep",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Sheep/sheep01.wav",
+      "x": -10.746,
+      "y": 16.868,
+      "z": 2.0,
+      "start_time": 852.65,
+      "end_time": 853.95,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": -1.042,
+      "y": -5.909,
+      "z": 2.5,
+      "start_time": 853.23,
+      "end_time": 863.23,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": 6.347,
+      "y": 4.87,
+      "z": 0.5,
+      "start_time": 872.48,
+      "end_time": 876.97,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": -9.962,
+      "y": 0.872,
+      "z": 1.0,
+      "start_time": 873.18,
+      "end_time": 883.16,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": 8.107,
+      "y": -8.847,
+      "z": 1.5,
+      "start_time": 873.33,
+      "end_time": 882.09,
+      "repeat": false
+    },
+    {
+      "label": "Donkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Donkey/donkey01.wav",
+      "x": 0.0,
+      "y": 14.0,
+      "z": 2.0,
+      "start_time": 892.26,
+      "end_time": 899.62,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -10.809,
+      "y": -11.796,
+      "z": 2.5,
+      "start_time": 910.52,
+      "end_time": 920.34,
+      "repeat": false
+    },
+    {
+      "label": "Donkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Donkey/donkey01.wav",
+      "x": 17.932,
+      "y": 1.569,
+      "z": 0.5,
+      "start_time": 909.17,
+      "end_time": 914.18,
+      "repeat": false
+    },
+    {
+      "label": "Donkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Donkey/donkey01.wav",
+      "x": -15.867,
+      "y": 12.175,
+      "z": 1.0,
+      "start_time": 930.68,
+      "end_time": 938.04,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": 1.042,
+      "y": -5.909,
+      "z": 1.5,
+      "start_time": 930.52,
+      "end_time": 938.52,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": 4.298,
+      "y": 6.747,
+      "z": 2.0,
+      "start_time": 948.57,
+      "end_time": 957.78,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": -9.659,
+      "y": -2.588,
+      "z": 2.5,
+      "start_time": 968.74,
+      "end_time": 973.73,
+      "repeat": false
+    },
+    {
+      "label": "Monkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Monkey/monkey01.wav",
+      "x": 10.644,
+      "y": -5.541,
+      "z": 0.5,
+      "start_time": 968.29,
+      "end_time": 974.05,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": -4.788,
+      "y": 13.156,
+      "z": 1.0,
+      "start_time": 967.84,
+      "end_time": 971.06,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -6.123,
+      "y": -14.782,
+      "z": 1.5,
+      "start_time": 984.38,
+      "end_time": 986.84,
+      "repeat": false
+    },
+    {
+      "label": "Donkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Donkey/donkey01.wav",
+      "x": 16.314,
+      "y": 7.607,
+      "z": 2.0,
+      "start_time": 996.55,
+      "end_time": 1001.57,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -19.074,
+      "y": 6.014,
+      "z": 2.5,
+      "start_time": 1011.39,
+      "end_time": 1017.33,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": 3.0,
+      "y": -5.196,
+      "z": 0.5,
+      "start_time": 1026.86,
+      "end_time": 1033.98,
+      "repeat": false
+    },
+    {
+      "label": "Wolfhowl",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/wolfhowl01.wav",
+      "x": 1.732,
+      "y": 7.81,
+      "z": 1.0,
+      "start_time": 1028.31,
+      "end_time": 1038.31,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -8.192,
+      "y": -5.736,
+      "z": 1.5,
+      "start_time": 1027.73,
+      "end_time": 1036.28,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": 11.897,
+      "y": -1.566,
+      "z": 2.0,
+      "start_time": 1048.6,
+      "end_time": 1050.88,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": -8.999,
+      "y": 10.725,
+      "z": 2.5,
+      "start_time": 1047.32,
+      "end_time": 1053.87,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -0.698,
+      "y": -15.985,
+      "z": 0.5,
+      "start_time": 1048.7,
+      "end_time": 1057.74,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 12.728,
+      "y": 12.728,
+      "z": 1.0,
+      "start_time": 1068.16,
+      "end_time": 1076.05,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": -19.981,
+      "y": -0.872,
+      "z": 1.5,
+      "start_time": 1067.4,
+      "end_time": 1074.96,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": 4.596,
+      "y": -3.857,
+      "z": 2.0,
+      "start_time": 1067.55,
+      "end_time": 1070.63,
+      "repeat": false
+    },
+    {
+      "label": "Wolfhowl",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/wolfhowl01.wav",
+      "x": -1.044,
+      "y": 7.932,
+      "z": 2.5,
+      "start_time": 1086.28,
+      "end_time": 1091.28,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -5.736,
+      "y": -8.192,
+      "z": 0.5,
+      "start_time": 1086.43,
+      "end_time": 1087.42,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": 11.716,
+      "y": 2.597,
+      "z": 1.0,
+      "start_time": 1101.32,
+      "end_time": 1110.51,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -12.124,
+      "y": 7.0,
+      "z": 1.5,
+      "start_time": 1120.73,
+      "end_time": 1122.78,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": 4.811,
+      "y": -15.259,
+      "z": 2.0,
+      "start_time": 1131.8,
+      "end_time": 1138.46,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": 7.607,
+      "y": 16.314,
+      "z": 2.5,
+      "start_time": 1149.07,
+      "end_time": 1157.83,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": -18.478,
+      "y": -7.654,
+      "z": 0.5,
+      "start_time": 1149.17,
+      "end_time": 1157.46,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": 5.638,
+      "y": -2.052,
+      "z": 1.0,
+      "start_time": 1148.33,
+      "end_time": 1153.64,
+      "repeat": false
+    },
+    {
+      "label": "Sheep",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Sheep/sheep01.wav",
+      "x": -3.694,
+      "y": 7.096,
+      "z": 1.5,
+      "start_time": 1167.83,
+      "end_time": 1170.89,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": -2.588,
+      "y": -9.659,
+      "z": 2.0,
+      "start_time": 1181.16,
+      "end_time": 1183.6,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": 10.121,
+      "y": 6.448,
+      "z": 2.5,
+      "start_time": 1181.51,
+      "end_time": 1190.7,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": -13.787,
+      "y": 2.431,
+      "z": 0.5,
+      "start_time": 1201.37,
+      "end_time": 1201.78,
+      "repeat": false
+    },
+    {
+      "label": "Sheep",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Sheep/sheep01.wav",
+      "x": 9.74,
+      "y": -12.694,
+      "z": 1.0,
+      "start_time": 1211.37,
+      "end_time": 1218.5,
+      "repeat": false
+    },
+    {
+      "label": "Sheep",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Sheep/sheep01.wav",
+      "x": 1.569,
+      "y": 17.932,
+      "z": 1.5,
+      "start_time": 1229.16,
+      "end_time": 1238.96,
+      "repeat": false
+    },
+    {
+      "label": "Cow",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cow/cow01.wav",
+      "x": -14.746,
+      "y": -13.512,
+      "z": 2.0,
+      "start_time": 1249.54,
+      "end_time": 1258.82,
+      "repeat": false
+    },
+    {
+      "label": "Donkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Donkey/donkey01.wav",
+      "x": 6.0,
+      "y": 0.0,
+      "z": 2.5,
+      "start_time": 1248.43,
+      "end_time": 1255.79,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -5.898,
+      "y": 5.405,
+      "z": 0.5,
+      "start_time": 1249.47,
+      "end_time": 1251.92,
+      "repeat": false
+    },
+    {
+      "label": "Cow",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cow/cow01.wav",
+      "x": 0.872,
+      "y": -9.962,
+      "z": 1.0,
+      "start_time": 1269.82,
+      "end_time": 1273.04,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 7.305,
+      "y": 9.52,
+      "z": 1.5,
+      "start_time": 1268.62,
+      "end_time": 1269.73,
+      "repeat": false
+    },
+    {
+      "label": "Lion",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/lion01.wav",
+      "x": -13.787,
+      "y": -2.431,
+      "z": 2.0,
+      "start_time": 1282.5,
+      "end_time": 1290.4,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": 13.494,
+      "y": -8.597,
+      "z": 2.5,
+      "start_time": 1301.14,
+      "end_time": 1307.6,
+      "repeat": false
+    },
+    {
+      "label": "Monkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Monkey/monkey01.wav",
+      "x": -4.659,
+      "y": 17.387,
+      "z": 0.5,
+      "start_time": 1301.09,
+      "end_time": 1307.79,
+      "repeat": false
+    },
+    {
+      "label": "Monkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Monkey/monkey01.wav",
+      "x": -9.235,
+      "y": -17.74,
+      "z": 1.0,
+      "start_time": 1300.74,
+      "end_time": 1307.43,
+      "repeat": false
+    },
+    {
+      "label": "Donkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Donkey/donkey01.wav",
+      "x": 5.638,
+      "y": 2.052,
+      "z": 1.5,
+      "start_time": 1318.49,
+      "end_time": 1326.62,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -7.391,
+      "y": 3.061,
+      "z": 2.0,
+      "start_time": 1337.12,
+      "end_time": 1344.48,
+      "repeat": false
+    },
+    {
+      "label": "Sheep",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Sheep/sheep01.wav",
+      "x": 4.226,
+      "y": -9.063,
+      "z": 2.5,
+      "start_time": 1335.83,
+      "end_time": 1344.51,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": 3.608,
+      "y": 11.445,
+      "z": 0.5,
+      "start_time": 1354.39,
+      "end_time": 1362.27,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": -12.124,
+      "y": -7.0,
+      "z": 1.0,
+      "start_time": 1355.31,
+      "end_time": 1364.44,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": 15.621,
+      "y": -3.463,
+      "z": 1.5,
+      "start_time": 1355.04,
+      "end_time": 1359.1,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": -10.324,
+      "y": 14.745,
+      "z": 2.0,
+      "start_time": 1373.64,
+      "end_time": 1377.68,
+      "repeat": false
+    },
+    {
+      "label": "Cow",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cow/cow01.wav",
+      "x": -2.611,
+      "y": -19.829,
+      "z": 2.5,
+      "start_time": 1375.33,
+      "end_time": 1379.9,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": 4.596,
+      "y": 3.857,
+      "z": 0.5,
+      "start_time": 1375.19,
+      "end_time": 1377.65,
+      "repeat": false
+    },
+    {
+      "label": "Monkey",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Monkey/monkey01.wav",
+      "x": -7.992,
+      "y": 0.349,
+      "z": 1.0,
+      "start_time": 1388.95,
+      "end_time": 1393.15,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": 7.071,
+      "y": -7.071,
+      "z": 1.5,
+      "start_time": 1404.05,
+      "end_time": 1407.6,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": -0.523,
+      "y": 11.989,
+      "z": 2.0,
+      "start_time": 1418.12,
+      "end_time": 1423.29,
+      "repeat": false
+    },
+    {
+      "label": "Elephant",
+      "wav_path": "/home/makes/backup/audio_cache/elephant_samples_new/Roar01.wav",
+      "x": -8.999,
+      "y": -10.725,
+      "z": 2.5,
+      "start_time": 1432.3,
+      "end_time": 1439.67,
+      "repeat": false
+    },
+    {
+      "label": "Frog",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/frog01.wav",
+      "x": 15.863,
+      "y": 2.088,
+      "z": 0.5,
+      "start_time": 1449.38,
+      "end_time": 1454.82,
+      "repeat": false
+    },
+    {
+      "label": "Cow",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cow/cow01.wav",
+      "x": -14.745,
+      "y": 10.324,
+      "z": 1.0,
+      "start_time": 1450.44,
+      "end_time": 1457.14,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": 4.329,
+      "y": -19.526,
+      "z": 1.5,
+      "start_time": 1466.88,
+      "end_time": 1467.68,
+      "repeat": false
+    },
+    {
+      "label": "Bear",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Bear/bear01.wav",
+      "x": 3.0,
+      "y": 5.196,
+      "z": 2.0,
+      "start_time": 1467.93,
+      "end_time": 1477.01,
+      "repeat": false
+    },
+    {
+      "label": "Cow",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cow/cow01.wav",
+      "x": -7.63,
+      "y": -2.406,
+      "z": 2.5,
+      "start_time": 1467.44,
+      "end_time": 1473.71,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": 9.063,
+      "y": -4.226,
+      "z": 0.5,
+      "start_time": 1487.52,
+      "end_time": 1490.02,
+      "repeat": false
+    },
+    {
+      "label": "Horse",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Horse/horse01.wav",
+      "x": -4.592,
+      "y": 11.087,
+      "z": 1.0,
+      "start_time": 1487.14,
+      "end_time": 1492.17,
+      "repeat": false
+    }
+  ],
+  "ambient_sources": [
+    {
+      "label": "background",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/axe01.wav",
+      "gain_db": -20.0,
+      "start_time": 0.0,
+      "end_time": 1500.0
+    }
+  ],
+  "created_at": "2026-07-07T08:03:03.345113",
+  "version": "1.1-recovered-from-sidecars-approx"
+}

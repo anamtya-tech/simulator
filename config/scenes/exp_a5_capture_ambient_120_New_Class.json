@@ -1,0 +1,260 @@
+{
+  "name": "exp_a5_capture_ambient_120_New_Class",
+  "duration": 120.0,
+  "max_radius": 50.0,
+  "max_height": 10.0,
+  "min_height": -2.0,
+  "directional_sources": [
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": 6.0,
+      "y": 0.0,
+      "z": 0.5,
+      "start_time": 0.0,
+      "end_time": 1.24,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": -5.898,
+      "y": 5.405,
+      "z": 1.0,
+      "start_time": 6.71,
+      "end_time": 8.63,
+      "repeat": false
+    },
+    {
+      "label": "Wolfhowl",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/wolfhowl01.wav",
+      "x": 0.872,
+      "y": -9.962,
+      "z": 1.5,
+      "start_time": 13.04,
+      "end_time": 18.04,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": 7.305,
+      "y": 9.52,
+      "z": 2.0,
+      "start_time": 12.99,
+      "end_time": 14.58,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": -13.787,
+      "y": -2.431,
+      "z": 2.5,
+      "start_time": 23.29,
+      "end_time": 24.53,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": 13.494,
+      "y": -8.597,
+      "z": 0.5,
+      "start_time": 23.2,
+      "end_time": 24.44,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": -4.659,
+      "y": 17.387,
+      "z": 1.0,
+      "start_time": 23.14,
+      "end_time": 24.38,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": -9.235,
+      "y": -17.74,
+      "z": 1.5,
+      "start_time": 29.45,
+      "end_time": 30.69,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": 5.638,
+      "y": 2.052,
+      "z": 2.0,
+      "start_time": 36.49,
+      "end_time": 38.07,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": -7.391,
+      "y": 3.061,
+      "z": 2.5,
+      "start_time": 36.37,
+      "end_time": 37.61,
+      "repeat": false
+    },
+    {
+      "label": "Wolfhowl",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/wolfhowl01.wav",
+      "x": 4.226,
+      "y": -9.063,
+      "z": 0.5,
+      "start_time": 43.16,
+      "end_time": 48.16,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": 3.608,
+      "y": 11.445,
+      "z": 1.0,
+      "start_time": 42.31,
+      "end_time": 43.9,
+      "repeat": false
+    },
+    {
+      "label": "Wolfhowl",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/wolfhowl01.wav",
+      "x": -12.124,
+      "y": -7.0,
+      "z": 1.5,
+      "start_time": 43.91,
+      "end_time": 48.91,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": 15.621,
+      "y": -3.463,
+      "z": 2.0,
+      "start_time": 53.15,
+      "end_time": 55.07,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": -10.324,
+      "y": 14.745,
+      "z": 2.5,
+      "start_time": 60.46,
+      "end_time": 62.39,
+      "repeat": false
+    },
+    {
+      "label": "Wolfhowl",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/wolfhowl01.wav",
+      "x": -2.611,
+      "y": -19.829,
+      "z": 0.5,
+      "start_time": 67.58,
+      "end_time": 72.58,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": 4.596,
+      "y": 3.857,
+      "z": 1.0,
+      "start_time": 77.21,
+      "end_time": 78.45,
+      "repeat": false
+    },
+    {
+      "label": "Cat",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Cat/cat01.wav",
+      "x": -7.992,
+      "y": 0.349,
+      "z": 1.5,
+      "start_time": 77.82,
+      "end_time": 79.06,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": 7.071,
+      "y": -7.071,
+      "z": 2.0,
+      "start_time": 83.82,
+      "end_time": 85.74,
+      "repeat": false
+    },
+    {
+      "label": "Wolfhowl",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/wolfhowl01.wav",
+      "x": -0.523,
+      "y": 11.989,
+      "z": 2.5,
+      "start_time": 91.27,
+      "end_time": 96.27,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": -8.999,
+      "y": -10.725,
+      "z": 0.5,
+      "start_time": 101.32,
+      "end_time": 103.24,
+      "repeat": false
+    },
+    {
+      "label": "Chicken",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Chicken/chicken01.wav",
+      "x": 15.863,
+      "y": 2.088,
+      "z": 1.0,
+      "start_time": 107.73,
+      "end_time": 109.65,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": -14.745,
+      "y": 10.324,
+      "z": 1.5,
+      "start_time": 108.38,
+      "end_time": 109.97,
+      "repeat": false
+    },
+    {
+      "label": "Dog",
+      "wav_path": "/home/makes/backup/audio_cache/wild_animals/Animal-Soundprepros/Dog/dog01.wav",
+      "x": 4.329,
+      "y": -19.526,
+      "z": 2.0,
+      "start_time": 115.84,
+      "end_time": 117.43,
+      "repeat": false
+    }
+  ],
+  "ambient_sources": [
+    {
+      "label": "background",
+      "wav_path": "/home/makes/backup/audio_cache/forest/audio/axe01.wav",
+      "gain_db": -20.0,
+      "start_time": 0.0,
+      "end_time": 120.0
+    }
+  ],
+  "created_at": "2026-07-07T08:03:03.344840",
+  "version": "1.1-recovered-from-sidecars-approx"
+}
