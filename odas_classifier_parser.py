@@ -40,6 +40,77 @@ class OdasClassifierParser:
             self.log_dir = Path(log_dir)
         else:
             self.log_dir = Path(__file__).resolve().parent / "ClassifierLogs"
+
+    def _iter_json_objects(self, stream_text: str):
+        """Yield JSON objects from mixed/concatenated JSON text.
+
+        Supports:
+        - Newline-delimited JSON objects
+        - Multiple JSON objects concatenated without separators
+        - Pretty-printed multi-line JSON objects
+        """
+        decoder = json.JSONDecoder()
+        idx = 0
+        n = len(stream_text)
+
+        while idx < n:
+            while idx < n and stream_text[idx].isspace():
+                idx += 1
+            if idx >= n:
+                break
+
+            # Fast path: use the built-in raw decoder when possible.
+            try:
+                obj, next_idx = decoder.raw_decode(stream_text, idx)
+                yield obj
+                idx = next_idx
+                continue
+            except json.JSONDecodeError:
+                pass
+
+            # Fallback path: brace-balanced extraction for malformed streams.
+            if stream_text[idx] != '{':
+                idx += 1
+                continue
+
+            start = idx
+            brace_count = 0
+            in_string = False
+            escape = False
+            found = False
+
+            for j in range(idx, n):
+                ch = stream_text[j]
+
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif ch == '\\':
+                        escape = True
+                    elif ch == '"':
+                        in_string = False
+                    continue
+
+                if ch == '"':
+                    in_string = True
+                elif ch == '{':
+                    brace_count += 1
+                elif ch == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        candidate = stream_text[start:j + 1]
+                        try:
+                            yield json.loads(candidate)
+                        except json.JSONDecodeError:
+                            # Skip invalid chunk and continue scanning.
+                            pass
+                        idx = j + 1
+                        found = True
+                        break
+
+            if not found:
+                # Trailing incomplete fragment.
+                break
     
     def parse_session_file(self, filepath: str) -> List[Dict[str, Any]]:
         """
@@ -52,17 +123,12 @@ class OdasClassifierParser:
             List of frame dictionaries with timestamp and track data
         """
         frames = []
-        with open(filepath, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    frame_data = json.loads(line)
-                    frames.append(frame_data)
-                except json.JSONDecodeError as e:
-                    print(f"Error parsing line: {e}")
-                    continue
+        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+            stream_text = f.read()
+
+        for frame_data in self._iter_json_objects(stream_text):
+            if isinstance(frame_data, dict):
+                frames.append(frame_data)
         return frames
     
     def extract_tracks(self, frame_data: Dict[str, Any]) -> List[TrackClassification]:

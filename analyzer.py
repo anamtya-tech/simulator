@@ -470,6 +470,16 @@ class ResultAnalyzer:
             with res_tab:
                 self._display_summary(analysis_data)
 
+                is_mic_array_report = bool((analysis_data.get('run_metadata') or {}).get('mic_array'))
+
+                # Mic Array flow: ensure an HTML report exists so users can always
+                # see the custom report directly in the frontend.
+                if is_mic_array_report and not report_path.exists():
+                    try:
+                        self._generate_html_report(analysis_id, analysis_data)
+                    except Exception as e:
+                        st.error(f"Could not generate Mic Array report: {e}")
+
                 # Action buttons
                 st.markdown("---")
 
@@ -479,7 +489,11 @@ class ResultAnalyzer:
 
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        view_report = st.button("🔍 Open Report (Full Page)", key=f"open_{analysis_id}", width='stretch', type="primary") or auto_open_report
+                        view_report = (
+                            st.button("🔍 Open Report (Full Page)", key=f"open_{analysis_id}", width='stretch', type="primary")
+                            or auto_open_report
+                            or is_mic_array_report
+                        )
 
                     with col2:
                         with open(report_path, 'rb') as f:
@@ -790,6 +804,7 @@ class ResultAnalyzer:
                 'tracks_path': str(tracks_path),
                 'config_model_path': mic_array_context.get('config_model_path', ''),
                 'selected_model_dir': mic_array_context.get('selected_model_dir', ''),
+                'selected_model_name': mic_array_context.get('selected_model_name', ''),
                 'ground_truth_name': mic_array_context.get('ground_truth_name', ''),
             },
             'summary': stats['summary'],
@@ -1063,74 +1078,136 @@ class ResultAnalyzer:
         detections = []
         # Base dir for resolving relative spectra_file paths written by ODAS
         session_base_dir = os.path.dirname(os.path.abspath(session_live_file))
-        
-        with open(session_live_file, 'r') as f:
-            for line_num, line in enumerate(f, 1):
+
+        def _iter_json_objects(stream_text):
+            """Yield JSON dicts from newline-delimited or concatenated JSON streams."""
+            decoder = json.JSONDecoder()
+            idx = 0
+            n = len(stream_text)
+
+            while idx < n:
+                while idx < n and stream_text[idx].isspace():
+                    idx += 1
+                if idx >= n:
+                    break
+
                 try:
-                    data = json.loads(line.strip())
-                    time_stamp = data.get('timeStamp', 0)
-                    
-                    # timeStamp is the cumulative ODAS hop count (each hop = 8ms).
-                    # With ROLLING_HOPS=6 the JSON is gated at 48ms so line_num
-                    # no longer maps 1:1 with 8ms steps — using line_num would
-                    # compress a 33s session into ~5.5s, making Frog/Elephant GT
-                    # windows (15-30s) completely unreachable.
-                    # Correct conversion: actual_seconds = timeStamp * hop_duration
-                    # hop_count × 8ms/hop, minus the silence prepended before
-                    # the scene audio so that times align with GT windows.
-                    line_timestamp = time_stamp * 0.008 - warmup_seconds
-                    
-                    for src in data.get('src', []):
-                        frame_count = src.get('frame_count', 0)
-                        
-                        detection = {
-                            'timestamp': line_timestamp,
-                            'frame_count': frame_count,
-                            'line_number': line_num,
-                            'odas_timestamp': time_stamp,
-                            'x': src.get('x', 0),
-                            'y': src.get('y', 0),
-                            'z': src.get('z', 0),
-                            'activity': src.get('activity', 0),
-                            # Legacy single-frame bins (backward compat — empty in new firmware)
-                            'bins': src.get('bins', []),
-                            # Legacy single-class fields (backward compat)
-                            'class_id': src.get('class_id', -1),
-                            'class_name': src.get('class_name', 'unclassified'),
-                            'class_confidence': src.get('class_confidence', 0.0),
-                            'class_timestamp': src.get('class_timestamp', 0),
-                            # ── Event fields (6-hop rolling mode, min_event_votes gated) ──
-                            # Emitted only when ROLLING_HOPS hops are full and
-                            # event_votes >= min_event_votes (default 4/6).
-                            'event_class_id':        src.get('event_class_id', -1),
-                            'event_class_name':      src.get('event_class_name', 'unclassified'),
-                            'event_votes':           src.get('event_votes', 0),
-                            'event_avg_confidence':  src.get('event_avg_confidence', 0.0),
-                            'event_max_confidence':  src.get('event_max_confidence', 0.0),
-                            # ── Full ranked candidate list (top-K × N-hop voting) ──
-                            # [{class_id, class_name, hop_votes, avg_confidence}, ...] sorted desc.
-                            'event_candidates':      src.get('event_candidates', []),
-                            # ── Spectra sidecar (sim_mode=1 only) ──
-                            # Path to 96×257 float32 .bin file for this event's last hop.
-                            # Load with: np.fromfile(path, dtype=np.float32).reshape(96, 257)
-                            # Empty string on Pi (sim_mode=0).
-                            'spectra_file': self._resolve_spectra_path(
-                                src.get('spectra_file', ''), session_base_dir),
-                            # Number of *real* spectral frames written into the 96-slot buffer
-                            # via spec_at_peak (SSL peak events).  Values << 96 mean the
-                            # buffer is mostly zeros and the reconstructed audio will be
-                            # near-silent even though the track direction is correct.
-                            'spectral_count': src.get('spectral_count', 0),
-                            # ── Full 6-hop Top-K history ──
-                            # List of up to 6 dicts: {timestamp, class_ids[5], class_names[5], confidences[5]}
-                            'topk_history': src.get('topk_history', []),
-                            'track_id':   src.get('id', 0),
-                            'track_tag':  src.get('tag', ''),
-                            'track_type': src.get('type', '')
-                        }
-                        detections.append(detection)
-                except json.JSONDecodeError:
+                    obj, next_idx = decoder.raw_decode(stream_text, idx)
+                    if isinstance(obj, dict):
+                        yield obj
+                    idx = next_idx
                     continue
+                except json.JSONDecodeError:
+                    pass
+
+                if stream_text[idx] != '{':
+                    idx += 1
+                    continue
+
+                start = idx
+                brace_count = 0
+                in_string = False
+                escape = False
+                found = False
+
+                for j in range(idx, n):
+                    ch = stream_text[j]
+
+                    if in_string:
+                        if escape:
+                            escape = False
+                        elif ch == '\\':
+                            escape = True
+                        elif ch == '"':
+                            in_string = False
+                        continue
+
+                    if ch == '"':
+                        in_string = True
+                    elif ch == '{':
+                        brace_count += 1
+                    elif ch == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            candidate = stream_text[start:j + 1]
+                            try:
+                                parsed = json.loads(candidate)
+                                if isinstance(parsed, dict):
+                                    yield parsed
+                            except json.JSONDecodeError:
+                                pass
+                            idx = j + 1
+                            found = True
+                            break
+
+                if not found:
+                    break
+
+        with open(session_live_file, 'r', encoding='utf-8', errors='replace') as f:
+            stream_text = f.read()
+
+        for line_num, data in enumerate(_iter_json_objects(stream_text), 1):
+            time_stamp = data.get('timeStamp', 0)
+
+            # timeStamp is the cumulative ODAS hop count (each hop = 8ms).
+            # With ROLLING_HOPS=6 the JSON is gated at 48ms so line_num
+            # no longer maps 1:1 with 8ms steps — using line_num would
+            # compress a 33s session into ~5.5s, making Frog/Elephant GT
+            # windows (15-30s) completely unreachable.
+            # Correct conversion: actual_seconds = timeStamp * hop_duration
+            # hop_count × 8ms/hop, minus the silence prepended before
+            # the scene audio so that times align with GT windows.
+            line_timestamp = time_stamp * 0.008 - warmup_seconds
+
+            for src in data.get('src', []):
+                frame_count = src.get('frame_count', 0)
+
+                detection = {
+                    'timestamp': line_timestamp,
+                    'frame_count': frame_count,
+                    'line_number': line_num,
+                    'odas_timestamp': time_stamp,
+                    'x': src.get('x', 0),
+                    'y': src.get('y', 0),
+                    'z': src.get('z', 0),
+                    'activity': src.get('activity', 0),
+                    # Legacy single-frame bins (backward compat — empty in new firmware)
+                    'bins': src.get('bins', []),
+                    # Legacy single-class fields (backward compat)
+                    'class_id': src.get('class_id', -1),
+                    'class_name': src.get('class_name', 'unclassified'),
+                    'class_confidence': src.get('class_confidence', 0.0),
+                    'class_timestamp': src.get('class_timestamp', 0),
+                    # ── Event fields (6-hop rolling mode, min_event_votes gated) ──
+                    # Emitted only when ROLLING_HOPS hops are full and
+                    # event_votes >= min_event_votes (default 4/6).
+                    'event_class_id':        src.get('event_class_id', -1),
+                    'event_class_name':      src.get('event_class_name', 'unclassified'),
+                    'event_votes':           src.get('event_votes', 0),
+                    'event_avg_confidence':  src.get('event_avg_confidence', 0.0),
+                    'event_max_confidence':  src.get('event_max_confidence', 0.0),
+                    # ── Full ranked candidate list (top-K × N-hop voting) ──
+                    # [{class_id, class_name, hop_votes, avg_confidence}, ...] sorted desc.
+                    'event_candidates':      src.get('event_candidates', []),
+                    # ── Spectra sidecar (sim_mode=1 only) ──
+                    # Path to 96×257 float32 .bin file for this event's last hop.
+                    # Load with: np.fromfile(path, dtype=np.float32).reshape(96, 257)
+                    # Empty string on Pi (sim_mode=0).
+                    'spectra_file': self._resolve_spectra_path(
+                        src.get('spectra_file', ''), session_base_dir),
+                    # Number of *real* spectral frames written into the 96-slot buffer
+                    # via spec_at_peak (SSL peak events).  Values << 96 mean the
+                    # buffer is mostly zeros and the reconstructed audio will be
+                    # near-silent even though the track direction is correct.
+                    'spectral_count': src.get('spectral_count', 0),
+                    # ── Full 6-hop Top-K history ──
+                    # List of up to 6 dicts: {timestamp, class_ids[5], class_names[5], confidences[5]}
+                    'topk_history': src.get('topk_history', []),
+                    'track_id':   src.get('id', 0),
+                    'track_tag':  src.get('tag', ''),
+                    'track_type': src.get('type', '')
+                }
+                detections.append(detection)
 
         # ── Deduplication ──────────────────────────────────────────────────────
         # The SST JSON is emitted every ROLLING_HOPS frames (~48 ms) and every
@@ -2489,11 +2566,14 @@ class ResultAnalyzer:
 """)
     
     def _generate_html_report(self, run_id, results):
-        """Generate interactive HTML report with Plotly"""
+        """Generate interactive HTML report with Plotly."""
         report_path = self._get_report_path(run_id)
-        
-        # Create the report
-        html_content = self._create_plotly_report(results)
+
+        run_meta = results.get('run_metadata', {}) if isinstance(results, dict) else {}
+        if run_meta.get('mic_array'):
+            html_content = self._create_mic_array_report(results)
+        else:
+            html_content = self._create_plotly_report(results)
         
         # Strip surrogate characters that json-c may embed in malformed UTF-8
         # class names — Python's strict UTF-8 codec rejects them on write.
@@ -2505,6 +2585,243 @@ class ResultAnalyzer:
             f.write(html_content)
         
         st.success(f"📊 Generated interactive report: {report_path.name}")
+
+    def _create_mic_array_report(self, results):
+                """Build a custom, compact report for imported mic-array sessions."""
+                import html as _html
+
+                run_id = str(results.get('run_id', 'mic_array_session'))
+                scene_name = str(results.get('scene_name', 'mic_array_session'))
+                created_at = str(results.get('timestamp', ''))
+                config = results.get('config', {}) or {}
+                run_meta = results.get('run_metadata', {}) or {}
+                matches = results.get('matches', []) or []
+
+                source_path = str(config.get('source_path', ''))
+                tracks_path = str(config.get('tracks_path', ''))
+                cfg_path = str(run_meta.get('cfg_path', ''))
+                latlong_path = str(run_meta.get('latlong_path', ''))
+                notes_path = str(run_meta.get('notes_path', ''))
+                model_name = str(config.get('selected_model_name', 'N/A') or 'N/A')
+
+                # Build per-detection records from both in-memory and flattened forms.
+                det_rows = []
+                for m in matches:
+                        det = m.get('detection', {}) if isinstance(m.get('detection'), dict) else {}
+                        ts = m.get('timestamp', det.get('timestamp', 0.0))
+                        cls = (
+                                m.get('model_prediction')
+                                or m.get('yamnet_class')
+                                or det.get('event_class_name')
+                                or det.get('class_name')
+                                or 'unclassified'
+                        )
+                        if not cls:
+                                cls = 'unclassified'
+
+                        x = m.get('position', [None, None, None])[0] if isinstance(m.get('position'), list) else None
+                        y = m.get('position', [None, None, None])[1] if isinstance(m.get('position'), list) else None
+                        z = m.get('position', [None, None, None])[2] if isinstance(m.get('position'), list) else None
+                        if x is None:
+                                x = det.get('x', 0.0)
+                        if y is None:
+                                y = det.get('y', 0.0)
+                        if z is None:
+                                z = det.get('z', 0.0)
+
+                        track_id = m.get('track_id', det.get('track_id', -1))
+                        conf = (
+                                m.get('model_confidence')
+                                or m.get('yamnet_confidence')
+                                or det.get('event_max_confidence')
+                                or det.get('class_confidence')
+                                or 0.0
+                        )
+
+                        det_rows.append({
+                                'timestamp': float(ts),
+                                'class_name': str(cls),
+                                'x': float(x),
+                                'y': float(y),
+                                'z': float(z),
+                                'track_id': int(track_id) if isinstance(track_id, (int, float)) else -1,
+                                'confidence': float(conf),
+                        })
+
+                total_detections = len(det_rows)
+                unique_tracks = sorted({r['track_id'] for r in det_rows if r['track_id'] >= 0})
+                track_count = len(unique_tracks)
+
+                class_counts = {}
+                for r in det_rows:
+                        class_counts[r['class_name']] = class_counts.get(r['class_name'], 0) + 1
+                sorted_classes = sorted(class_counts.items(), key=lambda kv: kv[1], reverse=True)
+                class_count = len(sorted_classes)
+
+                latlong_preview = ''
+                if latlong_path and os.path.exists(latlong_path):
+                        try:
+                                with open(latlong_path, 'r', encoding='utf-8', errors='replace') as f:
+                                        latlong_preview = '\n'.join([ln.strip() for ln in f.readlines()[:6]]).strip()
+                        except Exception:
+                                latlong_preview = ''
+
+                notes_preview = ''
+                if notes_path and os.path.exists(notes_path):
+                        try:
+                                with open(notes_path, 'r', encoding='utf-8', errors='replace') as f:
+                                        notes_preview = '\n'.join([ln.strip() for ln in f.readlines()[:8]]).strip()
+                        except Exception:
+                                notes_preview = ''
+
+                class_rows_html = ''.join(
+                        f"<tr><td>{_html.escape(lbl)}</td><td style='text-align:right'>{cnt}</td></tr>"
+                        for lbl, cnt in sorted_classes
+                ) or "<tr><td colspan='2'>No classes detected</td></tr>"
+
+                chart_payload = {
+                        'rows': det_rows,
+                        'class_counts': [{'label': lbl, 'count': cnt} for lbl, cnt in sorted_classes],
+                }
+
+                return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset=\"utf-8\"> 
+    <title>Mic Array Report - { _html.escape(run_id) }</title>
+    <script src=\"https://cdn.plot.ly/plotly-2.26.0.min.js\"></script>
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{ font-family: 'Segoe UI', sans-serif; background: #f4f6f8; color: #1f2937; margin: 0; }}
+        .page {{ max-width: 1300px; margin: 0 auto; padding: 20px; }}
+        .banner {{ background: linear-gradient(120deg, #0f172a, #1d4ed8); color: #fff; padding: 18px 22px; border-radius: 12px; }}
+        .banner h1 {{ margin: 0 0 6px 0; font-size: 22px; }}
+        .meta {{ font-size: 13px; opacity: 0.92; line-height: 1.7; }}
+        .grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 14px; }}
+        .card {{ background: #fff; border-radius: 10px; padding: 14px; box-shadow: 0 1px 6px rgba(0,0,0,0.08); }}
+        .kpi-label {{ font-size: 11px; text-transform: uppercase; color: #64748b; letter-spacing: 0.6px; }}
+        .kpi-value {{ font-size: 26px; font-weight: 700; margin-top: 4px; }}
+        .two-col {{ display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 12px; margin-top: 12px; }}
+        .path {{ font-family: monospace; font-size: 12px; word-break: break-all; color: #334155; }}
+        table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+        th, td {{ padding: 8px 10px; border-bottom: 1px solid #e2e8f0; }}
+        th {{ text-align: left; background: #f8fafc; color: #475569; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }}
+        pre {{ white-space: pre-wrap; font-size: 12px; background: #f8fafc; padding: 10px; border-radius: 8px; border: 1px solid #e2e8f0; }}
+        .chart {{ background: #fff; border-radius: 10px; padding: 10px; box-shadow: 0 1px 6px rgba(0,0,0,0.08); margin-top: 12px; }}
+        @media (max-width: 980px) {{ .grid {{ grid-template-columns: repeat(2, 1fr); }} .two-col {{ grid-template-columns: 1fr; }} }}
+    </style>
+</head>
+<body>
+    <div class=\"page\">
+        <div class=\"banner\">
+            <h1>Mic Array Session Report</h1>
+            <div class=\"meta\">
+                Run: {_html.escape(run_id)} | Session: {_html.escape(scene_name)} | Created: {_html.escape(created_at[:19].replace('T', ' '))}<br>
+                Model: {_html.escape(model_name)}
+            </div>
+        </div>
+
+        <div class=\"grid\">
+            <div class=\"card\"><div class=\"kpi-label\">Detections</div><div class=\"kpi-value\">{total_detections}</div></div>
+            <div class=\"card\"><div class=\"kpi-label\">Tracks</div><div class=\"kpi-value\">{track_count}</div></div>
+            <div class=\"card\"><div class=\"kpi-label\">Classes Detected</div><div class=\"kpi-value\">{class_count}</div></div>
+            <div class=\"card\"><div class=\"kpi-label\">Angular Threshold</div><div class=\"kpi-value\">{_html.escape(str(config.get('angular_threshold', 'N/A')))}\u00b0</div></div>
+        </div>
+
+        <div class=\"two-col\">
+            <div class=\"card\">
+                <h3>Input Metadata</h3>
+                <p><b>Session Source (zip/folder)</b><br><span class=\"path\">{_html.escape(source_path or 'N/A')}</span></p>
+                <p><b>Tracks JSON</b><br><span class=\"path\">{_html.escape(tracks_path or 'N/A')}</span></p>
+                <p><b>Config File</b><br><span class=\"path\">{_html.escape(cfg_path or 'N/A')}</span></p>
+                <p><b>Lat/Long File</b><br><span class=\"path\">{_html.escape(latlong_path or 'N/A')}</span></p>
+                <p><b>Timestamps/Notes File</b><br><span class=\"path\">{_html.escape(notes_path or 'N/A')}</span></p>
+            </div>
+            <div class=\"card\">
+                <h3>Detected Classes (YAMNet)</h3>
+                <table>
+                    <tr><th>Class</th><th style=\"text-align:right\">Count</th></tr>
+                    {class_rows_html}
+                </table>
+            </div>
+        </div>
+
+        <div class=\"two-col\">
+            <div class=\"card\">
+                <h3>Lat/Long Preview</h3>
+                <pre>{_html.escape(latlong_preview or 'No lat/long text available')}</pre>
+            </div>
+            <div class=\"card\">
+                <h3>Timestamp/Notes Preview</h3>
+                <pre>{_html.escape(notes_preview or 'No notes/timestamp text available')}</pre>
+            </div>
+        </div>
+
+        <div class=\"chart\"><div id=\"det_map\" style=\"height:430px;\"></div></div>
+        <div class=\"chart\"><div id=\"det_timeline\" style=\"height:430px;\"></div></div>
+    </div>
+
+    <script>
+        const payload = {json.dumps(chart_payload)};
+        const rows = payload.rows || [];
+
+        const classes = [...new Set(rows.map(r => r.class_name || 'unclassified'))];
+        const palette = ['#2563eb','#16a34a','#dc2626','#d97706','#7c3aed','#0891b2','#be123c','#4b5563','#0284c7','#65a30d'];
+        const colorByClass = Object.fromEntries(classes.map((c, i) => [c, palette[i % palette.length]]));
+
+        // Direction map (XY plane from DOA vector, colored by class)
+        const mapTraces = classes.map(c => {{
+            const pts = rows.filter(r => (r.class_name || 'unclassified') === c);
+            return {{
+                type: 'scatter',
+                mode: 'markers',
+                name: c,
+                x: pts.map(p => p.x),
+                y: pts.map(p => p.y),
+                text: pts.map(p => `t=${{p.timestamp.toFixed(2)}}s | track=${{p.track_id}} | conf=${{p.confidence.toFixed(3)}}`),
+                hovertemplate: '%{{text}}<br>x=%{{x:.3f}}, y=%{{y:.3f}}<extra></extra>',
+                marker: {{ size: 8, opacity: 0.75, color: colorByClass[c] }}
+            }};
+        }});
+
+        Plotly.newPlot('det_map', mapTraces, {{
+            title: 'Detection Map (DOA X/Y)',
+            xaxis: {{ title: 'X', zeroline: true, gridcolor: '#e5e7eb' }},
+            yaxis: {{ title: 'Y', zeroline: true, gridcolor: '#e5e7eb', scaleanchor: 'x', scaleratio: 1 }},
+            legend: {{ orientation: 'h', y: -0.2 }},
+            margin: {{ l: 55, r: 20, t: 45, b: 85 }},
+            plot_bgcolor: '#ffffff',
+            paper_bgcolor: '#ffffff'
+        }});
+
+        // Timeline: detections per class over time
+        const timelineTraces = classes.map(c => {{
+            const pts = rows.filter(r => (r.class_name || 'unclassified') === c);
+            return {{
+                type: 'scatter',
+                mode: 'markers',
+                name: c,
+                x: pts.map(p => p.timestamp),
+                y: pts.map(_ => c),
+                text: pts.map(p => `track=${{p.track_id}} | conf=${{p.confidence.toFixed(3)}} | xyz=(${{p.x.toFixed(2)}},${{p.y.toFixed(2)}},${{p.z.toFixed(2)}})`),
+                hovertemplate: 't=%{{x:.2f}}s | %{{y}}<br>%{{text}}<extra></extra>',
+                marker: {{ size: 8, opacity: 0.8, color: colorByClass[c] }}
+            }};
+        }});
+
+        Plotly.newPlot('det_timeline', timelineTraces, {{
+            title: 'Detection Timeline by Class',
+            xaxis: {{ title: 'Time (s)', gridcolor: '#e5e7eb' }},
+            yaxis: {{ title: 'Class', categoryorder: 'array', categoryarray: classes }},
+            legend: {{ orientation: 'h', y: -0.24 }},
+            margin: {{ l: 90, r: 20, t: 45, b: 90 }},
+            plot_bgcolor: '#ffffff',
+            paper_bgcolor: '#ffffff'
+        }});
+    </script>
+</body>
+</html>
+"""
     
     def _create_plotly_report(self, results):  # noqa: C901
         """
