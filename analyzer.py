@@ -287,6 +287,7 @@ class ResultAnalyzer:
         run_id = run_data.get('run_id', run_data.get('run_name', selected_run_file.stem))
         active_mic_session = mic_array_context.get('active_session')
         analysis_id = mic_array_context.get('analysis_id') if active_mic_session else run_id
+        selected_cfg_name, selected_cfg_path, selected_model_name, _ = self._extract_runtime_selection(run_data)
         
         # Display run info
         col1, col2, col3, col4 = st.columns(4)
@@ -309,6 +310,13 @@ class ResultAnalyzer:
                 st.metric("Render ID", run_data.get('render_id', 'N/A'))
             with col4:
                 st.metric("Duration", f"{run_data.get('scene_metadata', {}).get('duration', 0)}s")
+            prov_col1, prov_col2 = st.columns(2)
+            with prov_col1:
+                st.caption(f"Config used: {selected_cfg_name}")
+                if selected_cfg_path:
+                    st.caption(f"Path: {selected_cfg_path}")
+            with prov_col2:
+                st.caption(f"Model used: {selected_model_name}")
 
         # Show experiment provenance if tagged
         exp_tag   = run_data.get('experiment_tag', '')
@@ -2513,6 +2521,7 @@ class ResultAnalyzer:
         6  Detection Timeline       – scrollable frame-by-frame slider
         """
         import math as _math
+        import html as _html
         from collections import Counter, defaultdict
 
         # ── Normalise match records ───────────────────────────────────────────
@@ -2673,6 +2682,9 @@ class ResultAnalyzer:
 
         # ── Mic Array wall-clock timestamps (optional) ──────────────────────
         run_meta = results.get('run_metadata', {})
+        selected_cfg_name, _, selected_model_name, _ = self._extract_runtime_selection(run_meta)
+        selected_cfg_name = _html.escape(selected_cfg_name)
+        selected_model_name = _html.escape(selected_model_name)
         notes_path = run_meta.get('notes_path', '')
         wallclock_start_iso = ''
         wallclock_points_iso = []
@@ -2790,7 +2802,9 @@ class ResultAnalyzer:
       <b>Render:</b> {render_id}<br>
       <b>Analysed:</b> {str(timestamp)[:19].replace('T',' ')} &nbsp;·&nbsp;
       <b>Duration:</b> {scene_duration:.0f} s &nbsp;·&nbsp;
-      <b>Threshold:</b> {cfg.get('angular_threshold','?')}°
+            <b>Threshold:</b> {cfg.get('angular_threshold','?')}°<br>
+            <b>Config:</b> {selected_cfg_name} &nbsp;·&nbsp;
+            <b>Model:</b> {selected_model_name}
     </div>
   </div>
 """)
@@ -3803,8 +3817,14 @@ class ResultAnalyzer:
     def _display_summary(self, analysis_data):
         """Display analysis summary in Streamlit"""
         summary = analysis_data['summary']
+        run_meta = analysis_data.get('run_metadata', {})
+        selected_cfg_name, selected_cfg_path, selected_model_name, _ = self._extract_runtime_selection(run_meta)
         
         st.subheader("📊 Analysis Summary")
+        if selected_cfg_name != 'N/A' or selected_model_name != 'N/A':
+            st.caption(f"Report provenance: config={selected_cfg_name} | model={selected_model_name}")
+            if selected_cfg_path:
+                st.caption(f"Config path: {selected_cfg_path}")
         
         # Check if OLD model stats exist (for backwards compatibility)
         has_model_stats = 'model_stats' in analysis_data
@@ -4065,6 +4085,33 @@ class ResultAnalyzer:
             return json.loads(render_path.read_text())
         except Exception:
             return {}
+
+    def _extract_runtime_selection(self, run_meta: dict):
+        """Return selected ODAS config/model provenance from run metadata."""
+        run_meta = run_meta or {}
+        scene_meta = run_meta.get('scene_metadata', {}) or {}
+
+        selected_cfg_path = (
+            run_meta.get('odas_config')
+            or scene_meta.get('selected_odas_config')
+            or run_meta.get('odas_runtime_config')
+            or ''
+        )
+        selected_cfg_name = Path(selected_cfg_path).name if selected_cfg_path else 'N/A'
+
+        selected_model_dir = (
+            run_meta.get('selected_model_dir')
+            or scene_meta.get('selected_model_dir')
+            or ''
+        )
+        selected_model_name = (
+            run_meta.get('selected_model_name')
+            or scene_meta.get('selected_model_name')
+            or (Path(selected_model_dir).name if selected_model_dir else '')
+            or 'N/A'
+        )
+
+        return selected_cfg_name, selected_cfg_path, selected_model_name, selected_model_dir
 
     def _extract_mono_from_raw_window(self, raw_audio_file, start_time, end_time,
                                       warmup_seconds=0.0, sr=16000, n_channels=6):

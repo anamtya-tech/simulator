@@ -759,7 +759,10 @@ class SimulationRunner:
             'classify_events_file': classify_events_file,
             'session_live_file': session_live_file,
             'port': 10000,
-            'odas_config': odas_cfg or self.odas_config,
+            # Keep both paths: the config the user selected and the run-local
+            # runtime copy patched for socket replay.
+            'odas_config': odas_cfg_source,
+            'odas_runtime_config': odas_cfg or self.odas_config,
             'warmup_seconds': metadata.get('warmup_seconds', 0),
             'odas_preset': preset_name,
             'experiment_tag': experiment_tag or '',
