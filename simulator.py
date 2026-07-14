@@ -146,10 +146,27 @@ class SimulationRunner:
         self.odaslive_bin = str(next((p for p in odaslive_candidates if p.exists()), odaslive_candidates[0]))
 
     def _list_odas_configs(self):
-        """Return sorted .cfg files from project odas_config directory."""
+        """Return sorted runnable ODAS .cfg files from project odas_config directory."""
         if not self.odas_config_dir.exists():
             return []
         cfgs = [p for p in self.odas_config_dir.rglob('*') if p.is_file() and p.suffix.lower() == '.cfg']
+
+        def _is_runnable_cfg(path: Path) -> bool:
+            """Keep only top-level ODAS runtime configs (exclude helper includes)."""
+            name = path.name.lower()
+            # Common include/helper cfgs that are not valid odaslive entrypoints.
+            if any(tok in name for tok in ('bandpass', 'postfilter', 'filter', 'diag')):
+                return False
+            try:
+                text = path.read_text(encoding='utf-8', errors='replace')
+            except Exception:
+                return False
+            has_raw = re.search(r'\braw\s*:\s*\{', text) is not None
+            has_nbits = re.search(r'\bnBits\s*=', text) is not None
+            has_iface = re.search(r'\binterface\s*:\s*\{', text) is not None
+            return has_raw and has_nbits and has_iface
+
+        cfgs = [p for p in cfgs if _is_runnable_cfg(p)]
         return sorted(cfgs, key=lambda p: p.name.lower())
 
     def _list_models(self):
@@ -395,7 +412,22 @@ class SimulationRunner:
         runtime_cfg = self.runs_dir / f"runtime_cfg_{run_timestamp}.cfg"
 
         try:
-            text = src_path.read_text()
+            text = src_path.read_text(encoding='utf-8', errors='replace')
+
+            # Guardrail: reject helper configs (e.g. bandpass.cfg) as odaslive entry cfg.
+            if (
+                re.search(r'\braw\s*:\s*\{', text) is None
+                or re.search(r'\bnBits\s*=', text) is None
+                or re.search(r'\binterface\s*:\s*\{', text) is None
+            ):
+                fallback = Path(self.odas_config)
+                st.warning(
+                    f"Selected config is not a runnable ODAS entry config: {src_path.name}. "
+                    f"Falling back to {fallback.name}."
+                )
+                src_path = fallback
+                text = src_path.read_text(encoding='utf-8', errors='replace')
+
             pattern = r'(raw\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*)'
             match = re.search(pattern, text, flags=re.S)
 
@@ -637,7 +669,7 @@ class SimulationRunner:
             args=(sim, log_fh, run_name, render_id, scene_name,
                   metadata, raw_file_path, log_file_path,
                   run_start_time, run_timestamp, duration,
-                preset_name, experiment_tag, odas_cfg,
+                preset_name, experiment_tag, odas_cfg_source, odas_cfg,
                 selected_model_dir, selected_model_name),
             daemon=True,
         )
@@ -650,6 +682,7 @@ class SimulationRunner:
                              run_start_time, run_timestamp, duration,
                              preset_name: str = "Balanced (default)",
                              experiment_tag: str | None = None,
+                             selected_odas_cfg: str = '',
                              odas_cfg: str | None = None,
                              selected_model_dir: str = '',
                              selected_model_name: str = ''):
@@ -761,7 +794,9 @@ class SimulationRunner:
             'port': 10000,
             # Keep both paths: the config the user selected and the run-local
             # runtime copy patched for socket replay.
-            'odas_config': odas_cfg_source,
+            'odas_config': selected_odas_cfg,
+            'selected_odas_config': selected_odas_cfg,
+            'selected_odas_config_name': Path(selected_odas_cfg).name if selected_odas_cfg else '',
             'odas_runtime_config': odas_cfg or self.odas_config,
             'warmup_seconds': metadata.get('warmup_seconds', 0),
             'odas_preset': preset_name,
@@ -832,7 +867,12 @@ class SimulationRunner:
                 with open(run_file, 'r') as f:
                     run_data = json.load(f)
 
-                odas_cfg_path = run_data.get('odas_config', '')
+                odas_cfg_path = (
+                    run_data.get('selected_odas_config')
+                    or run_data.get('odas_config', '')
+                )
+                if Path(str(odas_cfg_path)).name.startswith('runtime_cfg_'):
+                    odas_cfg_path = run_data.get('scene_metadata', {}).get('selected_odas_config', '')
                 cfg_name = Path(odas_cfg_path).name if odas_cfg_path else ''
 
                 model_name = (

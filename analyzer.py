@@ -4092,11 +4092,19 @@ class ResultAnalyzer:
         scene_meta = run_meta.get('scene_metadata', {}) or {}
 
         selected_cfg_path = (
-            run_meta.get('odas_config')
+            run_meta.get('selected_odas_config')
             or scene_meta.get('selected_odas_config')
-            or run_meta.get('odas_runtime_config')
+            or run_meta.get('odas_config')
             or ''
         )
+        if Path(str(selected_cfg_path)).name.startswith('runtime_cfg_'):
+            selected_cfg_path = (
+                scene_meta.get('selected_odas_config')
+                or run_meta.get('selected_odas_config')
+                or ''
+            )
+        if not selected_cfg_path:
+            selected_cfg_path = run_meta.get('odas_runtime_config') or ''
         selected_cfg_name = Path(selected_cfg_path).name if selected_cfg_path else 'N/A'
 
         selected_model_dir = (
@@ -4106,8 +4114,8 @@ class ResultAnalyzer:
         )
         selected_model_name = (
             run_meta.get('selected_model_name')
-            or scene_meta.get('selected_model_name')
             or (Path(selected_model_dir).name if selected_model_dir else '')
+            or scene_meta.get('selected_model_name')
             or 'N/A'
         )
 
