@@ -30,11 +30,19 @@ DEFAULT_SOUNDS_DIR = HOME_DIR / 'sounds'
 CAPTURES_DIR       = HOME_DIR / 'audio_cache' / 'ambient_captures'
 DEFAULT_SPL_DB_1M  = 80.0
 
+DEFAULT_LIBRARY_CANDIDATES = [
+    DEFAULT_SOUNDS_DIR,
+    HOME_DIR / 'Git_Dev' / 'simulator' / 'outputs' / 'gt_datasets',
+    HOME_DIR / 'simulator' / 'outputs' / 'gt_datasets',
+    HOME_DIR / 'audio_cache',
+    HOME_DIR / 'backup' / 'audio_cache',
+]
+
 class SceneConfigurator:
     def __init__(self, scenes_dir, sounds_dir=None):
         self.scenes_dir = scenes_dir
         # Use provided path or default; persist across Streamlit reruns via session state
-        initial_path = str(sounds_dir or DEFAULT_SOUNDS_DIR)
+        initial_path = self._choose_default_library_path(sounds_dir)
         if 'library_path' not in st.session_state:
             st.session_state.library_path = initial_path
         self._load_library(st.session_state.library_path)
@@ -42,6 +50,29 @@ class SceneConfigurator:
         # Initialize session state for scene configuration
         if 'scene_config' not in st.session_state:
             st.session_state.scene_config = self._create_default_scene()
+
+    def _path_has_wavs(self, root: Path) -> bool:
+        """Fast existence check for at least one WAV under root."""
+        if not root.exists():
+            return False
+        for _ in root.rglob('*.wav'):
+            return True
+        return False
+
+    def _choose_default_library_path(self, preferred_path=None) -> str:
+        """Pick the best default library path with discoverable WAV files."""
+        candidates = []
+        if preferred_path:
+            candidates.append(Path(preferred_path).expanduser())
+        candidates.extend(DEFAULT_LIBRARY_CANDIDATES)
+
+        for p in candidates:
+            p = Path(p).expanduser()
+            if self._path_has_wavs(p):
+                return str(p.resolve())
+
+        # Fallback to original behavior if no candidate has WAVs.
+        return str(Path(preferred_path or DEFAULT_SOUNDS_DIR).expanduser())
     
     def _create_default_scene(self):
         """Create a default scene configuration"""
@@ -88,6 +119,19 @@ class SceneConfigurator:
         """
         label_cache: dict = {}  # folder Path → (label, source_type, spl_db_1m, spl_defaulted) | None
 
+        def infer_label_from_path(wav_file: Path):
+            """Fallback label inference when no label.txt is found.
+
+            Uses nearest non-empty parent folder name. Heuristic source type:
+            folders containing "ambient" are ambient, otherwise directional.
+            """
+            rel_parts = list(wav_file.relative_to(root).parts[:-1])
+            clean_parts = [p for p in rel_parts if p and p not in ('audio',)]
+            label = clean_parts[-1] if clean_parts else wav_file.stem
+            lcase = '/'.join(clean_parts).lower()
+            source_type = 'ambient' if 'ambient' in lcase else 'directional'
+            return label, source_type
+
         def find_label(folder: Path):
             current = folder
             while True:
@@ -125,9 +169,12 @@ class SceneConfigurator:
         for wav in sorted(root.rglob('*.wav')):
             entry = find_label(wav.parent)
             if entry is None:
-                skipped.append(wav.name)
-                continue
-            lbl, stype, spl_db_1m, spl_defaulted = entry
+                # Backward-compatible fallback: infer label from folder name.
+                lbl, stype = infer_label_from_path(wav)
+                spl_db_1m = DEFAULT_SPL_DB_1M
+                spl_defaulted = True
+            else:
+                lbl, stype, spl_db_1m, spl_defaulted = entry
             if lbl not in library:
                 library[lbl] = {
                     'source_type': stype,
@@ -237,6 +284,15 @@ class SceneConfigurator:
                 f'📂 `{self.library_path}` — **{len(self.library)}** labels '
                 f'({dir_count} directional, {amb_count} ambient)'
             )
+            if len(self.library) == 0:
+                st.error(
+                    'No labels found in this library path. '
+                    'Pick a folder that contains WAV files, or add label.txt files.'
+                )
+                st.caption(
+                    'Tip: each label folder can contain label.txt with lines: '
+                    'label name, directional|ambient, optional SPL @ 1m.'
+                )
             if getattr(self, 'labels_with_default_spl', None):
                 labels = ', '.join(self.labels_with_default_spl)
                 st.warning(
@@ -299,6 +355,12 @@ class SceneConfigurator:
         directional_labels = sorted(
             lbl for lbl, e in self.library.items() if e['source_type'] == 'directional'
         )
+
+        if not directional_labels:
+            st.error(
+                'No directional labels available. Check the Sound Library path or add label.txt metadata.'
+            )
+            return
 
         col_add, col_clear = st.columns([1, 1])
         with col_add:
@@ -549,13 +611,20 @@ class SceneConfigurator:
     def _render_directional_source_editor(self, scene, idx):
         """Render editor for a single directional source"""
         source = scene['directional_sources'][idx]
+
+        directional_labels = sorted(
+            lbl for lbl, e in self.library.items() if e['source_type'] == 'directional'
+        )
+        if not directional_labels:
+            st.warning('Directional label list is empty. Remove this source or reload library path.')
+            if st.button("🗑️ Remove", key=f"remove_dir_{idx}"):
+                scene['directional_sources'].pop(idx)
+                st.rerun()
+            return
         
         col1, col2 = st.columns([3, 1])
         with col1:
             # Label selection
-            directional_labels = sorted(
-                lbl for lbl, e in self.library.items() if e['source_type'] == 'directional'
-            )
             source['label'] = st.selectbox(
                 "Label",
                 directional_labels,
@@ -905,14 +974,20 @@ class SceneConfigurator:
             synth_label += '  *(ignored in Real Capture mode)*'
         st.markdown(synth_label)
 
+        ambient_labels = sorted(
+            lbl for lbl, e in self.library.items() if e['source_type'] == 'ambient'
+        )
+        if not ambient_labels:
+            st.warning('No ambient labels found in current library path. Synthetic ambient add/generate is disabled.')
+
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button('➕ Add Ambient'):
+            if st.button('➕ Add Ambient', disabled=not ambient_labels):
                 self._add_ambient_source(scene)
         with col2:
             num_random = st.number_input('Number to generate', 1, 50, 1, key='num_random_amb')
         with col3:
-            if st.button('🎲 Generate Random', key='gen_random_amb'):
+            if st.button('🎲 Generate Random', key='gen_random_amb', disabled=not ambient_labels):
                 for _ in range(num_random):
                     self._add_ambient_source(scene, randomize=True)
 
@@ -926,13 +1001,20 @@ class SceneConfigurator:
     def _render_ambient_source_editor(self, scene, idx):
         """Render editor for a single ambient source"""
         source = scene['ambient_sources'][idx]
+
+        ambient_labels = sorted(
+            lbl for lbl, e in self.library.items() if e['source_type'] == 'ambient'
+        )
+        if not ambient_labels:
+            st.warning('Ambient label list is empty. Remove this source or reload library path.')
+            if st.button("🗑️ Remove", key=f"remove_amb_{idx}"):
+                scene['ambient_sources'].pop(idx)
+                st.rerun()
+            return
         
         col1, col2 = st.columns([3, 1])
         with col1:
             # Label selection
-            ambient_labels = sorted(
-                lbl for lbl, e in self.library.items() if e['source_type'] == 'ambient'
-            )
             source['label'] = st.selectbox(
                 "Label",
                 ambient_labels,
@@ -1070,6 +1152,8 @@ class SceneConfigurator:
         ambient_labels = [
             lbl for lbl, e in self.library.items() if e['source_type'] == 'ambient'
         ]
+        if not ambient_labels:
+            return
         
         if randomize:
             label = random.choice(ambient_labels)
