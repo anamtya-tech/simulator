@@ -10,6 +10,7 @@ This pipeline creates labelled datasets for fine-tuning YAMNet by:
 3. **Processing** with ODAS to detect and classify sound source tracks
 4. **Matching** detected tracks to ground truth sources
 5. **Curating** labelled WAV datasets for YAMNet fine-tuning in the [yamnet repo](https://github.com/anamtya-tech/yamnet)
+6. **Importing** recorded Mic Array sessions (zip/folder) for analysis and report generation
 
 ## Components
 
@@ -63,6 +64,25 @@ This pipeline creates labelled datasets for fine-tuning YAMNet by:
 - Stitches multiple `.bin` files per track for longer WAVs
 - Saves 16 kHz mono WAVs + `labels.csv` in YAMNet-compatible format
 - Output: `outputs/yamnet_datasets/<dataset_name>/`
+
+### 7. Mic Array Import + Reports (within `analyzer.py`)
+- Supports recorded session imports from `Mic_Array/Live_Audio` and `Mic_Array/Passive_Audio`
+- Accepts either a session folder or a `.zip` session package
+- Optional ground-truth JSON upload for source matching
+- Automatically generates interactive HTML reports for imported sessions
+- Report includes model info, class timeline, detection maps, and metadata previews
+- Output: `outputs/analysis/mic_*_report.html`
+
+### 8. GT Dataset Builder (`gt_dataset_builder.py`)
+- Builds training clips directly from renderer sidecars (GT-aligned)
+- Adds ambient background clips and stratified fold assignment
+- Exports `manifest.csv` + `dataset_info.json`
+- Output: `outputs/gt_datasets/<dataset_name>/`
+
+### 9. YAMNet Fine-Tune UI (`yamnet_finetuner_ui.py`)
+- Combines GT + post-ODAS datasets into one training run
+- Prepares training directory, launches training, tracks checkpoints
+- Supports export/deploy of selected `.tflite` model
 
 ## Installation
 
@@ -128,6 +148,16 @@ streamlit run app.py
    - Detection recall per source
    - Angular error distribution
    - Label distribution
+
+#### Step 4B: Analyze Recorded Mic Array Sessions (Folder/Zip)
+1. Navigate to **"📊 Results Analyzer"**
+2. In **Mic Array Imports**, select either:
+  - **Live Session** from `Mic_Array/Live_Audio`, or
+  - **Passive Session** from `Mic_Array/Passive_Audio`
+3. Choose a session as a folder or `.zip`
+4. (Optional) Upload ground-truth JSON for matching-enabled analysis
+5. Click **"🔍 Analyze Session"**
+6. Open or download the generated HTML report from `outputs/analysis/`
 
 #### Step 5: Curate YAMNet Dataset
 1. Navigate to **"🎯 YAMNet Datasets"**
@@ -297,3 +327,8 @@ This project builds upon ODAS (MIT License) and pyroomacoustics (MIT License).
 - ODAS upstream: https://github.com/introlab/odas
 - Pyroomacoustics: https://github.com/LCAV/pyroomacoustics
 - ReSpeaker Mic Array: https://wiki.seeedstudio.com/ReSpeaker_Mic_Array_v2.0/
+
+## Change Log
+
+- 2026-07-17: Added Mic Array recorded-session analysis flow to docs (session folder/zip selection, optional GT upload, and generated HTML reports).
+- 2026-07-17: Documented GT Dataset Builder and YAMNet Fine-Tune modules in components/workflow.
