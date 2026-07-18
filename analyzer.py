@@ -209,170 +209,247 @@ class ResultAnalyzer:
         return entries
 
     def _render_calibration_overview(self, analysis_data):
-        """Calibration view: GT timeline and ODAS match quality per GT event."""
-        st.markdown("### 🎯 ODAS Calibration Overview")
+        """Simple ODAS calibration report with timestamp + XYZ tolerance checks."""
+        st.markdown("### 🎯 ODAS Calibration Report (Simple)")
 
         scene = analysis_data.get('scene', {}) or {}
         gt_sources = scene.get('directional_sources', []) or []
-        gt_matches = [
-            m for m in (analysis_data.get('matches', []) or [])
-            if m.get('match_type') == 'ground_truth'
-        ]
+        all_matches = analysis_data.get('matches', []) or []
 
         if not gt_sources:
-            st.info("No GT directional sources available for calibration summary.")
+            st.info("No GT directional sources available for calibration report.")
             return
 
-        def _az_el_deg(position):
-            if not isinstance(position, (list, tuple)) or len(position) < 3:
-                return None, None
-            x, y, z = float(position[0]), float(position[1]), float(position[2])
-            az = float(np.degrees(np.arctan2(y, x)))
-            el = float(np.degrees(np.arctan2(z, np.sqrt(x * x + y * y))))
-            return az, el
+        def _to_float(value, default=None):
+            try:
+                return float(value)
+            except Exception:
+                return default
 
-        def _extract_match_pos(m):
-            pos = m.get('position')
+        def _extract_xyz(record):
+            pos = record.get('position')
             if isinstance(pos, (list, tuple)) and len(pos) >= 3:
-                return [float(pos[0]), float(pos[1]), float(pos[2])]
-            det = m.get('detection', {}) if isinstance(m.get('detection'), dict) else {}
-            return [
-                float(det.get('x', m.get('x', 0.0))),
-                float(det.get('y', m.get('y', 0.0))),
-                float(det.get('z', m.get('z', 0.0))),
-            ]
+                x = _to_float(pos[0], None)
+                y = _to_float(pos[1], None)
+                z = _to_float(pos[2], None)
+                if x is not None and y is not None and z is not None:
+                    return [x, y, z]
+
+            det = record.get('detection', {}) if isinstance(record.get('detection'), dict) else {}
+            x = _to_float(det.get('x', record.get('x')), None)
+            y = _to_float(det.get('y', record.get('y')), None)
+            z = _to_float(det.get('z', record.get('z')), None)
+            if x is None or y is None or z is None:
+                return None
+            return [x, y, z]
+
+        odas_events = []
+        for m in all_matches:
+            ts = _to_float(m.get('timestamp'), None)
+            if ts is None:
+                det = m.get('detection', {}) if isinstance(m.get('detection'), dict) else {}
+                ts = _to_float(det.get('timestamp'), None)
+            xyz = _extract_xyz(m)
+            if ts is None or xyz is None:
+                continue
+            odas_events.append({
+                'timestamp': ts,
+                'x': xyz[0],
+                'y': xyz[1],
+                'z': xyz[2],
+            })
+
+        odas_events.sort(key=lambda r: r['timestamp'])
+        gt_sources = sorted(gt_sources, key=lambda s: _to_float(s.get('start_time', 0.0), 0.0))
+
+        tol_col1, tol_col2 = st.columns(2)
+        with tol_col1:
+            time_tolerance = st.number_input(
+                "Timestamp tolerance (s)",
+                min_value=0.0,
+                max_value=10.0,
+                value=0.5,
+                step=0.1,
+                help="GT and ODAS timestamps are considered matched when |delta time| is within this tolerance.",
+            )
+        with tol_col2:
+            xyz_tolerance = st.number_input(
+                "XYZ tolerance",
+                min_value=0.0,
+                max_value=5.0,
+                value=0.35,
+                step=0.05,
+                help="GT and ODAS positions are matched when Euclidean distance in XYZ is within this tolerance.",
+            )
 
         rows = []
         matched_count = 0
-        gt_line_x = []
-        gt_line_y = []
-        gt_hover = []
-        det_x = []
-        det_y = []
-        det_hover = []
-
         for idx, src in enumerate(gt_sources, 1):
             label = str(src.get('label', 'unknown'))
-            start = float(src.get('start_time', 0.0))
-            end = float(src.get('end_time', start))
-            gt_pos = src.get('position', [0.0, 0.0, 1.0])
-            gx = float(gt_pos[0]) if len(gt_pos) > 0 else 0.0
-            gy = float(gt_pos[1]) if len(gt_pos) > 1 else 0.0
-            gz = float(gt_pos[2]) if len(gt_pos) > 2 else 1.0
-            az, el = _az_el_deg([gx, gy, gz])
-
-            candidates = []
-            for m in gt_matches:
-                if str(m.get('source_label', m.get('label', ''))) != label:
-                    continue
-                gs = float(m.get('gt_start', start))
-                ge = float(m.get('gt_end', end))
-                if abs(gs - start) <= 0.6 and abs(ge - end) <= 0.6:
-                    candidates.append(m)
-
-            if not candidates:
-                for m in gt_matches:
-                    if str(m.get('source_label', m.get('label', ''))) != label:
-                        continue
-                    ts = float(m.get('timestamp', -1.0))
-                    if start - 0.5 <= ts <= end + 5.0:
-                        candidates.append(m)
+            gt_ts = _to_float(src.get('start_time', 0.0), 0.0)
+            gt_pos = src.get('position', [0.0, 0.0, 0.0])
+            gx = _to_float(gt_pos[0] if len(gt_pos) > 0 else 0.0, 0.0)
+            gy = _to_float(gt_pos[1] if len(gt_pos) > 1 else 0.0, 0.0)
+            gz = _to_float(gt_pos[2] if len(gt_pos) > 2 else 0.0, 0.0)
 
             best = None
-            if candidates:
+            best_score = None
+            for ev in odas_events:
+                dt = abs(ev['timestamp'] - gt_ts)
+                dxyz = float(np.linalg.norm(np.array([ev['x'] - gx, ev['y'] - gy, ev['z'] - gz])))
+                score = (dt / max(time_tolerance, 1e-9)) + (dxyz / max(xyz_tolerance, 1e-9))
+                if best is None or score < best_score:
+                    best = ev
+                    best_score = score
+
+            if best is not None:
+                dt = abs(best['timestamp'] - gt_ts)
+                dxyz = float(np.linalg.norm(np.array([best['x'] - gx, best['y'] - gy, best['z'] - gz])))
+                is_match = dt <= time_tolerance and dxyz <= xyz_tolerance
+            else:
+                dt = None
+                dxyz = None
+                is_match = False
+
+            if is_match:
                 matched_count += 1
-                best = min(
-                    candidates,
-                    key=lambda m: (
-                        float(m.get('angular_error', 9999) if m.get('angular_error') is not None else 9999),
-                        abs(float(m.get('timestamp', start)) - start),
-                    ),
-                )
-
-            detected_at = float(best.get('timestamp', 0.0)) if best else None
-            start_offset = (detected_at - start) if detected_at is not None else None
-            angular_error = float(best.get('angular_error')) if best and best.get('angular_error') is not None else None
-            mx, my, mz = _extract_match_pos(best) if best else (None, None, None)
-
-            gt_line_x.extend([start, end, None])
-            gt_line_y.extend([idx, idx, None])
-            gt_hover.extend([
-                f"GT#{idx} {label}<br>t={start:.3f}-{end:.3f}s<br>xyz=({gx:.3f},{gy:.3f},{gz:.3f})<br>az/el=({(az if az is not None else 0):.2f},{(el if el is not None else 0):.2f})",
-                f"GT#{idx} {label}<br>t={start:.3f}-{end:.3f}s<br>xyz=({gx:.3f},{gy:.3f},{gz:.3f})<br>az/el=({(az if az is not None else 0):.2f},{(el if el is not None else 0):.2f})",
-                None,
-            ])
-
-            if detected_at is not None:
-                det_x.append(detected_at)
-                det_y.append(idx)
-                det_hover.append(
-                    f"GT#{idx} {label}<br>detected={detected_at:.3f}s<br>offset={start_offset:.3f}s<br>det xyz=({mx:.3f},{my:.3f},{mz:.3f})<br>ang err={angular_error:.3f}°"
-                )
 
             rows.append({
-                'GT Event': idx,
-                'Label': label,
-                'GT Start (s)': round(start, 3),
-                'GT End (s)': round(end, 3),
+                'Seq': idx,
+                'GT Label': label,
+                'GT Timestamp (s)': round(gt_ts, 3),
                 'GT X': round(gx, 4),
                 'GT Y': round(gy, 4),
                 'GT Z': round(gz, 4),
-                'GT Azimuth (deg)': round(az, 2) if az is not None else None,
-                'GT Elevation (deg)': round(el, 2) if el is not None else None,
-                'Matched': 'Yes' if best is not None else 'No',
-                'Detected At (s)': round(detected_at, 3) if detected_at is not None else None,
-                'Start Offset (s)': round(start_offset, 3) if start_offset is not None else None,
-                'Detected X': round(mx, 4) if mx is not None else None,
-                'Detected Y': round(my, 4) if my is not None else None,
-                'Detected Z': round(mz, 4) if mz is not None else None,
-                'Angular Error (deg)': round(angular_error, 3) if angular_error is not None else None,
+                'ODAS Timestamp (s)': round(best['timestamp'], 3) if best else None,
+                'ODAS X': round(best['x'], 4) if best else None,
+                'ODAS Y': round(best['y'], 4) if best else None,
+                'ODAS Z': round(best['z'], 4) if best else None,
+                '|Δt| (s)': round(dt, 3) if dt is not None else None,
+                'XYZ Distance': round(dxyz, 4) if dxyz is not None else None,
+                'Match': '✓ matched' if is_match else '✗',
             })
 
         total_gt = len(gt_sources)
-        missed = max(total_gt - matched_count, 0)
+        total_odas = len(odas_events)
         match_rate = (matched_count / total_gt * 100.0) if total_gt else 0.0
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.metric("GT Events", total_gt)
-        with c2:
-            st.metric("Matched Events", matched_count)
-        with c3:
-            st.metric("Missed Events", missed, help=f"Match rate: {match_rate:.1f}%")
 
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=gt_line_x,
-            y=gt_line_y,
-            mode='lines',
-            line=dict(color='#1f77b4', width=4),
-            name='GT event window',
-            hovertext=gt_hover,
-            hoverinfo='text',
-        ))
-        if det_x:
-            fig.add_trace(go.Scatter(
-                x=det_x,
-                y=det_y,
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            st.metric("GT Events", total_gt)
+        with k2:
+            st.metric("ODAS Simulator Events", total_odas)
+        with k3:
+            st.metric("Matched", matched_count)
+        with k4:
+            st.metric("Match Rate", f"{match_rate:.1f}%")
+
+        st.caption(
+            "Matching rule: event is matched only when both timestamp and XYZ distance are within tolerance."
+        )
+
+        table_df = pd.DataFrame(rows)
+        st.markdown("#### GT Events In Sequence (side-by-side with ODAS output)")
+        st.dataframe(table_df, width='stretch')
+
+        fig = make_subplots(
+            rows=1,
+            cols=2,
+            specs=[[{'type': 'xy'}, {'type': 'scene'}]],
+            subplot_titles=("Timeline: GT vs nearest ODAS", "XYZ: GT vs nearest ODAS"),
+            horizontal_spacing=0.08,
+        )
+
+        gt_ts_vals = table_df['GT Timestamp (s)'].tolist()
+        seq_vals = table_df['Seq'].tolist()
+        fig.add_trace(
+            go.Scatter(
+                x=gt_ts_vals,
+                y=seq_vals,
                 mode='markers',
-                marker=dict(color='#16a34a', size=10, symbol='diamond'),
-                name='Matched ODAS detection',
-                hovertext=det_hover,
-                hoverinfo='text',
-            ))
+                name='GT',
+                marker=dict(size=9, color='#2563eb', symbol='circle'),
+                hovertemplate='GT seq=%{y}<br>t=%{x:.3f}s<extra></extra>',
+            ),
+            row=1,
+            col=1,
+        )
+
+        odas_ts_vals = table_df['ODAS Timestamp (s)'].tolist()
+        matched_flags = table_df['Match'].tolist()
+        odas_colors = ['#16a34a' if str(m).startswith('✓') else '#dc2626' for m in matched_flags]
+        fig.add_trace(
+            go.Scatter(
+                x=odas_ts_vals,
+                y=seq_vals,
+                mode='markers',
+                name='ODAS (nearest)',
+                marker=dict(size=9, color=odas_colors, symbol='diamond'),
+                hovertemplate='GT seq=%{y}<br>ODAS t=%{x:.3f}s<extra></extra>',
+            ),
+            row=1,
+            col=1,
+        )
+
+        for row in rows:
+            odas_ts = row.get('ODAS Timestamp (s)')
+            if odas_ts is None:
+                continue
+            line_color = '#16a34a' if str(row.get('Match', '')).startswith('✓') else '#dc2626'
+            fig.add_trace(
+                go.Scatter(
+                    x=[row['GT Timestamp (s)'], odas_ts],
+                    y=[row['Seq'], row['Seq']],
+                    mode='lines',
+                    showlegend=False,
+                    line=dict(color=line_color, width=2),
+                    hoverinfo='skip',
+                ),
+                row=1,
+                col=1,
+            )
+
+        fig.add_trace(
+            go.Scatter3d(
+                x=table_df['GT X'].tolist(),
+                y=table_df['GT Y'].tolist(),
+                z=table_df['GT Z'].tolist(),
+                mode='markers',
+                name='GT XYZ',
+                marker=dict(size=5, color='#2563eb', symbol='circle'),
+                hovertemplate='GT xyz=(%{x:.3f}, %{y:.3f}, %{z:.3f})<extra></extra>',
+            ),
+            row=1,
+            col=2,
+        )
+
+        fig.add_trace(
+            go.Scatter3d(
+                x=table_df['ODAS X'].tolist(),
+                y=table_df['ODAS Y'].tolist(),
+                z=table_df['ODAS Z'].tolist(),
+                mode='markers',
+                name='ODAS XYZ (nearest)',
+                marker=dict(size=5, color=odas_colors, symbol='diamond'),
+                hovertemplate='ODAS xyz=(%{x:.3f}, %{y:.3f}, %{z:.3f})<extra></extra>',
+            ),
+            row=1,
+            col=2,
+        )
+
+        fig.update_xaxes(title_text='Timestamp (s)', row=1, col=1)
+        fig.update_yaxes(title_text='GT Event Sequence', dtick=1, row=1, col=1)
         fig.update_layout(
-            title='GT Events vs ODAS Matched Detections (Timeline)',
-            xaxis_title='Timestamp (s)',
-            yaxis_title='GT Event Index',
-            yaxis=dict(dtick=1),
-            height=460,
-            margin=dict(l=60, r=40, t=60, b=50),
-            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0),
+            height=560,
+            margin=dict(l=30, r=20, t=70, b=30),
+            legend=dict(orientation='h', yanchor='bottom', y=1.03, xanchor='left', x=0),
+            scene=dict(
+                xaxis_title='X',
+                yaxis_title='Y',
+                zaxis_title='Z',
+            ),
         )
         st.plotly_chart(fig, width='stretch')
-
-        st.markdown("#### Per-GT Event Match Details")
-        st.caption("Start Offset (s): negative = ODAS detected early, positive = delayed detection from GT start.")
-        st.dataframe(pd.DataFrame(rows), width='stretch')
     
     def render(self):
         """Render the analyzer interface"""
@@ -2904,8 +2981,11 @@ class ResultAnalyzer:
         report_path = self._get_report_path(run_id)
 
         run_meta = results.get('run_metadata', {}) if isinstance(results, dict) else {}
+        source_type = str((results.get('config', {}) or {}).get('source_type', '')).strip().lower()
         if run_meta.get('mic_array'):
             html_content = self._create_mic_array_report(results)
+        elif source_type in ('live_session', 'passive_session'):
+            html_content = self._create_simple_calibration_report(results)
         else:
             html_content = self._create_plotly_report(results)
         
@@ -2919,6 +2999,194 @@ class ResultAnalyzer:
             f.write(html_content)
         
         st.success(f"📊 Generated interactive report: {report_path.name}")
+
+    def _create_simple_calibration_report(self, results):
+        """Create a compact calibration report for Live/Passive ODAS runs."""
+        import html as _html
+
+        scene = results.get('scene', {}) or {}
+        gt_sources = scene.get('directional_sources', []) or []
+        matches = results.get('matches', []) or []
+
+        def _to_float(value, default=None):
+            try:
+                return float(value)
+            except Exception:
+                return default
+
+        def _extract_xyz(record):
+            pos = record.get('position')
+            if isinstance(pos, (list, tuple)) and len(pos) >= 3:
+                x = _to_float(pos[0], None)
+                y = _to_float(pos[1], None)
+                z = _to_float(pos[2], None)
+                if x is not None and y is not None and z is not None:
+                    return [x, y, z]
+            det = record.get('detection', {}) if isinstance(record.get('detection'), dict) else {}
+            x = _to_float(det.get('x', record.get('x')), None)
+            y = _to_float(det.get('y', record.get('y')), None)
+            z = _to_float(det.get('z', record.get('z')), None)
+            if x is None or y is None or z is None:
+                return None
+            return [x, y, z]
+
+        odas_events = []
+        for m in matches:
+            ts = _to_float(m.get('timestamp'), None)
+            if ts is None:
+                det = m.get('detection', {}) if isinstance(m.get('detection'), dict) else {}
+                ts = _to_float(det.get('timestamp'), None)
+            xyz = _extract_xyz(m)
+            if ts is None or xyz is None:
+                continue
+            odas_events.append({'timestamp': ts, 'x': xyz[0], 'y': xyz[1], 'z': xyz[2]})
+
+        odas_events.sort(key=lambda r: r['timestamp'])
+        gt_sources = sorted(gt_sources, key=lambda s: _to_float(s.get('start_time', 0.0), 0.0))
+
+        # Keep defaults aligned with the Streamlit calibration panel.
+        time_tolerance = 0.5
+        xyz_tolerance = 0.35
+
+        rows = []
+        matched_count = 0
+        for idx, src in enumerate(gt_sources, 1):
+            label = str(src.get('label', 'unknown'))
+            gt_ts = _to_float(src.get('start_time', 0.0), 0.0)
+            gt_pos = src.get('position', [0.0, 0.0, 0.0])
+            gx = _to_float(gt_pos[0] if len(gt_pos) > 0 else 0.0, 0.0)
+            gy = _to_float(gt_pos[1] if len(gt_pos) > 1 else 0.0, 0.0)
+            gz = _to_float(gt_pos[2] if len(gt_pos) > 2 else 0.0, 0.0)
+
+            best = None
+            best_score = None
+            for ev in odas_events:
+                dt = abs(ev['timestamp'] - gt_ts)
+                dxyz = float(np.linalg.norm(np.array([ev['x'] - gx, ev['y'] - gy, ev['z'] - gz])))
+                score = (dt / max(time_tolerance, 1e-9)) + (dxyz / max(xyz_tolerance, 1e-9))
+                if best is None or score < best_score:
+                    best = ev
+                    best_score = score
+
+            if best is not None:
+                dt = abs(best['timestamp'] - gt_ts)
+                dxyz = float(np.linalg.norm(np.array([best['x'] - gx, best['y'] - gy, best['z'] - gz])))
+                is_match = dt <= time_tolerance and dxyz <= xyz_tolerance
+            else:
+                dt = None
+                dxyz = None
+                is_match = False
+
+            if is_match:
+                matched_count += 1
+
+            rows.append({
+                'seq': idx,
+                'label': label,
+                'gt_t': gt_ts,
+                'gt_x': gx,
+                'gt_y': gy,
+                'gt_z': gz,
+                'odas_t': best['timestamp'] if best else None,
+                'odas_x': best['x'] if best else None,
+                'odas_y': best['y'] if best else None,
+                'odas_z': best['z'] if best else None,
+                'dt': dt,
+                'dxyz': dxyz,
+                'match': is_match,
+            })
+
+        total_gt = len(gt_sources)
+        total_odas = len(odas_events)
+        match_rate = (matched_count / total_gt * 100.0) if total_gt else 0.0
+
+        table_rows_html = []
+        for r in rows:
+            row_bg = '#f0fff4' if r['match'] else '#fff5f5'
+            match_txt = '✓ matched' if r['match'] else '✗'
+            table_rows_html.append(
+                "<tr style='background:{bg}'>"
+                "<td>{seq}</td><td>{label}</td>"
+                "<td>{gt_t:.3f}</td><td>{gt_x:.3f}</td><td>{gt_y:.3f}</td><td>{gt_z:.3f}</td>"
+                "<td>{odas_t}</td><td>{odas_x}</td><td>{odas_y}</td><td>{odas_z}</td>"
+                "<td>{dt}</td><td>{dxyz}</td><td><b>{match}</b></td>"
+                "</tr>".format(
+                    bg=row_bg,
+                    seq=r['seq'],
+                    label=_html.escape(r['label']),
+                    gt_t=r['gt_t'],
+                    gt_x=r['gt_x'],
+                    gt_y=r['gt_y'],
+                    gt_z=r['gt_z'],
+                    odas_t=f"{r['odas_t']:.3f}" if r['odas_t'] is not None else 'N/A',
+                    odas_x=f"{r['odas_x']:.3f}" if r['odas_x'] is not None else 'N/A',
+                    odas_y=f"{r['odas_y']:.3f}" if r['odas_y'] is not None else 'N/A',
+                    odas_z=f"{r['odas_z']:.3f}" if r['odas_z'] is not None else 'N/A',
+                    dt=f"{r['dt']:.3f}" if r['dt'] is not None else 'N/A',
+                    dxyz=f"{r['dxyz']:.3f}" if r['dxyz'] is not None else 'N/A',
+                    match=match_txt,
+                )
+            )
+
+        table_html = ''.join(table_rows_html) if table_rows_html else "<tr><td colspan='13'>No GT events found</td></tr>"
+
+        run_id = _html.escape(str(results.get('run_id', 'unknown')))
+        scene_name = _html.escape(str(results.get('scene_name', 'unknown')))
+        created_at = _html.escape(str(results.get('timestamp', '')))
+
+        return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset=\"utf-8\" />
+    <title>Simple ODAS Calibration Report - {run_id}</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; background: #f8fafc; color: #0f172a; margin: 0; }}
+        .wrap {{ max-width: 1320px; margin: 0 auto; padding: 20px; }}
+        .head {{ background: #0f172a; color: #fff; padding: 14px 18px; border-radius: 8px; }}
+        .meta {{ font-size: 13px; opacity: 0.9; margin-top: 4px; }}
+        .kpis {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 12px; }}
+        .card {{ background: #fff; border-radius: 8px; padding: 12px; border: 1px solid #e2e8f0; }}
+        .k {{ font-size: 11px; text-transform: uppercase; color: #64748b; }}
+        .v {{ font-size: 24px; font-weight: 700; margin-top: 6px; }}
+        .note {{ margin-top: 10px; font-size: 13px; color: #334155; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 14px; background: #fff; border: 1px solid #e2e8f0; }}
+        th, td {{ border-bottom: 1px solid #e2e8f0; padding: 8px; font-size: 13px; text-align: left; }}
+        th {{ background: #f1f5f9; font-size: 11px; text-transform: uppercase; color: #334155; position: sticky; top: 0; }}
+        .scroll {{ overflow-x: auto; max-height: 72vh; overflow-y: auto; }}
+    </style>
+</head>
+<body>
+    <div class=\"wrap\">
+        <div class=\"head\">
+            <div><b>Simple ODAS Calibration Report</b></div>
+            <div class=\"meta\">Run: {run_id} | Session: {scene_name} | Generated: {created_at}</div>
+        </div>
+
+        <div class=\"kpis\">
+            <div class=\"card\"><div class=\"k\">GT Events</div><div class=\"v\">{total_gt}</div></div>
+            <div class=\"card\"><div class=\"k\">ODAS Simulator Events</div><div class=\"v\">{total_odas}</div></div>
+            <div class=\"card\"><div class=\"k\">Matched</div><div class=\"v\">{matched_count}</div></div>
+            <div class=\"card\"><div class=\"k\">Match Rate</div><div class=\"v\">{match_rate:.1f}%</div></div>
+        </div>
+
+        <div class=\"note\">
+            Match rule: |delta time| &lt;= {time_tolerance:.2f}s and XYZ distance &lt;= {xyz_tolerance:.2f}.
+        </div>
+
+        <div class=\"scroll\">
+            <table>
+                <tr>
+                    <th>Seq</th><th>GT Label</th><th>GT Time</th><th>GT X</th><th>GT Y</th><th>GT Z</th>
+                    <th>ODAS Time</th><th>ODAS X</th><th>ODAS Y</th><th>ODAS Z</th>
+                    <th>|delta t|</th><th>XYZ Dist</th><th>Match</th>
+                </tr>
+                {table_html}
+            </table>
+        </div>
+    </div>
+</body>
+</html>
+"""
 
     def _build_experiment_summary(self, results):
         """Return concise strings describing experiment type and GT provenance."""
