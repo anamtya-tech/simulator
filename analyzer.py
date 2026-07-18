@@ -309,11 +309,8 @@ class ResultAnalyzer:
 
             best = None
             best_score = None
-            max_dt_for_candidate = max(1.5, time_tolerance * 3.0)
             for ev in available_odas:
                 dt = abs(ev['timestamp'] - gt_ts)
-                if dt > max_dt_for_candidate:
-                    continue
                 dxyz = float(np.linalg.norm(np.array([ev['x'] - gx, ev['y'] - gy, ev['z'] - gz])))
                 score = (dt / max(time_tolerance, 1e-9)) + (dxyz / max(xyz_tolerance, 1e-9))
                 if best is None or score < best_score:
@@ -3094,11 +3091,8 @@ class ResultAnalyzer:
 
             best = None
             best_score = None
-            max_dt_for_candidate = max(1.5, time_tolerance * 3.0)
             for ev in available_odas:
                 dt = abs(ev['timestamp'] - gt_ts)
-                if dt > max_dt_for_candidate:
-                    continue
                 dxyz = float(np.linalg.norm(np.array([ev['x'] - gx, ev['y'] - gy, ev['z'] - gz])))
                 score = (dt / max(time_tolerance, 1e-9)) + (dxyz / max(xyz_tolerance, 1e-9))
                 if best is None or score < best_score:

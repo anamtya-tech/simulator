@@ -746,9 +746,11 @@ class SimulationRunner:
         cfg_path: str,
         port: int,
         run_timestamp: str,
+        raw_file_path: str,
+        raw_n_channels: int | None = None,
         selected_model_dir: str = '',
     ) -> str:
-        """Create a run-local cfg that enforces raw.interface socket replay.
+        """Create a run-local cfg that enforces raw.interface file replay.
 
         The user-selected config remains the source of truth for SST and all other
         ODAS sections; only the RAW transport is normalized for simulator runs.
@@ -777,14 +779,13 @@ class SimulationRunner:
             match = re.search(pattern, text, flags=re.S)
 
             if match:
-                socket_block = (
+                file_block = (
                     "\n"
-                    "        type = \"socket\";\n"
-                    "        ip = \"127.0.0.1\";\n"
-                    f"        port = {int(port)};\n"
+                    "        type = \"file\";\n"
+                    f"        path = \"{raw_file_path}\";\n"
                     "\n"
                 )
-                text = text[:match.start(2)] + socket_block + text[match.end(2):]
+                text = text[:match.start(2)] + file_block + text[match.end(2):]
 
             # Remap known file-system paths from device configs to local VM paths.
             local_model_dir = selected_model_dir.strip() if selected_model_dir else str(self.models_dir)
@@ -807,6 +808,24 @@ class SimulationRunner:
                     text,
                     count=1,
                 )
+
+            if raw_n_channels in (4, 6):
+                text = re.sub(
+                    r'(?m)^(\s*nChannels\s*=\s*)\d+(\s*;)',
+                    rf'\g<1>{int(raw_n_channels)}\2',
+                    text,
+                    count=1,
+                )
+
+                # Live/Passive imported .raw files are expected as 4-channel streams.
+                # In file mode, ODAS should read channels directly as (0,1,2,3).
+                if int(raw_n_channels) == 4:
+                    text = re.sub(
+                        r'(?m)^(\s*map\s*:\s*\()\s*[^\)]*(\)\s*;)',
+                        r'\g<1>0, 1, 2, 3\2',
+                        text,
+                        count=1,
+                    )
 
             def _set_section_format(cfg_text: str, section_name: str, fmt_value: str) -> str:
                 section_pattern = rf'({section_name}\s*:\s*\{{)(.*?)(\n\s*\}}\s*;?)'
@@ -865,35 +884,6 @@ class SimulationRunner:
                 count=1,
             )
 
-            def _remap_section_socket_port(cfg_text: str, section_name: str, desired_port: int) -> tuple[str, bool]:
-                section_pattern = (
-                    rf'({section_name}\s*:\s*\{{.*?interface\s*:\s*\{{.*?'
-                    rf'type\s*=\s*"socket"\s*;.*?port\s*=\s*)(\d+)(\s*;)'
-                )
-
-                changed = False
-
-                def _repl(m):
-                    nonlocal changed
-                    old_port = int(m.group(2))
-                    # Only remap when this section collides with RAW input socket.
-                    if old_port == int(port):
-                        changed = True
-                        return f"{m.group(1)}{desired_port}{m.group(3)}"
-                    return m.group(0)
-
-                updated = re.sub(section_pattern, _repl, cfg_text, count=1, flags=re.S)
-                return updated, changed
-
-            text, tracked_changed = _remap_section_socket_port(text, 'tracked', int(port) + 2)
-            text, potential_changed = _remap_section_socket_port(text, 'potential', int(port) + 3)
-
-            if tracked_changed or potential_changed:
-                st.caption(
-                    f"Adjusted ODAS socket sinks to avoid RAW port collision (RAW={int(port)}, "
-                    f"tracked={int(port)+2}, potential={int(port)+3})."
-                )
-
             runtime_cfg.write_text(text)
             return str(runtime_cfg)
         except Exception as exc:
@@ -950,11 +940,23 @@ class SimulationRunner:
         duration = metadata.get('duration', 10) + warmup_seconds + tail_seconds
         log_file_path = str(self.runs_dir / f"odas_log_{run_timestamp}.txt")
 
-        # Force simulator transport to socket replay, regardless of cfg capture mode.
+        # Force simulator transport to file replay using the selected raw audio.
+        raw_n_channels = None
+        source_type = str(metadata.get('source_type', '')).strip().lower()
+        if source_type in ('live_session', 'passive_session'):
+            raw_n_channels = 4
+        else:
+            try:
+                raw_n_channels = int(metadata.get('n_channels', 0)) or None
+            except Exception:
+                raw_n_channels = None
+
         odas_cfg = self._prepare_runtime_cfg_for_simulation(
             odas_cfg_source,
             port,
             run_timestamp,
+            raw_file_path,
+            raw_n_channels=raw_n_channels,
             selected_model_dir=selected_model_dir,
         )
 
@@ -968,7 +970,6 @@ class SimulationRunner:
             st.info(f"⚙️ Using SST settings from selected config: **{Path(odas_cfg_source).name}**")
 
         required_paths = [
-            self.socket_emit_script,
             odas_cfg,
             self.odaslive_bin,
         ]
@@ -982,46 +983,6 @@ class SimulationRunner:
                 f"ODASLIVE_BIN: {self.odaslive_bin}"
             )
             st.code("\n".join(missing))
-            return False
-
-        # ── release stale port ───────────────────────────────────────────────
-        tracked_sink_port = int(port) + 2
-        try:
-            subprocess.run(["fuser", "-k", f"{port}/tcp"],
-                           capture_output=True, timeout=5)
-            subprocess.run(["fuser", "-k", f"{tracked_sink_port}/tcp"],
-                           capture_output=True, timeout=5)
-            time.sleep(1)
-        except Exception:
-            pass
-
-        # ── start tracked sink receiver (ODAS tracked socket consumer) ───────
-        tracked_sink_process = self._start_socket_drain_server(tracked_sink_port)
-        time.sleep(0.5)
-        if tracked_sink_process.poll() is not None:
-            st.error(f"Tracked sink receiver failed on port {tracked_sink_port}.")
-            return False
-
-        # ── start socket server ──────────────────────────────────────────────
-        socket_cmd = [
-            "python3",
-            self.socket_emit_script,
-            "--audio", raw_file_path,
-            "--port", str(port)
-        ]
-        socket_process = subprocess.Popen(
-            socket_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(self.odas_root)
-        )
-        time.sleep(2)
-
-        if socket_process.poll() is not None:
-            stdout, stderr = socket_process.communicate()
-            st.error("Socket server failed to start!")
-            st.code(stderr.decode())
-            tracked_sink_process.terminate()
             return False
 
         # ── start ODAS ───────────────────────────────────────────────────────
@@ -1047,8 +1008,6 @@ class SimulationRunner:
                 tail = _lf.read()[-800:]
             st.error("❌ ODAS crashed during initialisation.")
             st.code(tail)
-            socket_process.terminate()
-            tracked_sink_process.terminate()
             return False
 
         # ── persist handles in session state ─────────────────────────────────
@@ -1056,12 +1015,11 @@ class SimulationRunner:
             "running": True,
             "status": "running",
             "log_lines": [
-                f"✅ Tracked sink receiver started on {tracked_sink_port}",
-                "✅ Socket server started",
+                "✅ Raw file input mode enabled (ODAS reads file directly)",
                 "✅ ODAS started"
             ],
-            "socket_process": socket_process,
-            "tracked_sink_process": tracked_sink_process,
+            "socket_process": None,
+            "tracked_sink_process": None,
             "odas_process": odas_process,
             "run_name": run_name,
             "log_file": log_file_path,
@@ -1093,11 +1051,11 @@ class SimulationRunner:
                              odas_cfg: str | None = None,
                              selected_model_dir: str = '',
                              selected_model_name: str = ''):
-        """Runs in a daemon thread — waits for socket to finish, then cleans up.
+        """Runs in a daemon thread and cleans up when ODAS processing completes.
         Updates sim dict in-place so the Streamlit polling loop can display
         progress without touching the processes.
         """
-        socket_process = sim["socket_process"]
+        socket_process = sim.get("socket_process")
         tracked_sink_process = sim.get("tracked_sink_process")
         odas_process   = sim["odas_process"]
         start_time     = sim["start_time"]
@@ -1112,21 +1070,37 @@ class SimulationRunner:
                     expected = duration * 1.25 + 90
                     sim["log_lines"].append(f"⏳ {elapsed:.0f}s elapsed / ~{expected:.0f}s est. (audio: {duration:.0f}s)")
 
-                # Check if socket finished (all audio sent)
-                if socket_process.poll() is not None:
-                    # ODAS processes at ~0.79× real-time, so when the socket
-                    # finishes there may still be tens of seconds of audio left
-                    # in ODAS's processing queue.  Give it up to 90 s to drain.
-                    sim["log_lines"].append("✅ Socket server completed — waiting up to 90 s for ODAS to drain...")
-                    for _ in range(90):
-                        if odas_process.poll() is not None:
+                if socket_process is None:
+                    # File mode: ODAS owns end-of-file and exits by itself.
+                    if odas_process.poll() is not None:
+                        sim["log_lines"].append("✅ ODAS completed file processing.")
+                        break
+                else:
+                    # Socket mode: socket completion indicates all frames sent.
+                    if socket_process.poll() is not None:
+                        socket_rc = socket_process.returncode
+                        if socket_rc != 0:
+                            out, err = socket_process.communicate()
+                            sim["log_lines"].append(f"❌ Socket streamer failed (exit {socket_rc}).")
+                            if err:
+                                sim["log_lines"].append(err.decode(errors='replace')[-240:])
+                            elif out:
+                                sim["log_lines"].append(out.decode(errors='replace')[-240:])
                             break
-                        time.sleep(1)
-                    break
+
+                        # ODAS processes at ~0.79× real-time, so when the socket
+                        # finishes there may still be tens of seconds of audio left
+                        # in ODAS's processing queue.  Give it up to 90 s to drain.
+                        sim["log_lines"].append("✅ Socket server completed — waiting up to 90 s for ODAS to drain...")
+                        for _ in range(90):
+                            if odas_process.poll() is not None:
+                                break
+                            time.sleep(1)
+                        break
 
                 # Hard timeout: the socket streams at 10 ms/frame so it takes
                 # ~1.25× the audio duration.  Add a generous margin on top.
-                if elapsed > duration * 2 + 60:
+                if elapsed > duration * 1.35 + 120:
                     sim["log_lines"].append("⏱️ Hard timeout reached")
                     break
 
@@ -1200,7 +1174,7 @@ class SimulationRunner:
             'session_live_file': session_live_file,
             'port': 10000,
             # Keep both paths: the config the user selected and the run-local
-            # runtime copy patched for socket replay.
+            # runtime copy patched for direct file replay.
             'odas_config': selected_odas_cfg,
             'selected_odas_config': selected_odas_cfg,
             'selected_odas_config_name': Path(selected_odas_cfg).name if selected_odas_cfg else '',
