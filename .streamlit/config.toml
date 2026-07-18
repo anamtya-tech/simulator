@@ -1,5 +1,9 @@
 [server]
 maxUploadSize = 10000
+address = "0.0.0.0"
+headless = true
+enableCORS = false
+enableXsrfProtection = false
 
 [client]
 showErrorDetails = true

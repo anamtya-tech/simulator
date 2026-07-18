@@ -173,118 +173,329 @@ class ResultAnalyzer:
 
         newest = max(candidates, key=lambda p: p.stat().st_mtime)
         return str(newest.resolve())
+
+    def _infer_run_source_type(self, run_data):
+        """Infer run source type for analyzer mode filtering."""
+        scene_meta = run_data.get('scene_metadata', {}) if isinstance(run_data, dict) else {}
+        source_type = str(scene_meta.get('source_type', '')).strip().lower()
+        if source_type:
+            return source_type
+
+        if scene_meta.get('ground_truth_source'):
+            return 'mic_array_imported'
+
+        run_id = str(run_data.get('run_id', run_data.get('run_name', ''))).lower()
+        if 'passive' in run_id:
+            return 'passive_session'
+        if 'live' in run_id:
+            return 'live_session'
+        return 'synthetic_render'
+
+    def _load_run_entries(self):
+        """Load run JSON files with inferred source type for filtering."""
+        entries = []
+        run_files = sorted(self.runs_dir.glob("*.json"), key=os.path.getmtime, reverse=True)
+        for run_file in run_files:
+            try:
+                with open(run_file, 'r') as f:
+                    data = json.load(f)
+                entries.append({
+                    'path': run_file,
+                    'data': data,
+                    'source_type': self._infer_run_source_type(data),
+                })
+            except Exception:
+                continue
+        return entries
+
+    def _render_calibration_overview(self, analysis_data):
+        """Calibration view: GT timeline and ODAS match quality per GT event."""
+        st.markdown("### 🎯 ODAS Calibration Overview")
+
+        scene = analysis_data.get('scene', {}) or {}
+        gt_sources = scene.get('directional_sources', []) or []
+        gt_matches = [
+            m for m in (analysis_data.get('matches', []) or [])
+            if m.get('match_type') == 'ground_truth'
+        ]
+
+        if not gt_sources:
+            st.info("No GT directional sources available for calibration summary.")
+            return
+
+        def _az_el_deg(position):
+            if not isinstance(position, (list, tuple)) or len(position) < 3:
+                return None, None
+            x, y, z = float(position[0]), float(position[1]), float(position[2])
+            az = float(np.degrees(np.arctan2(y, x)))
+            el = float(np.degrees(np.arctan2(z, np.sqrt(x * x + y * y))))
+            return az, el
+
+        def _extract_match_pos(m):
+            pos = m.get('position')
+            if isinstance(pos, (list, tuple)) and len(pos) >= 3:
+                return [float(pos[0]), float(pos[1]), float(pos[2])]
+            det = m.get('detection', {}) if isinstance(m.get('detection'), dict) else {}
+            return [
+                float(det.get('x', m.get('x', 0.0))),
+                float(det.get('y', m.get('y', 0.0))),
+                float(det.get('z', m.get('z', 0.0))),
+            ]
+
+        rows = []
+        matched_count = 0
+        gt_line_x = []
+        gt_line_y = []
+        gt_hover = []
+        det_x = []
+        det_y = []
+        det_hover = []
+
+        for idx, src in enumerate(gt_sources, 1):
+            label = str(src.get('label', 'unknown'))
+            start = float(src.get('start_time', 0.0))
+            end = float(src.get('end_time', start))
+            gt_pos = src.get('position', [0.0, 0.0, 1.0])
+            gx = float(gt_pos[0]) if len(gt_pos) > 0 else 0.0
+            gy = float(gt_pos[1]) if len(gt_pos) > 1 else 0.0
+            gz = float(gt_pos[2]) if len(gt_pos) > 2 else 1.0
+            az, el = _az_el_deg([gx, gy, gz])
+
+            candidates = []
+            for m in gt_matches:
+                if str(m.get('source_label', m.get('label', ''))) != label:
+                    continue
+                gs = float(m.get('gt_start', start))
+                ge = float(m.get('gt_end', end))
+                if abs(gs - start) <= 0.6 and abs(ge - end) <= 0.6:
+                    candidates.append(m)
+
+            if not candidates:
+                for m in gt_matches:
+                    if str(m.get('source_label', m.get('label', ''))) != label:
+                        continue
+                    ts = float(m.get('timestamp', -1.0))
+                    if start - 0.5 <= ts <= end + 5.0:
+                        candidates.append(m)
+
+            best = None
+            if candidates:
+                matched_count += 1
+                best = min(
+                    candidates,
+                    key=lambda m: (
+                        float(m.get('angular_error', 9999) if m.get('angular_error') is not None else 9999),
+                        abs(float(m.get('timestamp', start)) - start),
+                    ),
+                )
+
+            detected_at = float(best.get('timestamp', 0.0)) if best else None
+            start_offset = (detected_at - start) if detected_at is not None else None
+            angular_error = float(best.get('angular_error')) if best and best.get('angular_error') is not None else None
+            mx, my, mz = _extract_match_pos(best) if best else (None, None, None)
+
+            gt_line_x.extend([start, end, None])
+            gt_line_y.extend([idx, idx, None])
+            gt_hover.extend([
+                f"GT#{idx} {label}<br>t={start:.3f}-{end:.3f}s<br>xyz=({gx:.3f},{gy:.3f},{gz:.3f})<br>az/el=({(az if az is not None else 0):.2f},{(el if el is not None else 0):.2f})",
+                f"GT#{idx} {label}<br>t={start:.3f}-{end:.3f}s<br>xyz=({gx:.3f},{gy:.3f},{gz:.3f})<br>az/el=({(az if az is not None else 0):.2f},{(el if el is not None else 0):.2f})",
+                None,
+            ])
+
+            if detected_at is not None:
+                det_x.append(detected_at)
+                det_y.append(idx)
+                det_hover.append(
+                    f"GT#{idx} {label}<br>detected={detected_at:.3f}s<br>offset={start_offset:.3f}s<br>det xyz=({mx:.3f},{my:.3f},{mz:.3f})<br>ang err={angular_error:.3f}°"
+                )
+
+            rows.append({
+                'GT Event': idx,
+                'Label': label,
+                'GT Start (s)': round(start, 3),
+                'GT End (s)': round(end, 3),
+                'GT X': round(gx, 4),
+                'GT Y': round(gy, 4),
+                'GT Z': round(gz, 4),
+                'GT Azimuth (deg)': round(az, 2) if az is not None else None,
+                'GT Elevation (deg)': round(el, 2) if el is not None else None,
+                'Matched': 'Yes' if best is not None else 'No',
+                'Detected At (s)': round(detected_at, 3) if detected_at is not None else None,
+                'Start Offset (s)': round(start_offset, 3) if start_offset is not None else None,
+                'Detected X': round(mx, 4) if mx is not None else None,
+                'Detected Y': round(my, 4) if my is not None else None,
+                'Detected Z': round(mz, 4) if mz is not None else None,
+                'Angular Error (deg)': round(angular_error, 3) if angular_error is not None else None,
+            })
+
+        total_gt = len(gt_sources)
+        missed = max(total_gt - matched_count, 0)
+        match_rate = (matched_count / total_gt * 100.0) if total_gt else 0.0
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("GT Events", total_gt)
+        with c2:
+            st.metric("Matched Events", matched_count)
+        with c3:
+            st.metric("Missed Events", missed, help=f"Match rate: {match_rate:.1f}%")
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=gt_line_x,
+            y=gt_line_y,
+            mode='lines',
+            line=dict(color='#1f77b4', width=4),
+            name='GT event window',
+            hovertext=gt_hover,
+            hoverinfo='text',
+        ))
+        if det_x:
+            fig.add_trace(go.Scatter(
+                x=det_x,
+                y=det_y,
+                mode='markers',
+                marker=dict(color='#16a34a', size=10, symbol='diamond'),
+                name='Matched ODAS detection',
+                hovertext=det_hover,
+                hoverinfo='text',
+            ))
+        fig.update_layout(
+            title='GT Events vs ODAS Matched Detections (Timeline)',
+            xaxis_title='Timestamp (s)',
+            yaxis_title='GT Event Index',
+            yaxis=dict(dtick=1),
+            height=460,
+            margin=dict(l=60, r=40, t=60, b=50),
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0),
+        )
+        st.plotly_chart(fig, width='stretch')
+
+        st.markdown("#### Per-GT Event Match Details")
+        st.caption("Start Offset (s): negative = ODAS detected early, positive = delayed detection from GT start.")
+        st.dataframe(pd.DataFrame(rows), width='stretch')
     
     def render(self):
         """Render the analyzer interface"""
         st.subheader("Results Analysis")
         st.markdown("Analyze ODAS output and generate training datasets with interactive visualization")
         st.info("🎯 Using YAMNet classifications from ODAS")
-        
-        # Dataset curation settings
-        with st.expander("💾 Dataset Curation Settings", expanded=False):
-            col1, col2 = st.columns(2)
-            with col1:
-                save_to_dataset = st.checkbox(
-                    "Save to dataset",
-                    value=True,
-                    help="Curate GT-matched detections into the YAMNet training dataset"
-                )
-                ambient_only_mode = st.checkbox(
-                    "🌿 Label ALL peaks as background (ambient-only run)",
-                    value=False,
-                    help=(
-                        "Enable this when the scene has ZERO directional sources "
-                        "(ambient-only render, e.g. EXP-B4 hard negatives). "
-                        "Every ODAS detection will be saved as the 'background' class "
-                        "regardless of GT or YAMNet prediction. "
-                        "This teaches the model to reject ambient ghost tracks."
-                    )
-                )
-            
-            with col2:
-                # YAMNet classification confidence threshold for the curator.
-                # Samples are saved when YAMNet confidence is *below* this value
-                # (wrong / unsure = needs training). Correct high-confidence
-                # detections are skipped — they don't need more training data.
-                cur_criteria = self.yamnet_curator.config.get('curation_criteria', {})
-                yamnet_conf_threshold = st.slider(
-                    "YAMNet confidence threshold",
-                    min_value=0.0, max_value=1.0,
-                    value=float(cur_criteria.get('confidence_threshold', 0.75)),
-                    step=0.05,
-                    help=(
-                        "Save sample when YAMNet confidence is **below** this value. "
-                        "Lower = only save very wrong predictions. "
-                        "Higher = save anything YAMNet isn't fully sure about. "
-                        "Default 0.75 (save if < 75% confident)."
-                    )
-                )
-                # Persist change to curator config immediately
-                if yamnet_conf_threshold != cur_criteria.get('confidence_threshold', 0.75):
-                    self.yamnet_curator.config['curation_criteria']['confidence_threshold'] = yamnet_conf_threshold
-                    self.yamnet_curator._save_config()
-
-            st.markdown("**🏷️ Label Strategy**")
-            LABEL_STRATEGIES = [
-                "ODAS event voting",
-                "Python YAMNet (re-classify .bin)",
-                "Ground truth only",
-                "Fine-tuned model",
-            ]
-            label_strategy = st.selectbox(
-                "Label source",
-                LABEL_STRATEGIES,
-                index=0,
-                help=(
-                    "**ODAS event voting** — use top-K × N-hop vote winner from firmware (default).\n\n"
-                    "**Python YAMNet (re-classify .bin)** — ignore firmware labels, re-run Python YAMNet "
-                    "on the saved .bin sidecar patches. Useful after updating the model without re-running ODAS.\n\n"
-                    "**Ground truth only** — label = scene ground truth from spatial alignment. "
-                    "Ignores YAMNet entirely; unmatched detections are skipped.\n\n"
-                    "**Fine-tuned model** — re-classify .bin patches using the active fine-tuned TFLite model "
-                    "set in the 🧠 Fine-Tune YAMNet page. Same mel pipeline as standard YAMNet, "
-                    "outputs your custom class labels instead of 521 AudioSet classes."
-                )
-            )
-            st.session_state['label_strategy'] = label_strategy
-        
-        # Load run selection
-        run_files = sorted(
-            self.runs_dir.glob("*.json"),
-            key=os.path.getmtime,
-            reverse=True
-        )
-        
-        if not run_files:
-            st.warning("No simulation runs found. Please run a simulation first.")
-            return
-        
-        selected_run_file = st.selectbox(
-            "Select Run",
-            run_files,
-            format_func=lambda x: x.stem
-        )
-
-        use_mic_array_imports = st.toggle(
-            "Use Mic Array Imports (optional)",
-            value=False,
+        analysis_mode = st.radio(
+            "Analysis Type",
+            ["Synthetic Run", "Mic Array Audio", "ODAS Calibration"],
+            horizontal=True,
+            key="analysis_mode_selector",
             help=(
-                "Enable only when analyzing external Live/Passive mic-array sessions. "
-                "For normal rendered runs, keep this off."
+                "Synthetic Run: existing YAMNet training workflow on rendered scenes. "
+                "Mic Array Audio: analyze imported Live/Passive ZIP JSON directly. "
+                "ODAS Calibration: evaluate ODAS simulator outputs on Live/Passive runs against GT events."
             ),
-            key="use_mic_array_imports",
         )
+        
+        save_to_dataset = analysis_mode == "Synthetic Run"
+        ambient_only_mode = False
+        cur_criteria = self.yamnet_curator.config.get('curation_criteria', {})
+        yamnet_conf_threshold = float(cur_criteria.get('confidence_threshold', 0.75))
+        st.session_state['label_strategy'] = 'ODAS event voting'
 
-        if use_mic_array_imports:
+        # Dataset curation settings (synthetic workflow only)
+        if analysis_mode == "Synthetic Run":
+            with st.expander("💾 Dataset Curation Settings", expanded=False):
+                col1, col2 = st.columns(2)
+                with col1:
+                    save_to_dataset = st.checkbox(
+                        "Save to dataset",
+                        value=True,
+                        help="Curate GT-matched detections into the YAMNet training dataset"
+                    )
+                    ambient_only_mode = st.checkbox(
+                        "🌿 Label ALL peaks as background (ambient-only run)",
+                        value=False,
+                        help=(
+                            "Enable this when the scene has ZERO directional sources "
+                            "(ambient-only render, e.g. EXP-B4 hard negatives). "
+                            "Every ODAS detection will be saved as the 'background' class "
+                            "regardless of GT or YAMNet prediction. "
+                            "This teaches the model to reject ambient ghost tracks."
+                        )
+                    )
+
+                with col2:
+                    yamnet_conf_threshold = st.slider(
+                        "YAMNet confidence threshold",
+                        min_value=0.0, max_value=1.0,
+                        value=float(cur_criteria.get('confidence_threshold', 0.75)),
+                        step=0.05,
+                        help=(
+                            "Save sample when YAMNet confidence is **below** this value. "
+                            "Lower = only save very wrong predictions. "
+                            "Higher = save anything YAMNet isn't fully sure about. "
+                            "Default 0.75 (save if < 75% confident)."
+                        )
+                    )
+                    if yamnet_conf_threshold != cur_criteria.get('confidence_threshold', 0.75):
+                        self.yamnet_curator.config['curation_criteria']['confidence_threshold'] = yamnet_conf_threshold
+                        self.yamnet_curator._save_config()
+
+                st.markdown("**🏷️ Label Strategy**")
+                LABEL_STRATEGIES = [
+                    "ODAS event voting",
+                    "Python YAMNet (re-classify .bin)",
+                    "Ground truth only",
+                    "Fine-tuned model",
+                ]
+                label_strategy = st.selectbox(
+                    "Label source",
+                    LABEL_STRATEGIES,
+                    index=0,
+                    help=(
+                        "**ODAS event voting** — use top-K × N-hop vote winner from firmware (default).\n\n"
+                        "**Python YAMNet (re-classify .bin)** — ignore firmware labels, re-run Python YAMNet "
+                        "on the saved .bin sidecar patches. Useful after updating the model without re-running ODAS.\n\n"
+                        "**Ground truth only** — label = scene ground truth from spatial alignment. "
+                        "Ignores YAMNet entirely; unmatched detections are skipped.\n\n"
+                        "**Fine-tuned model** — re-classify .bin patches using the active fine-tuned TFLite model "
+                        "set in the 🧠 Fine-Tune YAMNet page. Same mel pipeline as standard YAMNet, "
+                        "outputs your custom class labels instead of 521 AudioSet classes."
+                    )
+                )
+                st.session_state['label_strategy'] = label_strategy
+        
+        run_entries = self._load_run_entries()
+        selected_run_file = None
+        run_data = {}
+
+        if analysis_mode == "Mic Array Audio":
+            st.caption("Mic Array mode uses Live/Passive ZIP JSON directly.")
             mic_array_context = self._render_mic_array_inputs()
         else:
             mic_array_context = {'active_session': None}
+            if analysis_mode == "Synthetic Run":
+                candidates = [e for e in run_entries if e.get('source_type') == 'synthetic_render']
+                run_label = "Select Synthetic Run"
+            else:
+                candidates = [
+                    e for e in run_entries
+                    if e.get('source_type') in ('live_session', 'passive_session', 'mic_array_imported')
+                ]
+                run_label = "Select Live/Passive ODAS Simulator Run"
+
+            if not candidates:
+                if analysis_mode == "Synthetic Run":
+                    st.warning("No synthetic simulation runs found.")
+                else:
+                    st.warning("No Live/Passive ODAS simulator runs found.")
+                return
+
+            selected_entry = st.selectbox(
+                run_label,
+                candidates,
+                format_func=lambda e: e['path'].stem,
+            )
+            selected_run_file = selected_entry['path']
+            run_data = selected_entry['data']
         
-        # Load run data
-        with open(selected_run_file, 'r') as f:
-            run_data = json.load(f)
-        
-        run_id = run_data.get('run_id', run_data.get('run_name', selected_run_file.stem))
+        run_stem = selected_run_file.stem if selected_run_file is not None else 'mic_array_session'
+        run_id = run_data.get('run_id', run_data.get('run_name', run_stem))
         active_mic_session = mic_array_context.get('active_session')
         analysis_id = mic_array_context.get('analysis_id') if active_mic_session else run_id
         selected_cfg_name, selected_cfg_path, selected_model_name, _ = self._extract_runtime_selection(run_data)
@@ -319,8 +530,8 @@ class ResultAnalyzer:
                 st.caption(f"Model used: {selected_model_name}")
 
         # Show experiment provenance if tagged
-        exp_tag   = run_data.get('experiment_tag', '')
-        odas_preset = run_data.get('odas_preset', '')
+        exp_tag = run_data.get('experiment_tag', '') if run_data else ''
+        odas_preset = run_data.get('odas_preset', '') if run_data else ''
         if exp_tag or odas_preset:
             tag_parts = []
             if exp_tag:    tag_parts.append(f"🧪 `{exp_tag}`")
@@ -418,8 +629,8 @@ class ResultAnalyzer:
                     # Create dataset CSV
                     self._create_dataset(results, analysis_id, save_unmatched)
 
-                    # Save to YAMNet training dataset if enabled
-                    if save_to_dataset:
+                    # Save to YAMNet training dataset only for synthetic mode.
+                    if analysis_mode == "Synthetic Run" and save_to_dataset:
                         try:
                             # Apply the UI threshold before curating
                             self.yamnet_curator.config['curation_criteria']['confidence_threshold'] = yamnet_conf_threshold
@@ -469,6 +680,9 @@ class ResultAnalyzer:
 
             with res_tab:
                 self._display_summary(analysis_data)
+
+                if analysis_mode == "ODAS Calibration":
+                    self._render_calibration_overview(analysis_data)
 
                 is_mic_array_report = bool((analysis_data.get('run_metadata') or {}).get('mic_array'))
 
@@ -3199,7 +3413,9 @@ class ResultAnalyzer:
                 wallclock_points_iso = []
                 wallclock_axis_for_classification = False
 
-        has_ground_truth = len(gt_matches) > 0 and total_gt > 0
+        # GT availability should be based on provided scene sources, not on whether
+        # any detections matched them (zero matches is still a valid GT run).
+        has_ground_truth = total_gt > 0
 
         # ── Helpers ───────────────────────────────────────────────────────────
         def pill(val, good, mid, fmt='%d%%'):
