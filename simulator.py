@@ -591,15 +591,31 @@ class SimulationRunner:
         approx_duration = float(detections[-1]['timestamp']) if detections else 0.0
         return scene_payload, approx_duration
 
-    def _estimate_raw_duration_seconds(self, raw_path):
-        """Estimate session duration from raw size (4ch/16kHz/int16 default)."""
+    def _estimate_raw_duration_seconds(self, raw_path, n_channels: int = 4):
+        """Estimate session duration from raw size using the provided channel count."""
         try:
             byte_count = Path(raw_path).stat().st_size
             sample_count = byte_count / 2.0  # int16
-            frames = sample_count / 4.0      # 4 channels
+            frames = sample_count / max(int(n_channels or 4), 1)
             return max(0.0, frames / 16000.0)
         except Exception:
             return 0.0
+
+    def _extract_n_channels_from_cfg(self, cfg_path: str):
+        """Extract raw nChannels from an ODAS config file when available."""
+        try:
+            text = Path(cfg_path).read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            return None
+
+        match = re.search(r'(?m)^\s*nChannels\s*=\s*(\d+)\s*;', text)
+        if not match:
+            return None
+
+        try:
+            return int(match.group(1))
+        except Exception:
+            return None
 
     def _render_mic_array_inputs(self):
         """Render Live/Passive Mic Array selectors for simulator input mode."""
@@ -649,6 +665,10 @@ class SimulationRunner:
         discovered = self._extract_mic_array_source(active_session)
         session_name = active_session.stem if active_session.suffix.lower() == '.zip' else active_session.name
 
+        cfg_n_channels = None
+        if discovered.get('cfg_path'):
+            cfg_n_channels = self._extract_n_channels_from_cfg(discovered['cfg_path'])
+
         tracks_path = discovered.get('tracks_path')
         gt_scene_file = ''
         duration_from_tracks = 0.0
@@ -668,7 +688,10 @@ class SimulationRunner:
 
         duration_seconds = duration_from_tracks
         if not duration_seconds and discovered.get('raw_path'):
-            duration_seconds = self._estimate_raw_duration_seconds(discovered['raw_path'])
+            duration_seconds = self._estimate_raw_duration_seconds(
+                discovered['raw_path'],
+                cfg_n_channels or 4,
+            )
 
         return {
             'active_session': active_session,
@@ -677,6 +700,7 @@ class SimulationRunner:
             'tracks_path': discovered.get('tracks_path'),
             'cfg_path': discovered.get('cfg_path'),
             'cfg_candidates': discovered.get('cfg_candidates', []),
+            'n_channels': cfg_n_channels,
             'latlong_path': discovered.get('latlong_path'),
             'notes_path': discovered.get('notes_path'),
             'raw_path': str(discovered.get('raw_path')) if discovered.get('raw_path') else '',
@@ -841,7 +865,8 @@ class SimulationRunner:
                 )
                 return cfg_text[:m.start(2)] + body + cfg_text[m.end(2):]
 
-            # Keep classifier output for Analyzer, but disable other ODAS sinks for simulator runs.
+            # Keep the SST JSON stream available for post-run comparison while
+            # suppressing the SSL potential stream during simulator file replay.
             text = _set_section_format(text, 'potential', 'undefined')
             text = re.sub(
                 r'(potential\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
@@ -851,10 +876,13 @@ class SimulationRunner:
                 flags=re.S,
             )
 
-            text = _set_section_format(text, 'tracked', 'undefined')
+            # SST output stays as JSON so ODAS can emit the live session stream.
+            # Terminal output is captured in the per-run log file and the
+            # classifier log directory is redirected to the simulator workspace.
+            text = _set_section_format(text, 'tracked', 'json')
             text = re.sub(
                 r'(tracked\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
-                '\\1\n            type = "blackhole";\n        \\3',
+                '\\1\n             type = "terminal";\n        \\3',
                 text,
                 count=1,
                 flags=re.S,
@@ -943,13 +971,19 @@ class SimulationRunner:
         # Force simulator transport to file replay using the selected raw audio.
         raw_n_channels = None
         source_type = str(metadata.get('source_type', '')).strip().lower()
-        if source_type in ('live_session', 'passive_session'):
-            raw_n_channels = 4
-        else:
-            try:
-                raw_n_channels = int(metadata.get('n_channels', 0)) or None
-            except Exception:
-                raw_n_channels = None
+        try:
+            raw_n_channels = int(metadata.get('n_channels', 0)) or None
+        except Exception:
+            raw_n_channels = None
+
+        # Imported Mic Array sessions are frequently 6-channel raw captures.
+        # Preserve the actual channel count from the session config instead of
+        # forcing 4 channels, which can desync ODAS file replay and suppress
+        # classifier output artifacts.
+        if raw_n_channels is None and source_type in ('live_session', 'passive_session'):
+            cfg_path = metadata.get('cfg_path', '')
+            if cfg_path:
+                raw_n_channels = self._extract_n_channels_from_cfg(cfg_path)
 
         odas_cfg = self._prepare_runtime_cfg_for_simulation(
             odas_cfg_source,
