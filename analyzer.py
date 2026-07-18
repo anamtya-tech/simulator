@@ -638,13 +638,17 @@ class ResultAnalyzer:
             session_root = children[0] if len(children) == 1 else extract_dir
 
         tracks_files = sorted(session_root.rglob('*_tracks.json'))
+        json_files = sorted(session_root.rglob('*.json'))
         cfg_files = sorted(session_root.rglob('*.cfg'))
         latlong_files = sorted(session_root.rglob('*_latlong.txt'))
         txt_files = sorted(session_root.rglob('*.txt'))
 
+        primary_json = tracks_files[0] if tracks_files else (json_files[0] if json_files else None)
+
         return {
             'session_root': session_root,
             'tracks_path': tracks_files[0] if tracks_files else None,
+            'primary_json_path': primary_json,
             'cfg_path': cfg_files[0] if cfg_files else None,
             'latlong_path': latlong_files[0] if latlong_files else None,
             'notes_path': next((p for p in txt_files if p not in latlong_files), None),
@@ -748,6 +752,89 @@ class ResultAnalyzer:
                 })
         return detections
 
+    def _build_ground_truth_scene_from_tracks(self, tracks_path, scene_name):
+        """Build a synthetic-style directional_sources scene from concatenated tracks JSON."""
+        detections = self._parse_mic_array_tracks(tracks_path)
+        if not detections:
+            return None
+
+        grouped = {}
+        for det in detections:
+            class_name = det.get('class_name') or 'unclassified'
+            track_id = int(det.get('track_id', 0))
+            grouped.setdefault((class_name, track_id), []).append(det)
+
+        directional_sources = []
+        merge_gap_s = 0.7
+        min_event_s = 0.08
+
+        for (class_name, track_id), rows in grouped.items():
+            rows = sorted(rows, key=lambda d: float(d.get('timestamp', 0.0)))
+            cur = None
+
+            for row in rows:
+                ts = float(row.get('timestamp', 0.0))
+                if cur is None:
+                    cur = {
+                        'start': ts,
+                        'end': ts,
+                        'sum_x': float(row.get('x', 0.0)),
+                        'sum_y': float(row.get('y', 0.0)),
+                        'sum_z': float(row.get('z', 0.0)),
+                        'count': 1,
+                    }
+                    continue
+
+                if ts - cur['end'] <= merge_gap_s:
+                    cur['end'] = ts
+                    cur['sum_x'] += float(row.get('x', 0.0))
+                    cur['sum_y'] += float(row.get('y', 0.0))
+                    cur['sum_z'] += float(row.get('z', 0.0))
+                    cur['count'] += 1
+                else:
+                    start = float(cur['start'])
+                    end = float(max(cur['end'], start + min_event_s))
+                    directional_sources.append({
+                        'label': class_name,
+                        'start_time': start,
+                        'end_time': end,
+                        'position': [
+                            cur['sum_x'] / max(1, cur['count']),
+                            cur['sum_y'] / max(1, cur['count']),
+                            cur['sum_z'] / max(1, cur['count']),
+                        ],
+                        'track_id': track_id,
+                    })
+                    cur = {
+                        'start': ts,
+                        'end': ts,
+                        'sum_x': float(row.get('x', 0.0)),
+                        'sum_y': float(row.get('y', 0.0)),
+                        'sum_z': float(row.get('z', 0.0)),
+                        'count': 1,
+                    }
+
+            if cur is not None:
+                start = float(cur['start'])
+                end = float(max(cur['end'], start + min_event_s))
+                directional_sources.append({
+                    'label': class_name,
+                    'start_time': start,
+                    'end_time': end,
+                    'position': [
+                        cur['sum_x'] / max(1, cur['count']),
+                        cur['sum_y'] / max(1, cur['count']),
+                        cur['sum_z'] / max(1, cur['count']),
+                    ],
+                    'track_id': track_id,
+                })
+
+        return {
+            'scene_name': scene_name,
+            'directional_sources': directional_sources,
+            'source': 'mic_array_tracks_default_ground_truth',
+        }
+
     def _build_unmatched_records(self, detections):
         matches = []
         for det in detections:
@@ -802,6 +889,7 @@ class ResultAnalyzer:
                 'source_type': mic_array_context.get('session_type'),
                 'source_path': str(mic_array_context.get('active_session')),
                 'tracks_path': str(tracks_path),
+                'ground_truth_source': str(mic_array_context.get('primary_json_path', '')),
                 'config_model_path': mic_array_context.get('config_model_path', ''),
                 'selected_model_dir': mic_array_context.get('selected_model_dir', ''),
                 'selected_model_name': mic_array_context.get('selected_model_name', ''),
@@ -866,6 +954,7 @@ class ResultAnalyzer:
             return {'active_session': None}
 
         session_type = 'live_session' if live_selection else 'passive_session'
+        session_name = active_session.stem if active_session.suffix.lower() == '.zip' else active_session.name
         discovered = self._extract_mic_array_source(active_session)
         cfg_text = ''
         if discovered.get('cfg_path') and Path(discovered['cfg_path']).exists():
@@ -874,6 +963,7 @@ class ResultAnalyzer:
         config_model_name = Path(config_model_path).name if config_model_path else ''
 
         st.caption(f"Tracks JSON: {discovered.get('tracks_path') or 'Not found'}")
+        st.caption(f"Ground-truth JSON: {discovered.get('primary_json_path') or 'Not found'}")
         st.caption(f"Config file: {discovered.get('cfg_path') or 'Not found'}")
 
         gt_upload = st.file_uploader(
@@ -884,6 +974,24 @@ class ResultAnalyzer:
         )
         ground_truth_scene = None
         ground_truth_name = ''
+
+        # Default GT: parse session JSON from zip/folder (tracks JSON is concatenated JSON objects).
+        primary_json_path = discovered.get('primary_json_path')
+        if primary_json_path and Path(primary_json_path).exists():
+            try:
+                if str(primary_json_path).endswith('_tracks.json'):
+                    ground_truth_scene = self._build_ground_truth_scene_from_tracks(primary_json_path, session_name=session_name)
+                    ground_truth_name = Path(primary_json_path).name
+                    if ground_truth_scene and ground_truth_scene.get('directional_sources'):
+                        st.caption(f"Default ground truth loaded from session JSON: {ground_truth_name}")
+                else:
+                    gt_raw = json.loads(Path(primary_json_path).read_text(encoding='utf-8', errors='replace'))
+                    ground_truth_scene = self._coerce_ground_truth_scene(gt_raw, scene_name=Path(primary_json_path).stem)
+                    ground_truth_name = Path(primary_json_path).name
+                    st.caption(f"Default ground truth loaded from session JSON: {ground_truth_name}")
+            except Exception as exc:
+                st.warning(f"Could not parse default session ground truth JSON: {exc}")
+
         if gt_upload is not None:
             try:
                 ground_truth_name = gt_upload.name
@@ -929,7 +1037,6 @@ class ResultAnalyzer:
         st.session_state['odas_model_override_dir'] = str(selected_model_dir)
         st.caption(f"Reporter TFLite path: {selected_model_dir / 'yamnet_core.tflite'}")
 
-        session_name = active_session.stem if active_session.suffix.lower() == '.zip' else active_session.name
         analysis_id = f"mic_{session_type}_{session_name}"
         return {
             'active_session': active_session,
@@ -937,6 +1044,7 @@ class ResultAnalyzer:
             'session_name': session_name,
             'analysis_id': analysis_id,
             'tracks_path': discovered.get('tracks_path'),
+            'primary_json_path': discovered.get('primary_json_path'),
             'cfg_path': discovered.get('cfg_path'),
             'latlong_path': discovered.get('latlong_path'),
             'notes_path': discovered.get('notes_path'),
@@ -1040,6 +1148,15 @@ class ResultAnalyzer:
             stats = self._calculate_statistics(matches, unmatched, scene_data)
             
             # Compile results
+            source_type = (
+                run_data.get('scene_metadata', {}).get('source_type')
+                or ('mic_array_imported' if run_data.get('scene_metadata', {}).get('ground_truth_source') else 'synthetic_render')
+            )
+            gt_source = (
+                run_data.get('scene_metadata', {}).get('ground_truth_source')
+                or run_data.get('scene_file', '')
+            )
+
             results = {
                 'run_id': run_data.get('run_id', run_data.get('run_name', 'unknown')),
                 'render_id': run_data.get('render_id', 'N/A'),
@@ -1047,7 +1164,10 @@ class ResultAnalyzer:
                 'timestamp': datetime.now().isoformat(),
                 'config': {
                     'angular_threshold': angle_threshold,
-                    'save_unmatched': save_unmatched
+                    'save_unmatched': save_unmatched,
+                    'source_type': source_type,
+                    'source_path': run_data.get('scene_metadata', {}).get('active_session', ''),
+                    'ground_truth_source': gt_source,
                 },
                 'summary': stats['summary'],
                 'by_source': stats['by_source'],
@@ -2586,6 +2706,50 @@ class ResultAnalyzer:
         
         st.success(f"📊 Generated interactive report: {report_path.name}")
 
+    def _build_experiment_summary(self, results):
+        """Return concise strings describing experiment type and GT provenance."""
+        run_meta = results.get('run_metadata', {}) if isinstance(results, dict) else {}
+        cfg = results.get('config', {}) if isinstance(results, dict) else {}
+        scene = results.get('scene', {}) if isinstance(results, dict) else {}
+
+        source_type = str(cfg.get('source_type') or '').strip().lower()
+        gt_source = str(
+            cfg.get('ground_truth_source')
+            or cfg.get('ground_truth_name')
+            or run_meta.get('scene_file')
+            or ''
+        ).strip()
+
+        is_mic_import = (
+            bool(run_meta.get('mic_array'))
+            or source_type in ('live_session', 'passive_session', 'mic_array_imported')
+        )
+
+        if is_mic_import:
+            if 'passive' in source_type:
+                experiment_summary = 'Passive audio session'
+            elif 'live' in source_type:
+                experiment_summary = 'Live audio session'
+            else:
+                experiment_summary = 'Mic-array imported session'
+
+            if gt_source:
+                gt_summary = f"Ground truth from session JSON ({Path(gt_source).name}), parsed as concatenated JSON objects."
+            elif scene.get('directional_sources'):
+                gt_summary = 'Ground truth reconstructed from session tracks JSON parsed as concatenated JSON objects.'
+            else:
+                gt_summary = 'Ground truth not provided.'
+            return experiment_summary, gt_summary
+
+        experiment_summary = 'Synthetic rendered audio experiment'
+        if gt_source:
+            gt_summary = f"Ground truth from scene configuration ({Path(gt_source).name})."
+        elif scene.get('directional_sources'):
+            gt_summary = 'Ground truth from loaded scene configuration.'
+        else:
+            gt_summary = 'Ground truth not provided.'
+        return experiment_summary, gt_summary
+
     def _create_mic_array_report(self, results):
                 """Build a custom, compact report for imported mic-array sessions."""
                 import html as _html
@@ -2603,6 +2767,7 @@ class ResultAnalyzer:
                 latlong_path = str(run_meta.get('latlong_path', ''))
                 notes_path = str(run_meta.get('notes_path', ''))
                 model_name = str(config.get('selected_model_name', 'N/A') or 'N/A')
+                experiment_summary, gt_summary = self._build_experiment_summary(results)
 
                 # Build per-detection records from both in-memory and flattened forms.
                 det_rows = []
@@ -2941,6 +3106,17 @@ class ResultAnalyzer:
         except Exception:
             pass
 
+        # Fallback for imported/live/passive runs that do not have render sidecars.
+        if total_gt == 0:
+            for src in (results.get('scene', {}) or {}).get('directional_sources', []) or []:
+                lbl = src.get('label', '?')
+                total_gt_by_label[lbl] = total_gt_by_label.get(lbl, 0) + 1
+            total_gt = sum(total_gt_by_label.values())
+
+        experiment_summary, gt_summary = self._build_experiment_summary(results)
+        experiment_summary = _html.escape(experiment_summary)
+        gt_summary = _html.escape(gt_summary)
+
         # ── GT event-level detection rate ─────────────────────────────────────
         det_windows = defaultdict(set)
         for m in gt_matches:
@@ -3121,7 +3297,9 @@ class ResultAnalyzer:
       <b>Duration:</b> {scene_duration:.0f} s &nbsp;·&nbsp;
             <b>Threshold:</b> {cfg.get('angular_threshold','?')}°<br>
             <b>Config:</b> {selected_cfg_name} &nbsp;·&nbsp;
-            <b>Model:</b> {selected_model_name}
+                        <b>Model:</b> {selected_model_name}<br>
+                        <b>Experiment:</b> {experiment_summary} &nbsp;·&nbsp;
+                        <b>GT:</b> {gt_summary}
     </div>
   </div>
 """)
@@ -3132,31 +3310,32 @@ class ResultAnalyzer:
         if has_ground_truth:
             html_parts.append(f"""
   <!-- KPI Cards -->
-  <div class="kpi-row">
-    <div class="kpi purple">
-      <div class="kpi-lbl">GT Sound Events</div>
-      <div class="kpi-val">{gt_str}</div>
-      <div class="kpi-sub">{summary.get('unique_sources',0)} sources · {scene_duration:.0f}s</div>
-    </div>
-    <div class="kpi {kpi_cls(odas_det_rate,75,50)}">
-      <div class="kpi-lbl">ODAS Detection Rate</div>
-      <div class="kpi-val">{det_str}</div>
-      <div class="kpi-sub">{detected_event_count} detected · {missed_event_count} missed</div>
-    </div>
-    <div class="kpi {kpi_cls(100-fp_rate,60,40)}">
-      <div class="kpi-lbl">False Positive Rate</div>
-      <div class="kpi-val">{fp_rate:.0f}%</div>
-      <div class="kpi-sub">{len(fp_matches)} FP · {len(gt_matches)} GT frames</div>
-    </div>
-    <div class="kpi blue">
-      <div class="kpi-lbl">Avg Angular Error</div>
-      <div class="kpi-val">{avg_err:.1f}°</div>
-      <div class="kpi-sub">{within_5:.0f}% &lt;5° · {within_10:.0f}% &lt;10°</div>
-    </div>
-    <div class="kpi {kpi_cls(model_acc,60,30)}">
-      <div class="kpi-lbl">Model Accuracy</div>
-      <div class="kpi-val">{model_acc:.1f}%</div>
-      <div class="kpi-sub">{len(correct_m)} correct · {len(pred_m)} classified</div>
+    <div class="kpi-row">
+        <div class="kpi purple">
+            <div class="kpi-lbl">GT Sound Events</div>
+            <div class="kpi-val">{gt_str}</div>
+            <div class="kpi-sub">{summary.get('unique_sources',0)} sources · {scene_duration:.0f}s</div>
+        </div>
+        <div class="kpi {kpi_cls(odas_det_rate,75,50)}">
+            <div class="kpi-lbl">ODAS Detection Rate</div>
+            <div class="kpi-val">{det_str}</div>
+            <div class="kpi-sub">{detected_event_count} detected · {missed_event_count} missed</div>
+        </div>
+        <div class="kpi {kpi_cls(100-fp_rate,60,40)}">
+            <div class="kpi-lbl">False Positive Rate</div>
+            <div class="kpi-val">{fp_rate:.0f}%</div>
+            <div class="kpi-sub">{len(fp_matches)} FP · {len(gt_matches)} GT frames</div>
+        </div>
+        <div class="kpi blue">
+            <div class="kpi-lbl">Avg Angular Error</div>
+            <div class="kpi-val">{avg_err:.1f}°</div>
+            <div class="kpi-sub">{within_5:.0f}% &lt;5° · {within_10:.0f}% &lt;10°</div>
+        </div>
+        <div class="kpi {kpi_cls(model_acc,60,30)}">
+            <div class="kpi-lbl">Model Accuracy</div>
+            <div class="kpi-val">{model_acc:.1f}%</div>
+            <div class="kpi-sub">{len(correct_m)} correct · {len(pred_m)} classified</div>
+        </div>
     </div>
   </div>
 """)

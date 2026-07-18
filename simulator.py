@@ -23,6 +23,7 @@ import time
 import json
 import shutil
 import re
+import zipfile
 from pathlib import Path
 from datetime import datetime
 import threading
@@ -90,10 +91,17 @@ class SimulationRunner:
         self.base_output_dir = Path(output_dir)
         self.renders_dir = self.base_output_dir / 'renders'
         self.runs_dir = self.base_output_dir / 'runs'
+        self.imported_gt_dir = self.base_output_dir / 'imported_ground_truth'
+        self.mic_array_cache_dir = self.base_output_dir / 'mic_array_imports'
+        self.project_root = Path(__file__).resolve().parent
+        self.mic_array_root = self.project_root / 'Mic_Array'
+        self.live_audio_dir = self.mic_array_root / 'Live_Audio'
+        self.passive_audio_dir = self.mic_array_root / 'Passive_Audio'
         self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self.imported_gt_dir.mkdir(parents=True, exist_ok=True)
+        self.mic_array_cache_dir.mkdir(parents=True, exist_ok=True)
         self.odas_logs_dir = Path(odas_logs_dir)
         self.odas_logs_dir.mkdir(parents=True, exist_ok=True)
-        self.project_root = Path(__file__).resolve().parent
         self.odas_config_dir = self.project_root / 'odas_config'
         self.models_dir = self.project_root / 'models'
 
@@ -209,36 +217,85 @@ class SimulationRunner:
                 st.rerun()
 
         # ── Normal launch UI ─────────────────────────────────────────────────
-        # Select rendered audio
-        raw_files = list(self.renders_dir.glob("*.raw"))
-        
-        if not raw_files:
-            st.warning("No rendered audio found. Please render audio first.")
-            return
-        
-        # Sort by modification time, newest first
-        raw_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-        
-        selected_raw_file = st.selectbox(
-            "Select Rendered Audio",
-            raw_files,
-            format_func=lambda x: x.stem  # Show filename without extension
+        use_mic_array_imports = st.toggle(
+            "Use Live/Passive Mic Array ZIP (optional)",
+            value=False,
+            help=(
+                "Enable when running ODAS on external live/passive captures. "
+                "For synthetic rendered runs, keep this off."
+            ),
+            key="sim_use_mic_array_imports",
         )
-        
-        # Load metadata
+
+        selected_raw_file = None
         metadata = {}
-        metadata_path = str(selected_raw_file).replace('.raw', '.json')
-        if os.path.exists(metadata_path):
-            with open(metadata_path, 'r') as f:
-                metadata = json.load(f)
-            
+        selected_cfg_from_zip = None
+
+        if use_mic_array_imports:
+            mic_ctx = self._render_mic_array_inputs()
+            if mic_ctx.get('active_session') is None:
+                return
+            if not mic_ctx.get('raw_path'):
+                st.error("Selected session does not contain a .raw file.")
+                return
+
+            selected_raw_file = Path(mic_ctx['raw_path'])
+            selected_cfg_from_zip = mic_ctx.get('cfg_path')
+            metadata = {
+                'render_id': mic_ctx.get('session_name', selected_raw_file.stem),
+                'scene_name': mic_ctx.get('session_name', selected_raw_file.stem),
+                'duration': mic_ctx.get('duration_seconds', 0.0),
+                'sample_rate': 16000,
+                'scene_file': mic_ctx.get('ground_truth_scene_file', ''),
+                'source_type': mic_ctx.get('session_type', ''),
+                'active_session': str(mic_ctx.get('active_session', '')),
+                'ground_truth_source': str(mic_ctx.get('tracks_path', '')),
+            }
+
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Scene", metadata.get('scene_name', 'Unknown'))
+                st.metric("Session", metadata.get('scene_name', 'Unknown'))
             with col2:
-                st.metric("Duration", f"{metadata.get('duration', 0)}s")
+                st.metric("Duration", f"{metadata.get('duration', 0):.1f}s")
             with col3:
-                st.metric("Sample Rate", f"{metadata.get('sample_rate', 16000)} Hz")
+                gt_state = "Ready" if metadata.get('scene_file') else "Missing"
+                st.metric("Ground Truth", gt_state)
+
+            if metadata.get('scene_file'):
+                st.info(
+                    "Using tracks JSON from the selected ZIP/folder as default ground truth. "
+                    "It is parsed with the same concatenated-JSON parser logic as Results Analyzer."
+                )
+        else:
+            # Select rendered audio
+            raw_files = list(self.renders_dir.glob("*.raw"))
+
+            if not raw_files:
+                st.warning("No rendered audio found. Please render audio first.")
+                return
+
+            # Sort by modification time, newest first
+            raw_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+
+            selected_raw_file = st.selectbox(
+                "Select Rendered Audio",
+                raw_files,
+                format_func=lambda x: x.stem  # Show filename without extension
+            )
+
+            # Load metadata
+            metadata_path = str(selected_raw_file).replace('.raw', '.json')
+            if os.path.exists(metadata_path):
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Scene", metadata.get('scene_name', 'Unknown'))
+                with col2:
+                    st.metric("Duration", f"{metadata.get('duration', 0)}s")
+                with col3:
+                    st.metric("Sample Rate", f"{metadata.get('sample_rate', 16000)} Hz")
 
         st.markdown("#### Runtime Model & Config")
         cfg_options = self._list_odas_configs()
@@ -266,7 +323,28 @@ class SimulationRunner:
 
         runtime_col1, runtime_col2 = st.columns(2)
         with runtime_col1:
-            if cfg_options:
+            if use_mic_array_imports and selected_cfg_from_zip:
+                cfg_union = []
+                seen = set()
+                for candidate in [Path(selected_cfg_from_zip), *cfg_options]:
+                    resolved = str(candidate.resolve()) if candidate.exists() else str(candidate)
+                    if resolved in seen:
+                        continue
+                    cfg_union.append(candidate)
+                    seen.add(resolved)
+
+                selected_odas_cfg = st.selectbox(
+                    "ODAS Config (.cfg)",
+                    cfg_union,
+                    index=0,
+                    format_func=lambda p: p.name,
+                    help="Default comes from selected ZIP/folder. Override if needed."
+                )
+                st.info(
+                    f"Default config loaded from session ZIP/folder: {Path(selected_cfg_from_zip).name}. "
+                    "You can override it here."
+                )
+            elif cfg_options:
                 selected_odas_cfg = st.selectbox(
                     "ODAS Config (.cfg)",
                     cfg_options,
@@ -345,6 +423,267 @@ class SimulationRunner:
         st.subheader("Previous Runs")
         self._show_previous_runs()
 
+    def _list_mic_array_sources(self, base_dir):
+        """Return zip files and session folders for a Mic Array source directory."""
+        base_path = Path(base_dir)
+        if not base_path.exists():
+            return []
+
+        entries = []
+        for path in sorted(base_path.iterdir()):
+            if path.is_dir() or path.suffix.lower() == '.zip':
+                entries.append(path)
+        return entries
+
+    def _extract_mic_array_source(self, source_path):
+        """Return discovered files for a Mic Array folder/zip, extracting zips into cache."""
+        source_path = Path(source_path)
+        session_root = source_path
+        if source_path.suffix.lower() == '.zip':
+            extract_dir = self.mic_array_cache_dir / source_path.stem
+            if not extract_dir.exists():
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(source_path, 'r') as zf:
+                    zf.extractall(extract_dir)
+            children = [p for p in extract_dir.iterdir() if p.is_dir()]
+            session_root = children[0] if len(children) == 1 else extract_dir
+
+        tracks_files = sorted(session_root.rglob('*_tracks.json'))
+        cfg_files = sorted(session_root.rglob('*.cfg'))
+        latlong_files = sorted(session_root.rglob('*_latlong.txt'))
+        raw_files = sorted(session_root.rglob('*.raw'))
+        txt_files = sorted(session_root.rglob('*.txt'))
+
+        return {
+            'session_root': session_root,
+            'tracks_path': tracks_files[0] if tracks_files else None,
+            'cfg_path': cfg_files[0] if cfg_files else None,
+            'cfg_candidates': cfg_files,
+            'latlong_path': latlong_files[0] if latlong_files else None,
+            'raw_path': raw_files[0] if raw_files else None,
+            'notes_path': next((p for p in txt_files if p not in latlong_files), None),
+        }
+
+    def _parse_concatenated_json_objects(self, text):
+        """Parse JSON streams where objects are concatenated without commas/newlines."""
+        decoder = json.JSONDecoder()
+        idx = 0
+        objects = []
+        while idx < len(text):
+            while idx < len(text) and text[idx].isspace():
+                idx += 1
+            if idx >= len(text):
+                break
+            obj, next_idx = decoder.raw_decode(text, idx)
+            objects.append(obj)
+            idx = next_idx
+        return objects
+
+    def _parse_mic_array_tracks(self, tracks_path):
+        """Parse Mic Array *_tracks.json using the same logic as Results Analyzer."""
+        text = Path(tracks_path).read_text(encoding='utf-8', errors='replace')
+        frames = self._parse_concatenated_json_objects(text)
+        detections = []
+        first_ts = None
+        timestamp_scale = 1.0
+
+        for frame_index, frame in enumerate(frames, 1):
+            raw_ts = frame.get('timeStamp', frame_index)
+            if first_ts is None:
+                first_ts = raw_ts
+                timestamp_scale = 0.001 if raw_ts > 1_000_000 else 1.0
+            rel_ts = max(0.0, (raw_ts - first_ts) * timestamp_scale)
+
+            for src in frame.get('src', []):
+                detections.append({
+                    'timestamp': float(rel_ts),
+                    'frame_index': frame_index,
+                    'track_id': int(src.get('id', 0)),
+                    'class_name': src.get('class') or 'unclassified',
+                    'x': float(src.get('x', 0.0)),
+                    'y': float(src.get('y', 0.0)),
+                    'z': float(src.get('z', 0.0)),
+                    'raw_ts': raw_ts,
+                })
+        return detections
+
+    def _build_ground_truth_scene_from_tracks(self, tracks_path, session_name):
+        """Convert tracks JSON into a synthetic-style scene JSON for analyzer matching."""
+        detections = self._parse_mic_array_tracks(tracks_path)
+        if not detections:
+            return None, 0.0
+
+        detections.sort(key=lambda d: d['timestamp'])
+        grouped = {}
+        for det in detections:
+            key = (det['class_name'], det['track_id'])
+            grouped.setdefault(key, []).append(det)
+
+        directional_sources = []
+        merge_gap_s = 0.7
+        min_event_s = 0.08
+
+        for (class_name, track_id), rows in grouped.items():
+            rows.sort(key=lambda d: d['timestamp'])
+            cur = None
+
+            for row in rows:
+                if cur is None:
+                    cur = {
+                        'start': row['timestamp'],
+                        'end': row['timestamp'],
+                        'sum_x': row['x'],
+                        'sum_y': row['y'],
+                        'sum_z': row['z'],
+                        'count': 1,
+                    }
+                    continue
+
+                if row['timestamp'] - cur['end'] <= merge_gap_s:
+                    cur['end'] = row['timestamp']
+                    cur['sum_x'] += row['x']
+                    cur['sum_y'] += row['y']
+                    cur['sum_z'] += row['z']
+                    cur['count'] += 1
+                else:
+                    start = float(cur['start'])
+                    end = float(max(cur['end'], start + min_event_s))
+                    directional_sources.append({
+                        'label': class_name if class_name else 'unknown',
+                        'start_time': start,
+                        'end_time': end,
+                        'position': [
+                            cur['sum_x'] / max(1, cur['count']),
+                            cur['sum_y'] / max(1, cur['count']),
+                            cur['sum_z'] / max(1, cur['count']),
+                        ],
+                        'track_id': track_id,
+                    })
+                    cur = {
+                        'start': row['timestamp'],
+                        'end': row['timestamp'],
+                        'sum_x': row['x'],
+                        'sum_y': row['y'],
+                        'sum_z': row['z'],
+                        'count': 1,
+                    }
+
+            if cur is not None:
+                start = float(cur['start'])
+                end = float(max(cur['end'], start + min_event_s))
+                directional_sources.append({
+                    'label': class_name if class_name else 'unknown',
+                    'start_time': start,
+                    'end_time': end,
+                    'position': [
+                        cur['sum_x'] / max(1, cur['count']),
+                        cur['sum_y'] / max(1, cur['count']),
+                        cur['sum_z'] / max(1, cur['count']),
+                    ],
+                    'track_id': track_id,
+                })
+
+        scene_payload = {
+            'scene_name': session_name,
+            'directional_sources': directional_sources,
+            'source': 'mic_array_tracks_default_ground_truth',
+        }
+        approx_duration = float(detections[-1]['timestamp']) if detections else 0.0
+        return scene_payload, approx_duration
+
+    def _estimate_raw_duration_seconds(self, raw_path):
+        """Estimate session duration from raw size (4ch/16kHz/int16 default)."""
+        try:
+            byte_count = Path(raw_path).stat().st_size
+            sample_count = byte_count / 2.0  # int16
+            frames = sample_count / 4.0      # 4 channels
+            return max(0.0, frames / 16000.0)
+        except Exception:
+            return 0.0
+
+    def _render_mic_array_inputs(self):
+        """Render Live/Passive Mic Array selectors for simulator input mode."""
+        st.markdown("**Mic Array Imports**")
+
+        live_sources = self._list_mic_array_sources(self.live_audio_dir)
+        passive_sources = self._list_mic_array_sources(self.passive_audio_dir)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            live_selection = st.selectbox(
+                "Live Session",
+                options=live_sources,
+                format_func=lambda path: path.name,
+                index=None,
+                placeholder="Select a live session zip/folder",
+                key="sim_mic_array_live_session",
+            )
+            if live_selection is not None:
+                st.caption(f"Selected: {live_selection}")
+            elif not live_sources:
+                st.caption(f"No live sessions found in {self.live_audio_dir}")
+
+        with col2:
+            passive_selection = st.selectbox(
+                "Passive Session",
+                options=passive_sources,
+                format_func=lambda path: path.name,
+                index=None,
+                placeholder="Select a passive session zip/folder",
+                key="sim_mic_array_passive_session",
+            )
+            if passive_selection is not None:
+                st.caption(f"Selected: {passive_selection}")
+            elif not passive_sources:
+                st.caption(f"No passive sessions found in {self.passive_audio_dir}")
+
+        if live_selection and passive_selection:
+            st.error("Select either a Live Session or a Passive Session, not both.")
+            return {'active_session': None}
+
+        active_session = live_selection or passive_selection
+        if active_session is None:
+            return {'active_session': None}
+
+        session_type = 'live_session' if live_selection else 'passive_session'
+        discovered = self._extract_mic_array_source(active_session)
+        session_name = active_session.stem if active_session.suffix.lower() == '.zip' else active_session.name
+
+        tracks_path = discovered.get('tracks_path')
+        gt_scene_file = ''
+        duration_from_tracks = 0.0
+        if tracks_path and Path(tracks_path).exists():
+            try:
+                scene_payload, duration_from_tracks = self._build_ground_truth_scene_from_tracks(tracks_path, session_name)
+                if scene_payload:
+                    gt_scene_file = str(self.imported_gt_dir / f"{session_name}_ground_truth_scene.json")
+                    with open(gt_scene_file, 'w', encoding='utf-8') as f:
+                        json.dump(scene_payload, f, indent=2)
+            except Exception as exc:
+                st.warning(f"Could not parse tracks JSON for default ground truth: {exc}")
+
+        st.caption(f"Raw audio: {discovered.get('raw_path') or 'Not found'}")
+        st.caption(f"Tracks JSON: {discovered.get('tracks_path') or 'Not found'}")
+        st.caption(f"Config file: {discovered.get('cfg_path') or 'Not found'}")
+
+        duration_seconds = duration_from_tracks
+        if not duration_seconds and discovered.get('raw_path'):
+            duration_seconds = self._estimate_raw_duration_seconds(discovered['raw_path'])
+
+        return {
+            'active_session': active_session,
+            'session_type': session_type,
+            'session_name': session_name,
+            'tracks_path': discovered.get('tracks_path'),
+            'cfg_path': discovered.get('cfg_path'),
+            'cfg_candidates': discovered.get('cfg_candidates', []),
+            'latlong_path': discovered.get('latlong_path'),
+            'notes_path': discovered.get('notes_path'),
+            'raw_path': str(discovered.get('raw_path')) if discovered.get('raw_path') else '',
+            'ground_truth_scene_file': gt_scene_file,
+            'duration_seconds': duration_seconds,
+        }
+
     def _render_running_status(self, sim):
         """Display live status while a simulation is running in the background."""
         st.info(f"🔄 Simulation running: **{sim.get('run_name', '...')}**")
@@ -402,7 +741,13 @@ class SimulationRunner:
         except Exception as exc:
             st.warning(f"⚠️ Could not patch ODAS config with preset: {exc}")
 
-    def _prepare_runtime_cfg_for_simulation(self, cfg_path: str, port: int, run_timestamp: str) -> str:
+    def _prepare_runtime_cfg_for_simulation(
+        self,
+        cfg_path: str,
+        port: int,
+        run_timestamp: str,
+        selected_model_dir: str = '',
+    ) -> str:
         """Create a run-local cfg that enforces raw.interface socket replay.
 
         The user-selected config remains the source of truth for SST and all other
@@ -441,6 +786,76 @@ class SimulationRunner:
                 )
                 text = text[:match.start(2)] + socket_block + text[match.end(2):]
 
+            # Remap known file-system paths from device configs to local VM paths.
+            local_model_dir = selected_model_dir.strip() if selected_model_dir else str(self.models_dir)
+            local_bandpass = self.odas_config_dir / 'bandpass.cfg'
+            local_bandpass_path = str(local_bandpass) if local_bandpass.exists() else ''
+
+            path_overrides = {
+                'model_path': local_model_dir,
+                'liveRecordPath': str(self.live_audio_dir),
+                'passiveRecordPath': str(self.passive_audio_dir),
+                'audioRecordPath': str(self.mic_array_root),
+            }
+            if local_bandpass_path:
+                path_overrides['bandpass'] = local_bandpass_path
+
+            for key, value in path_overrides.items():
+                text = re.sub(
+                    rf'(?m)^(\s*{re.escape(key)}\s*=\s*)"[^"]*"\s*;',
+                    rf'\1"{value}";',
+                    text,
+                    count=1,
+                )
+
+            def _set_section_format(cfg_text: str, section_name: str, fmt_value: str) -> str:
+                section_pattern = rf'({section_name}\s*:\s*\{{)(.*?)(\n\s*\}}\s*;?)'
+                m = re.search(section_pattern, cfg_text, flags=re.S)
+                if not m:
+                    return cfg_text
+                body = m.group(2)
+                body = re.sub(
+                    r'(?m)^(\s*format\s*=\s*)"[^"]*"\s*;',
+                    rf'\1"{fmt_value}";',
+                    body,
+                    count=1,
+                )
+                return cfg_text[:m.start(2)] + body + cfg_text[m.end(2):]
+
+            # Keep classifier output for Analyzer, but disable other ODAS sinks for simulator runs.
+            text = _set_section_format(text, 'potential', 'undefined')
+            text = re.sub(
+                r'(potential\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
+                '\\1\n            type = "blackhole";\n        \\3',
+                text,
+                count=1,
+                flags=re.S,
+            )
+
+            text = _set_section_format(text, 'tracked', 'undefined')
+            text = re.sub(
+                r'(tracked\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
+                '\\1\n            type = "blackhole";\n        \\3',
+                text,
+                count=1,
+                flags=re.S,
+            )
+
+            text = re.sub(
+                r'(separated\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
+                '\\1\n            type = "blackhole";\n        \\3',
+                text,
+                count=1,
+                flags=re.S,
+            )
+            text = re.sub(
+                r'(postfiltered\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
+                '\\1\n            type = "blackhole";\n        \\3',
+                text,
+                count=1,
+                flags=re.S,
+            )
+
             # Write classifier artifacts into simulator logs directory so run metadata
             # can resolve files deterministically.
             text = re.sub(
@@ -449,19 +864,6 @@ class SimulationRunner:
                 text,
                 count=1,
             )
-
-            # Force tracked sink to a dedicated local socket for simulator runs.
-            tracked_if_pattern = r'(tracked\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)'
-            tracked_if_match = re.search(tracked_if_pattern, text, flags=re.S)
-            if tracked_if_match:
-                tracked_block = (
-                    "\n"
-                    "            type = \"socket\";\n"
-                    "            ip = \"127.0.0.1\";\n"
-                    f"            port = {int(port) + 2};\n"
-                    "\n"
-                )
-                text = text[:tracked_if_match.start(2)] + tracked_block + text[tracked_if_match.end(2):]
 
             def _remap_section_socket_port(cfg_text: str, section_name: str, desired_port: int) -> tuple[str, bool]:
                 section_pattern = (
@@ -549,7 +951,12 @@ class SimulationRunner:
         log_file_path = str(self.runs_dir / f"odas_log_{run_timestamp}.txt")
 
         # Force simulator transport to socket replay, regardless of cfg capture mode.
-        odas_cfg = self._prepare_runtime_cfg_for_simulation(odas_cfg_source, port, run_timestamp)
+        odas_cfg = self._prepare_runtime_cfg_for_simulation(
+            odas_cfg_source,
+            port,
+            run_timestamp,
+            selected_model_dir=selected_model_dir,
+        )
 
         if apply_sst_preset:
             # Overrides take precedence over preset when patching is enabled.
