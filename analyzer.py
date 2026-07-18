@@ -213,6 +213,7 @@ class ResultAnalyzer:
         st.markdown("### 🎯 ODAS Calibration Report (Simple)")
 
         scene = analysis_data.get('scene', {}) or {}
+        run_meta = analysis_data.get('run_metadata', {}) or {}
         gt_sources = scene.get('directional_sources', []) or []
         all_matches = analysis_data.get('matches', []) or []
 
@@ -243,6 +244,15 @@ class ResultAnalyzer:
                 return None
             return [x, y, z]
 
+        warmup_seconds = _to_float(
+            run_meta.get('warmup_seconds', run_meta.get('scene_metadata', {}).get('warmup_seconds', 0.0)),
+            0.0,
+        )
+        scene_duration = _to_float(
+            scene.get('duration', run_meta.get('scene_metadata', {}).get('duration', run_meta.get('duration', 0.0))),
+            0.0,
+        )
+
         odas_events = []
         for m in all_matches:
             ts = _to_float(m.get('timestamp'), None)
@@ -252,6 +262,10 @@ class ResultAnalyzer:
             xyz = _extract_xyz(m)
             if ts is None or xyz is None:
                 continue
+            ts = ts - warmup_seconds
+            if scene_duration > 0.0 and (ts < 0.0 or ts > scene_duration):
+                continue
+
             odas_events.append({
                 'timestamp': ts,
                 'x': xyz[0],
@@ -284,6 +298,7 @@ class ResultAnalyzer:
 
         rows = []
         matched_count = 0
+        available_odas = list(odas_events)
         for idx, src in enumerate(gt_sources, 1):
             label = str(src.get('label', 'unknown'))
             gt_ts = _to_float(src.get('start_time', 0.0), 0.0)
@@ -294,8 +309,11 @@ class ResultAnalyzer:
 
             best = None
             best_score = None
-            for ev in odas_events:
+            max_dt_for_candidate = max(1.5, time_tolerance * 3.0)
+            for ev in available_odas:
                 dt = abs(ev['timestamp'] - gt_ts)
+                if dt > max_dt_for_candidate:
+                    continue
                 dxyz = float(np.linalg.norm(np.array([ev['x'] - gx, ev['y'] - gy, ev['z'] - gz])))
                 score = (dt / max(time_tolerance, 1e-9)) + (dxyz / max(xyz_tolerance, 1e-9))
                 if best is None or score < best_score:
@@ -313,6 +331,7 @@ class ResultAnalyzer:
 
             if is_match:
                 matched_count += 1
+                available_odas.remove(best)
 
             rows.append({
                 'Seq': idx,
@@ -345,7 +364,8 @@ class ResultAnalyzer:
             st.metric("Match Rate", f"{match_rate:.1f}%")
 
         st.caption(
-            "Matching rule: event is matched only when both timestamp and XYZ distance are within tolerance."
+            "Matching rule: ODAS timestamps are warmup-corrected, out-of-scene tail events are ignored, "
+            "and each ODAS event can match only one GT event."
         )
 
         table_df = pd.DataFrame(rows)
@@ -3005,6 +3025,7 @@ class ResultAnalyzer:
         import html as _html
 
         scene = results.get('scene', {}) or {}
+        run_meta = results.get('run_metadata', {}) or {}
         gt_sources = scene.get('directional_sources', []) or []
         matches = results.get('matches', []) or []
 
@@ -3030,6 +3051,15 @@ class ResultAnalyzer:
                 return None
             return [x, y, z]
 
+        warmup_seconds = _to_float(
+            run_meta.get('warmup_seconds', run_meta.get('scene_metadata', {}).get('warmup_seconds', 0.0)),
+            0.0,
+        )
+        scene_duration = _to_float(
+            scene.get('duration', run_meta.get('scene_metadata', {}).get('duration', run_meta.get('duration', 0.0))),
+            0.0,
+        )
+
         odas_events = []
         for m in matches:
             ts = _to_float(m.get('timestamp'), None)
@@ -3038,6 +3068,9 @@ class ResultAnalyzer:
                 ts = _to_float(det.get('timestamp'), None)
             xyz = _extract_xyz(m)
             if ts is None or xyz is None:
+                continue
+            ts = ts - warmup_seconds
+            if scene_duration > 0.0 and (ts < 0.0 or ts > scene_duration):
                 continue
             odas_events.append({'timestamp': ts, 'x': xyz[0], 'y': xyz[1], 'z': xyz[2]})
 
@@ -3050,6 +3083,7 @@ class ResultAnalyzer:
 
         rows = []
         matched_count = 0
+        available_odas = list(odas_events)
         for idx, src in enumerate(gt_sources, 1):
             label = str(src.get('label', 'unknown'))
             gt_ts = _to_float(src.get('start_time', 0.0), 0.0)
@@ -3060,8 +3094,11 @@ class ResultAnalyzer:
 
             best = None
             best_score = None
-            for ev in odas_events:
+            max_dt_for_candidate = max(1.5, time_tolerance * 3.0)
+            for ev in available_odas:
                 dt = abs(ev['timestamp'] - gt_ts)
+                if dt > max_dt_for_candidate:
+                    continue
                 dxyz = float(np.linalg.norm(np.array([ev['x'] - gx, ev['y'] - gy, ev['z'] - gz])))
                 score = (dt / max(time_tolerance, 1e-9)) + (dxyz / max(xyz_tolerance, 1e-9))
                 if best is None or score < best_score:
@@ -3079,6 +3116,7 @@ class ResultAnalyzer:
 
             if is_match:
                 matched_count += 1
+                available_odas.remove(best)
 
             rows.append({
                 'seq': idx,
@@ -3170,7 +3208,8 @@ class ResultAnalyzer:
         </div>
 
         <div class=\"note\">
-            Match rule: |delta time| &lt;= {time_tolerance:.2f}s and XYZ distance &lt;= {xyz_tolerance:.2f}.
+            Match rule: warmup-corrected ODAS timestamp, out-of-scene tail ignored, one ODAS event per GT event,
+            then |delta time| &lt;= {time_tolerance:.2f}s and XYZ distance &lt;= {xyz_tolerance:.2f}.
         </div>
 
         <div class=\"scroll\">
