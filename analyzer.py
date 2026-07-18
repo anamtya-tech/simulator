@@ -1439,6 +1439,17 @@ class ResultAnalyzer:
                 st.info(f"⏱ Warmup offset: subtracting {warmup_seconds:.0f}s from event timestamps")
             detections = self._parse_odas_output(session_live_file, warmup_seconds=warmup_seconds)
             st.info(f"Parsed {len(detections)} detections from ODAS output")
+
+            run_duration_s = float(
+                run_data.get('scene_metadata', {}).get('duration', run_data.get('duration', 0.0))
+                or 0.0
+            )
+            if run_duration_s >= 60.0 and len(detections) < 200:
+                st.warning(
+                    "⚠️ ODAS output appears truncated for this run "
+                    f"({len(detections)} detections over ~{run_duration_s:.0f}s expected). "
+                    "Comparisons against full tracks JSON may look inconsistent."
+                )
             
             if not detections:
                 st.warning("No detections found in ODAS output")
@@ -2815,6 +2826,7 @@ class ResultAnalyzer:
             'created_at': results['timestamp'],
             'config': results['config'],
             'run_metadata': self._convert_to_native(results.get('run_metadata', {})),
+            'scene': self._convert_to_native(results.get('scene', {})),
             'summary': self._convert_to_native(results['summary']),
             'by_source': self._convert_to_native(results['by_source']),
             'model_stats': self._convert_to_native(results.get('model_stats', {})),

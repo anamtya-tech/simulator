@@ -250,6 +250,8 @@ class SimulationRunner:
                 'source_type': mic_ctx.get('session_type', ''),
                 'active_session': str(mic_ctx.get('active_session', '')),
                 'ground_truth_source': str(mic_ctx.get('tracks_path', '')),
+                'cfg_path': str(mic_ctx.get('cfg_path', '')),
+                'n_channels': mic_ctx.get('n_channels', None),
             }
 
             col1, col2, col3 = st.columns(3)
@@ -773,6 +775,7 @@ class SimulationRunner:
         raw_file_path: str,
         raw_n_channels: int | None = None,
         selected_model_dir: str = '',
+        source_type: str = '',
     ) -> str:
         """Create a run-local cfg that enforces raw.interface file replay.
 
@@ -781,9 +784,16 @@ class SimulationRunner:
         """
         src_path = Path(cfg_path)
         runtime_cfg = self.runs_dir / f"runtime_cfg_{run_timestamp}.cfg"
+        is_mic_array_import = source_type in ('live_session', 'passive_session')
 
         try:
             text = src_path.read_text(encoding='utf-8', errors='replace')
+
+            # Imported ZIP configs often come from device paths. Normalize common
+            # prefixes so odaslive can run directly on this VM.
+            if is_mic_array_import:
+                text = text.replace('/home/chatak/', '/home/makes/')
+                text = text.replace('/mnt/CHATAK_VM/', '/home/makes/')
 
             # Guardrail: reject helper configs (e.g. bandpass.cfg) as odaslive entry cfg.
             if (
@@ -876,17 +886,27 @@ class SimulationRunner:
                 flags=re.S,
             )
 
-            # SST output stays as JSON so ODAS can emit the live session stream.
-            # Terminal output is captured in the per-run log file and the
-            # classifier log directory is redirected to the simulator workspace.
-            text = _set_section_format(text, 'tracked', 'json')
-            text = re.sub(
-                r'(tracked\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
-                '\\1\n             type = "terminal";\n        \\3',
-                text,
-                count=1,
-                flags=re.S,
-            )
+            if is_mic_array_import:
+                # For Live/Passive ZIP replays, mirror manual fileInput runs:
+                # tracked JSON over local socket 10000.
+                text = _set_section_format(text, 'tracked', 'json')
+                text = re.sub(
+                    r'(tracked\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
+                    '\\1\n            type = "socket";\n            ip = "127.0.0.1";\n            port = 10000;\n        \\3',
+                    text,
+                    count=1,
+                    flags=re.S,
+                )
+            else:
+                # Preserve previous synthetic pipeline behavior.
+                text = _set_section_format(text, 'tracked', 'json')
+                text = re.sub(
+                    r'(tracked\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
+                    '\\1\n             type = "terminal";\n        \\3',
+                    text,
+                    count=1,
+                    flags=re.S,
+                )
 
             text = re.sub(
                 r'(separated\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
@@ -992,7 +1012,14 @@ class SimulationRunner:
             raw_file_path,
             raw_n_channels=raw_n_channels,
             selected_model_dir=selected_model_dir,
+            source_type=source_type,
         )
+
+        tracked_sink_process = None
+        if source_type in ('live_session', 'passive_session'):
+            # Drain SST tracked socket output only for ZIP replay route.
+            # Synthetic runs keep the existing terminal-based tracked behavior.
+            tracked_sink_process = self._start_socket_drain_server(10000)
 
         if apply_sst_preset:
             # Overrides take precedence over preset when patching is enabled.
@@ -1053,7 +1080,7 @@ class SimulationRunner:
                 "✅ ODAS started"
             ],
             "socket_process": None,
-            "tracked_sink_process": None,
+            "tracked_sink_process": tracked_sink_process,
             "odas_process": odas_process,
             "run_name": run_name,
             "log_file": log_file_path,
