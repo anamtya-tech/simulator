@@ -776,6 +776,7 @@ class SimulationRunner:
         raw_n_channels: int | None = None,
         selected_model_dir: str = '',
         source_type: str = '',
+        tracked_output_file: str = '',
     ) -> str:
         """Create a run-local cfg that enforces raw.interface file replay.
 
@@ -887,12 +888,14 @@ class SimulationRunner:
             )
 
             if is_mic_array_import:
-                # For Live/Passive ZIP replays, mirror manual fileInput runs:
-                # tracked JSON over local socket 10000.
+                # For ODAS calibration ZIP replay flow, write tracked output to
+                # a JSON file so Results Analyzer can compare GT ZIP tracks
+                # against this generated run artifact directly.
                 text = _set_section_format(text, 'tracked', 'json')
+                tracked_path = tracked_output_file or str(self.runs_dir / f"tracked_{run_timestamp}.json")
                 text = re.sub(
                     r'(tracked\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
-                    '\\1\n            type = "socket";\n            ip = "127.0.0.1";\n            port = 10000;\n        \\3',
+                    f'\\1\\n            type = "file";\\n            path = "{tracked_path}";\\n        \\3',
                     text,
                     count=1,
                     flags=re.S,
@@ -908,20 +911,24 @@ class SimulationRunner:
                     flags=re.S,
                 )
 
-            text = re.sub(
-                r'(separated\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
-                '\\1\n            type = "blackhole";\n        \\3',
-                text,
-                count=1,
-                flags=re.S,
-            )
-            text = re.sub(
-                r'(postfiltered\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
-                '\\1\n            type = "blackhole";\n        \\3',
-                text,
-                count=1,
-                flags=re.S,
-            )
+            # Preserve separated/postfiltered interface for ZIP calibration flow
+            # (many provided cfg files intentionally write these to file).
+            # Keep blackhole for synthetic flow to avoid extra I/O/output files.
+            if not is_mic_array_import:
+                text = re.sub(
+                    r'(separated\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
+                    '\\1\n            type = "blackhole";\n        \\3',
+                    text,
+                    count=1,
+                    flags=re.S,
+                )
+                text = re.sub(
+                    r'(postfiltered\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
+                    '\\1\n            type = "blackhole";\n        \\3',
+                    text,
+                    count=1,
+                    flags=re.S,
+                )
 
             # Write classifier artifacts into simulator logs directory so run metadata
             # can resolve files deterministically.
@@ -987,10 +994,17 @@ class SimulationRunner:
         tail_seconds   = metadata.get('tail_silence_seconds', 0)
         duration = metadata.get('duration', 10) + warmup_seconds + tail_seconds
         log_file_path = str(self.runs_dir / f"odas_log_{run_timestamp}.txt")
+        source_type = str(metadata.get('source_type', '')).strip().lower()
+        tracked_output_file = ''
+        if source_type in ('live_session', 'passive_session'):
+            tracked_output_file = str(self.runs_dir / f"tracked_{run_timestamp}.json")
+            try:
+                Path(tracked_output_file).unlink(missing_ok=True)
+            except Exception:
+                pass
 
         # Force simulator transport to file replay using the selected raw audio.
         raw_n_channels = None
-        source_type = str(metadata.get('source_type', '')).strip().lower()
         try:
             raw_n_channels = int(metadata.get('n_channels', 0)) or None
         except Exception:
@@ -1013,13 +1027,9 @@ class SimulationRunner:
             raw_n_channels=raw_n_channels,
             selected_model_dir=selected_model_dir,
             source_type=source_type,
+            tracked_output_file=tracked_output_file,
         )
-
         tracked_sink_process = None
-        if source_type in ('live_session', 'passive_session'):
-            # Drain SST tracked socket output only for ZIP replay route.
-            # Synthetic runs keep the existing terminal-based tracked behavior.
-            tracked_sink_process = self._start_socket_drain_server(10000)
 
         if apply_sst_preset:
             # Overrides take precedence over preset when patching is enabled.
@@ -1096,7 +1106,7 @@ class SimulationRunner:
                   metadata, raw_file_path, log_file_path,
                   run_start_time, run_timestamp, duration,
                 preset_name, experiment_tag, odas_cfg_source, odas_cfg,
-                selected_model_dir, selected_model_name),
+                selected_model_dir, selected_model_name, tracked_output_file),
             daemon=True,
         )
         monitor_thread.start()
@@ -1111,7 +1121,8 @@ class SimulationRunner:
                              selected_odas_cfg: str = '',
                              odas_cfg: str | None = None,
                              selected_model_dir: str = '',
-                             selected_model_name: str = ''):
+                             selected_model_name: str = '',
+                             tracked_output_file: str = ''):
         """Runs in a daemon thread and cleans up when ODAS processing completes.
         Updates sim dict in-place so the Streamlit polling loop can display
         progress without touching the processes.
@@ -1214,6 +1225,12 @@ class SimulationRunner:
         classify_events_file = str(classify_events_files[0]) if classify_events_files else None
         session_live_file    = str(session_live_files[0])    if session_live_files    else None
 
+        source_type = str(metadata.get('source_type', '')).strip().lower()
+        tracked_output_path = Path(tracked_output_file) if tracked_output_file else None
+        if source_type in ('live_session', 'passive_session') and tracked_output_path:
+            if tracked_output_path.exists() and tracked_output_path.stat().st_mtime >= run_start_time:
+                session_live_file = str(tracked_output_path)
+
         if session_live_file and os.path.getmtime(session_live_file) < run_start_time:
             sim["log_lines"].append(
                 f"⚠️ Session file is stale (mtime predates run start). "
@@ -1233,6 +1250,7 @@ class SimulationRunner:
             'odas_log_file': log_file_path,
             'classify_events_file': classify_events_file,
             'session_live_file': session_live_file,
+            'tracked_output_file': tracked_output_file,
             'port': 10000,
             # Keep both paths: the config the user selected and the run-local
             # runtime copy patched for direct file replay.

@@ -1601,6 +1601,46 @@ class ResultAnalyzer:
             for src in data.get('src', []):
                 frame_count = src.get('frame_count', 0)
 
+                # Some ODAS tracked outputs (tracked.interface=file) provide
+                # legacy classification fields ('class', 'class_conf') instead
+                # of event_* fields. Promote these to event-style fields so
+                # downstream validity filtering does not drop all detections.
+                legacy_class_name = src.get('class_name', src.get('class', 'unclassified'))
+                legacy_class_id = src.get('class_id', -1)
+                legacy_conf = src.get('class_confidence', src.get('class_conf', 0.0))
+                has_event_fields = any(
+                    k in src for k in (
+                        'event_class_id',
+                        'event_class_name',
+                        'event_votes',
+                        'event_candidates',
+                    )
+                )
+
+                if has_event_fields:
+                    event_class_id = src.get('event_class_id', -1)
+                    event_class_name = src.get('event_class_name', 'unclassified')
+                    event_votes = src.get('event_votes', 0)
+                    event_avg_conf = src.get('event_avg_confidence', 0.0)
+                    event_max_conf = src.get('event_max_confidence', 0.0)
+                    event_candidates = src.get('event_candidates', [])
+                else:
+                    # Fallback for tracked JSON format that only carries
+                    # per-frame class/class_conf values.
+                    if str(legacy_class_name).strip() and str(legacy_class_name).strip() != 'unclassified':
+                        event_class_id = legacy_class_id if legacy_class_id is not None else 0
+                        event_class_name = legacy_class_name
+                        event_votes = 1
+                        event_avg_conf = legacy_conf or 0.0
+                        event_max_conf = legacy_conf or 0.0
+                    else:
+                        event_class_id = -1
+                        event_class_name = 'unclassified'
+                        event_votes = 0
+                        event_avg_conf = 0.0
+                        event_max_conf = 0.0
+                    event_candidates = []
+
                 detection = {
                     'timestamp': line_timestamp,
                     'frame_count': frame_count,
@@ -1620,14 +1660,14 @@ class ResultAnalyzer:
                     # ── Event fields (6-hop rolling mode, min_event_votes gated) ──
                     # Emitted only when ROLLING_HOPS hops are full and
                     # event_votes >= min_event_votes (default 4/6).
-                    'event_class_id':        src.get('event_class_id', -1),
-                    'event_class_name':      src.get('event_class_name', 'unclassified'),
-                    'event_votes':           src.get('event_votes', 0),
-                    'event_avg_confidence':  src.get('event_avg_confidence', 0.0),
-                    'event_max_confidence':  src.get('event_max_confidence', 0.0),
+                    'event_class_id':        event_class_id,
+                    'event_class_name':      event_class_name,
+                    'event_votes':           event_votes,
+                    'event_avg_confidence':  event_avg_conf,
+                    'event_max_confidence':  event_max_conf,
                     # ── Full ranked candidate list (top-K × N-hop voting) ──
                     # [{class_id, class_name, hop_votes, avg_confidence}, ...] sorted desc.
-                    'event_candidates':      src.get('event_candidates', []),
+                    'event_candidates':      event_candidates,
                     # ── Spectra sidecar (sim_mode=1 only) ──
                     # Path to 96×257 float32 .bin file for this event's last hop.
                     # Load with: np.fromfile(path, dtype=np.float32).reshape(96, 257)
