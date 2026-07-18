@@ -244,6 +244,19 @@ class ResultAnalyzer:
                 return None
             return [x, y, z]
 
+        def _extract_class(record):
+            det = record.get('detection', {}) if isinstance(record.get('detection'), dict) else {}
+            cls = (
+                record.get('model_prediction')
+                or record.get('yamnet_class')
+                or record.get('event_class_name')
+                or record.get('class_name')
+                or det.get('event_class_name')
+                or det.get('class_name')
+            )
+            cls = str(cls).strip() if cls is not None else ''
+            return cls if cls else 'unclassified'
+
         warmup_seconds = _to_float(
             run_meta.get('warmup_seconds', run_meta.get('scene_metadata', {}).get('warmup_seconds', 0.0)),
             0.0,
@@ -271,6 +284,7 @@ class ResultAnalyzer:
                 'x': xyz[0],
                 'y': xyz[1],
                 'z': xyz[2],
+                'class_name': _extract_class(m),
             })
 
         odas_events.sort(key=lambda r: r['timestamp'])
@@ -338,6 +352,7 @@ class ResultAnalyzer:
                 'GT Y': round(gy, 4),
                 'GT Z': round(gz, 4),
                 'ODAS Timestamp (s)': round(best['timestamp'], 3) if best else None,
+                'ODAS Class': best['class_name'] if best else None,
                 'ODAS X': round(best['x'], 4) if best else None,
                 'ODAS Y': round(best['y'], 4) if best else None,
                 'ODAS Z': round(best['z'], 4) if best else None,
@@ -1585,18 +1600,34 @@ class ResultAnalyzer:
         with open(session_live_file, 'r', encoding='utf-8', errors='replace') as f:
             stream_text = f.read()
 
+        first_timestamp = None
+        ts_mode = None  # 'hop_counter' or 'milliseconds'
+
         for line_num, data in enumerate(_iter_json_objects(stream_text), 1):
             time_stamp = data.get('timeStamp', 0)
 
-            # timeStamp is the cumulative ODAS hop count (each hop = 8ms).
-            # With ROLLING_HOPS=6 the JSON is gated at 48ms so line_num
-            # no longer maps 1:1 with 8ms steps — using line_num would
-            # compress a 33s session into ~5.5s, making Frog/Elephant GT
-            # windows (15-30s) completely unreachable.
-            # Correct conversion: actual_seconds = timeStamp * hop_duration
-            # hop_count × 8ms/hop, minus the silence prepended before
-            # the scene audio so that times align with GT windows.
-            line_timestamp = time_stamp * 0.008 - warmup_seconds
+            # Robust timestamp normalization:
+            # - Classic sst_session_live streams use hop counters (8ms units).
+            # - Flat tracked JSON (tracked.interface=file) can use large
+            #   millisecond wall-clock timestamps.
+            # Detect once from the first timestamp and convert to relative
+            # seconds so GT windows and calibration reports share a timeline.
+            if first_timestamp is None:
+                try:
+                    first_timestamp = float(time_stamp)
+                except Exception:
+                    first_timestamp = 0.0
+                ts_mode = 'milliseconds' if first_timestamp >= 1_000_000 else 'hop_counter'
+
+            try:
+                cur_ts = float(time_stamp)
+            except Exception:
+                cur_ts = first_timestamp if first_timestamp is not None else 0.0
+
+            if ts_mode == 'milliseconds':
+                line_timestamp = (cur_ts - first_timestamp) * 0.001 - warmup_seconds
+            else:
+                line_timestamp = (cur_ts - first_timestamp) * 0.008 - warmup_seconds
 
             for src in data.get('src', []):
                 frame_count = src.get('frame_count', 0)
@@ -1628,7 +1659,9 @@ class ResultAnalyzer:
                     # Fallback for tracked JSON format that only carries
                     # per-frame class/class_conf values.
                     if str(legacy_class_name).strip() and str(legacy_class_name).strip() != 'unclassified':
-                        event_class_id = legacy_class_id if legacy_class_id is not None else 0
+                        # Flat tracked JSON commonly omits class_id; treat it as
+                        # a valid classified event using a neutral id.
+                        event_class_id = 0 if legacy_class_id in (None, -1) else legacy_class_id
                         event_class_name = legacy_class_name
                         event_votes = 1
                         event_avg_conf = legacy_conf or 0.0
@@ -3100,6 +3133,19 @@ class ResultAnalyzer:
                 return None
             return [x, y, z]
 
+        def _extract_class(record):
+            det = record.get('detection', {}) if isinstance(record.get('detection'), dict) else {}
+            cls = (
+                record.get('model_prediction')
+                or record.get('yamnet_class')
+                or record.get('event_class_name')
+                or record.get('class_name')
+                or det.get('event_class_name')
+                or det.get('class_name')
+            )
+            cls = str(cls).strip() if cls is not None else ''
+            return cls if cls else 'unclassified'
+
         warmup_seconds = _to_float(
             run_meta.get('warmup_seconds', run_meta.get('scene_metadata', {}).get('warmup_seconds', 0.0)),
             0.0,
@@ -3121,7 +3167,13 @@ class ResultAnalyzer:
             ts = ts - warmup_seconds
             if scene_duration > 0.0 and (ts < 0.0 or ts > scene_duration):
                 continue
-            odas_events.append({'timestamp': ts, 'x': xyz[0], 'y': xyz[1], 'z': xyz[2]})
+            odas_events.append({
+                'timestamp': ts,
+                'x': xyz[0],
+                'y': xyz[1],
+                'z': xyz[2],
+                'class_name': _extract_class(m),
+            })
 
         odas_events.sort(key=lambda r: r['timestamp'])
         gt_sources = sorted(gt_sources, key=lambda s: _to_float(s.get('start_time', 0.0), 0.0))
@@ -3172,6 +3224,7 @@ class ResultAnalyzer:
                 'gt_y': gy,
                 'gt_z': gz,
                 'odas_t': best['timestamp'] if best else None,
+                'odas_class': best['class_name'] if best else None,
                 'odas_x': best['x'] if best else None,
                 'odas_y': best['y'] if best else None,
                 'odas_z': best['z'] if best else None,
@@ -3192,7 +3245,7 @@ class ResultAnalyzer:
                 "<tr style='background:{bg}'>"
                 "<td>{seq}</td><td>{label}</td>"
                 "<td>{gt_t:.3f}</td><td>{gt_x:.3f}</td><td>{gt_y:.3f}</td><td>{gt_z:.3f}</td>"
-                "<td>{odas_t}</td><td>{odas_x}</td><td>{odas_y}</td><td>{odas_z}</td>"
+                "<td>{odas_t}</td><td>{odas_class}</td><td>{odas_x}</td><td>{odas_y}</td><td>{odas_z}</td>"
                 "<td>{dt}</td><td>{dxyz}</td><td><b>{match}</b></td>"
                 "</tr>".format(
                     bg=row_bg,
@@ -3203,6 +3256,7 @@ class ResultAnalyzer:
                     gt_y=r['gt_y'],
                     gt_z=r['gt_z'],
                     odas_t=f"{r['odas_t']:.3f}" if r['odas_t'] is not None else 'N/A',
+                    odas_class=_html.escape(str(r['odas_class'])) if r['odas_class'] is not None else 'N/A',
                     odas_x=f"{r['odas_x']:.3f}" if r['odas_x'] is not None else 'N/A',
                     odas_y=f"{r['odas_y']:.3f}" if r['odas_y'] is not None else 'N/A',
                     odas_z=f"{r['odas_z']:.3f}" if r['odas_z'] is not None else 'N/A',
@@ -3212,7 +3266,7 @@ class ResultAnalyzer:
                 )
             )
 
-        table_html = ''.join(table_rows_html) if table_rows_html else "<tr><td colspan='13'>No GT events found</td></tr>"
+        table_html = ''.join(table_rows_html) if table_rows_html else "<tr><td colspan='14'>No GT events found</td></tr>"
 
         run_id = _html.escape(str(results.get('run_id', 'unknown')))
         scene_name = _html.escape(str(results.get('scene_name', 'unknown')))
@@ -3262,7 +3316,7 @@ class ResultAnalyzer:
             <table>
                 <tr>
                     <th>Seq</th><th>GT Label</th><th>GT Time</th><th>GT X</th><th>GT Y</th><th>GT Z</th>
-                    <th>ODAS Time</th><th>ODAS X</th><th>ODAS Y</th><th>ODAS Z</th>
+                    <th>ODAS Time</th><th>ODAS Class</th><th>ODAS X</th><th>ODAS Y</th><th>ODAS Z</th>
                     <th>|delta t|</th><th>XYZ Dist</th><th>Match</th>
                 </tr>
                 {table_html}
