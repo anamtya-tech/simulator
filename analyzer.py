@@ -257,28 +257,6 @@ class ResultAnalyzer:
             cls = str(cls).strip() if cls is not None else ''
             return cls if cls else 'unclassified'
 
-        def _extract_class_conf(record):
-            det = record.get('detection', {}) if isinstance(record.get('detection'), dict) else {}
-            conf = _to_float(
-                record.get('model_confidence',
-                    record.get('yamnet_confidence',
-                        record.get('event_max_confidence',
-                            record.get('class_confidence',
-                                record.get('class_conf',
-                                    det.get('event_max_confidence',
-                                        det.get('class_confidence', det.get('class_conf', 0.0)))))))),
-                0.0,
-            )
-            # Accept both [0,1] and [0,100] inputs.
-            if conf is None:
-                return 0.0
-            if conf > 1.0:
-                conf = conf / 100.0
-            return float(np.clip(conf, 0.0, 1.0))
-
-        def _normalize_label(label):
-            return str(label or '').strip().lower()
-
         warmup_seconds = _to_float(
             run_meta.get('warmup_seconds', run_meta.get('scene_metadata', {}).get('warmup_seconds', 0.0)),
             0.0,
@@ -307,7 +285,6 @@ class ResultAnalyzer:
                 'y': xyz[1],
                 'z': xyz[2],
                 'class_name': _extract_class(m),
-                'class_conf': _extract_class_conf(m),
             })
 
         odas_events.sort(key=lambda r: r['timestamp'])
@@ -363,15 +340,6 @@ class ResultAnalyzer:
                 dxyz = None
                 is_match = False
 
-            if dxyz is None:
-                xyz_score_pct = 0.0
-            else:
-                xyz_score_pct = 100.0 * max(0.0, 1.0 - (dxyz / max(xyz_tolerance, 1e-9)))
-
-            class_match = best is not None and _normalize_label(label) == _normalize_label(best.get('class_name', ''))
-            class_score_pct = (best.get('class_conf', 0.0) * 100.0) if class_match else 0.0
-            overall_score_pct = (xyz_score_pct + class_score_pct) / 2.0
-
             if is_match:
                 matched_count += 1
                 available_odas.remove(best)
@@ -390,9 +358,6 @@ class ResultAnalyzer:
                 'ODAS Z': round(best['z'], 4) if best else None,
                 '|Δt| (s)': round(dt, 3) if dt is not None else None,
                 'XYZ Distance': round(dxyz, 4) if dxyz is not None else None,
-                'XYZ Match %': round(xyz_score_pct, 1),
-                'Class Match %': round(class_score_pct, 1),
-                'Overall Score %': round(overall_score_pct, 1),
                 'Match': '✓ matched' if is_match else '✗',
             })
 
@@ -3181,27 +3146,6 @@ class ResultAnalyzer:
             cls = str(cls).strip() if cls is not None else ''
             return cls if cls else 'unclassified'
 
-        def _extract_class_conf(record):
-            det = record.get('detection', {}) if isinstance(record.get('detection'), dict) else {}
-            conf = _to_float(
-                record.get('model_confidence',
-                    record.get('yamnet_confidence',
-                        record.get('event_max_confidence',
-                            record.get('class_confidence',
-                                record.get('class_conf',
-                                    det.get('event_max_confidence',
-                                        det.get('class_confidence', det.get('class_conf', 0.0)))))))),
-                0.0,
-            )
-            if conf is None:
-                return 0.0
-            if conf > 1.0:
-                conf = conf / 100.0
-            return float(np.clip(conf, 0.0, 1.0))
-
-        def _normalize_label(label):
-            return str(label or '').strip().lower()
-
         warmup_seconds = _to_float(
             run_meta.get('warmup_seconds', run_meta.get('scene_metadata', {}).get('warmup_seconds', 0.0)),
             0.0,
@@ -3229,7 +3173,6 @@ class ResultAnalyzer:
                 'y': xyz[1],
                 'z': xyz[2],
                 'class_name': _extract_class(m),
-                'class_conf': _extract_class_conf(m),
             })
 
         odas_events.sort(key=lambda r: r['timestamp'])
@@ -3269,15 +3212,6 @@ class ResultAnalyzer:
                 dxyz = None
                 is_match = False
 
-            if dxyz is None:
-                xyz_score_pct = 0.0
-            else:
-                xyz_score_pct = 100.0 * max(0.0, 1.0 - (dxyz / max(xyz_tolerance, 1e-9)))
-
-            class_match = best is not None and _normalize_label(label) == _normalize_label(best.get('class_name', ''))
-            class_score_pct = (best.get('class_conf', 0.0) * 100.0) if class_match else 0.0
-            overall_score_pct = (xyz_score_pct + class_score_pct) / 2.0
-
             if is_match:
                 matched_count += 1
                 available_odas.remove(best)
@@ -3296,9 +3230,6 @@ class ResultAnalyzer:
                 'odas_z': best['z'] if best else None,
                 'dt': dt,
                 'dxyz': dxyz,
-                'xyz_score_pct': xyz_score_pct,
-                'class_score_pct': class_score_pct,
-                'overall_score_pct': overall_score_pct,
                 'match': is_match,
             })
 
@@ -3315,7 +3246,7 @@ class ResultAnalyzer:
                 "<td>{seq}</td><td>{label}</td>"
                 "<td>{gt_t:.3f}</td><td>{gt_x:.3f}</td><td>{gt_y:.3f}</td><td>{gt_z:.3f}</td>"
                 "<td>{odas_t}</td><td>{odas_class}</td><td>{odas_x}</td><td>{odas_y}</td><td>{odas_z}</td>"
-                "<td>{dt}</td><td>{dxyz}</td><td>{xyz_score}</td><td>{class_score}</td><td>{overall_score}</td><td><b>{match}</b></td>"
+                "<td>{dt}</td><td>{dxyz}</td><td><b>{match}</b></td>"
                 "</tr>".format(
                     bg=row_bg,
                     seq=r['seq'],
@@ -3331,14 +3262,11 @@ class ResultAnalyzer:
                     odas_z=f"{r['odas_z']:.3f}" if r['odas_z'] is not None else 'N/A',
                     dt=f"{r['dt']:.3f}" if r['dt'] is not None else 'N/A',
                     dxyz=f"{r['dxyz']:.3f}" if r['dxyz'] is not None else 'N/A',
-                    xyz_score=f"{r['xyz_score_pct']:.1f}%",
-                    class_score=f"{r['class_score_pct']:.1f}%",
-                    overall_score=f"{r['overall_score_pct']:.1f}%",
                     match=match_txt,
                 )
             )
 
-        table_html = ''.join(table_rows_html) if table_rows_html else "<tr><td colspan='17'>No GT events found</td></tr>"
+        table_html = ''.join(table_rows_html) if table_rows_html else "<tr><td colspan='14'>No GT events found</td></tr>"
 
         run_id = _html.escape(str(results.get('run_id', 'unknown')))
         scene_name = _html.escape(str(results.get('scene_name', 'unknown')))
@@ -3389,7 +3317,7 @@ class ResultAnalyzer:
                 <tr>
                     <th>Seq</th><th>GT Label</th><th>GT Time</th><th>GT X</th><th>GT Y</th><th>GT Z</th>
                     <th>ODAS Time</th><th>ODAS Class</th><th>ODAS X</th><th>ODAS Y</th><th>ODAS Z</th>
-                    <th>|delta t|</th><th>XYZ Dist</th><th>XYZ Match %</th><th>Class Match %</th><th>Overall Score %</th><th>Match</th>
+                    <th>|delta t|</th><th>XYZ Dist</th><th>Match</th>
                 </tr>
                 {table_html}
             </table>
