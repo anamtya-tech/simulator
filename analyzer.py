@@ -607,7 +607,14 @@ class ResultAnalyzer:
         run_id = run_data.get('run_id', run_data.get('run_name', run_stem))
         active_mic_session = mic_array_context.get('active_session')
         analysis_id = mic_array_context.get('analysis_id') if active_mic_session else run_id
-        selected_cfg_name, selected_cfg_path, selected_model_name, _ = self._extract_runtime_selection(run_data)
+        (
+            selected_cfg_name,
+            selected_cfg_path,
+            selected_model_name,
+            _,
+            runtime_cfg_name,
+            runtime_cfg_path,
+        ) = self._extract_runtime_selection(run_data)
         
         # Display run info
         col1, col2, col3, col4 = st.columns(4)
@@ -635,8 +642,12 @@ class ResultAnalyzer:
                 st.caption(f"Config used: {selected_cfg_name}")
                 if selected_cfg_path:
                     st.caption(f"Path: {selected_cfg_path}")
+                if runtime_cfg_name != 'N/A':
+                    st.caption(f"Runtime cfg: {runtime_cfg_name}")
             with prov_col2:
                 st.caption(f"Model used: {selected_model_name}")
+                if runtime_cfg_path:
+                    st.caption(f"Runtime cfg path: {runtime_cfg_path}")
 
         # Show experiment provenance if tagged
         exp_tag = run_data.get('experiment_tag', '') if run_data else ''
@@ -3796,9 +3807,10 @@ class ResultAnalyzer:
 
         # ── Mic Array wall-clock timestamps (optional) ──────────────────────
         run_meta = results.get('run_metadata', {})
-        selected_cfg_name, _, selected_model_name, _ = self._extract_runtime_selection(run_meta)
+        selected_cfg_name, _, selected_model_name, _, runtime_cfg_name, _ = self._extract_runtime_selection(run_meta)
         selected_cfg_name = _html.escape(selected_cfg_name)
         selected_model_name = _html.escape(selected_model_name)
+        runtime_cfg_name = _html.escape(runtime_cfg_name)
         notes_path = run_meta.get('notes_path', '')
         wallclock_start_iso = ''
         wallclock_points_iso = []
@@ -3919,8 +3931,9 @@ class ResultAnalyzer:
       <b>Analysed:</b> {str(timestamp)[:19].replace('T',' ')} &nbsp;·&nbsp;
       <b>Duration:</b> {scene_duration:.0f} s &nbsp;·&nbsp;
             <b>Threshold:</b> {cfg.get('angular_threshold','?')}°<br>
-            <b>Config:</b> {selected_cfg_name} &nbsp;·&nbsp;
-                        <b>Model:</b> {selected_model_name}<br>
+                        <b>Config:</b> {selected_cfg_name} &nbsp;·&nbsp;
+                                                <b>Runtime cfg:</b> {runtime_cfg_name} &nbsp;·&nbsp;
+                                                <b>Model:</b> {selected_model_name}<br>
                         <b>Experiment:</b> {experiment_summary} &nbsp;·&nbsp;
                         <b>GT:</b> {gt_summary}
     </div>
@@ -4937,13 +4950,24 @@ class ResultAnalyzer:
         """Display analysis summary in Streamlit"""
         summary = analysis_data['summary']
         run_meta = analysis_data.get('run_metadata', {})
-        selected_cfg_name, selected_cfg_path, selected_model_name, _ = self._extract_runtime_selection(run_meta)
+        (
+            selected_cfg_name,
+            selected_cfg_path,
+            selected_model_name,
+            _,
+            runtime_cfg_name,
+            runtime_cfg_path,
+        ) = self._extract_runtime_selection(run_meta)
         
         st.subheader("📊 Analysis Summary")
         if selected_cfg_name != 'N/A' or selected_model_name != 'N/A':
-            st.caption(f"Report provenance: config={selected_cfg_name} | model={selected_model_name}")
+            st.caption(
+                f"Report provenance: config={selected_cfg_name} | runtime={runtime_cfg_name} | model={selected_model_name}"
+            )
             if selected_cfg_path:
                 st.caption(f"Config path: {selected_cfg_path}")
+            if runtime_cfg_path:
+                st.caption(f"Runtime config path: {runtime_cfg_path}")
         
         # Check if OLD model stats exist (for backwards compatibility)
         has_model_stats = 'model_stats' in analysis_data
@@ -5216,6 +5240,7 @@ class ResultAnalyzer:
             or run_meta.get('odas_config')
             or ''
         )
+        runtime_cfg_path = run_meta.get('odas_runtime_config') or ''
         if Path(str(selected_cfg_path)).name.startswith('runtime_cfg_'):
             selected_cfg_path = (
                 scene_meta.get('selected_odas_config')
@@ -5223,8 +5248,9 @@ class ResultAnalyzer:
                 or ''
             )
         if not selected_cfg_path:
-            selected_cfg_path = run_meta.get('odas_runtime_config') or ''
+            selected_cfg_path = runtime_cfg_path
         selected_cfg_name = Path(selected_cfg_path).name if selected_cfg_path else 'N/A'
+        runtime_cfg_name = Path(runtime_cfg_path).name if runtime_cfg_path else 'N/A'
 
         selected_model_dir = (
             run_meta.get('selected_model_dir')
@@ -5238,7 +5264,24 @@ class ResultAnalyzer:
             or 'N/A'
         )
 
-        return selected_cfg_name, selected_cfg_path, selected_model_name, selected_model_dir
+        # Prefer model provenance parsed from the runtime config used by ODAS.
+        if runtime_cfg_path and Path(runtime_cfg_path).exists():
+            try:
+                cfg_text = Path(runtime_cfg_path).read_text(encoding='utf-8', errors='replace')
+                model_path = self._extract_model_path_from_cfg(cfg_text)
+                if model_path:
+                    selected_model_name = Path(model_path).name or selected_model_name
+            except Exception:
+                pass
+
+        return (
+            selected_cfg_name,
+            selected_cfg_path,
+            selected_model_name,
+            selected_model_dir,
+            runtime_cfg_name,
+            runtime_cfg_path,
+        )
 
     def _extract_mono_from_raw_window(self, raw_audio_file, start_time, end_time,
                                       warmup_seconds=0.0, sr=16000, n_channels=6):
