@@ -21,6 +21,7 @@ import json
 import os
 import re
 import zipfile
+import shutil
 import pandas as pd
 import soundfile as sf
 from pathlib import Path
@@ -703,6 +704,12 @@ class ResultAnalyzer:
         analysis_exists = analysis_path.exists()
         generated_analysis_data = None
 
+        if analysis_exists and active_mic_session:
+            stale_reason = self._get_stale_mic_array_analysis_reason(analysis_path, mic_array_context)
+            if stale_reason:
+                st.warning(f"Ignoring stale Mic Array analysis cache: {stale_reason}.")
+                analysis_exists = False
+
         # Analyze button
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -964,16 +971,47 @@ class ResultAnalyzer:
         session_root = source_path
         if source_path.suffix.lower() == '.zip':
             extract_dir = self.mic_array_cache_dir / source_path.stem
-            if not extract_dir.exists():
+            stamp_file = extract_dir / '.zip_source_mtime'
+            source_mtime = source_path.stat().st_mtime
+
+            needs_extract = True
+            if extract_dir.exists() and stamp_file.exists():
+                try:
+                    cached_mtime = float(stamp_file.read_text(encoding='utf-8').strip())
+                    needs_extract = cached_mtime != source_mtime
+                except Exception:
+                    needs_extract = True
+
+            if needs_extract:
+                if extract_dir.exists():
+                    shutil.rmtree(extract_dir)
                 extract_dir.mkdir(parents=True, exist_ok=True)
                 with zipfile.ZipFile(source_path, 'r') as zf:
                     zf.extractall(extract_dir)
-            children = [p for p in extract_dir.iterdir() if p.is_dir()]
+                stamp_file.write_text(str(source_mtime), encoding='utf-8')
+
+            children = [p for p in extract_dir.iterdir() if p.is_dir() and p.name != '__MACOSX']
             session_root = children[0] if len(children) == 1 else extract_dir
 
-        tracks_files = sorted(session_root.rglob('*_tracks.json'))
+        session_name = session_root.name
         json_files = sorted(session_root.rglob('*.json'))
-        cfg_files = sorted(session_root.rglob('*.cfg'))
+        cfg_files_all = sorted(session_root.rglob('*.cfg'))
+
+        # Prefer canonical session tracks and avoid run-level tracked_*.json noise.
+        tracks_files = [p for p in json_files if p.name == f"{session_name}_tracks.json"]
+        if not tracks_files:
+            tracks_files = [
+                p for p in json_files
+                if p.name.endswith('_tracks.json') and not p.name.startswith('tracked_')
+            ]
+        if not tracks_files:
+            tracks_files = [p for p in json_files if p.name == 'tracks.json']
+
+        # Prefer original cfg over generated *_fileInput.cfg variants.
+        cfg_files = [p for p in cfg_files_all if not p.name.endswith('_fileInput.cfg')]
+        if not cfg_files:
+            cfg_files = cfg_files_all
+
         latlong_files = sorted(session_root.rglob('*_latlong.txt'))
         txt_files = sorted(session_root.rglob('*.txt'))
 
@@ -1057,6 +1095,7 @@ class ResultAnalyzer:
                 class_name = src.get('class') or 'unclassified'
                 class_conf = float(src.get('class_conf', 0.0))
                 event_votes = 1 if class_name and class_name != 'unclassified' else 0
+                event_class_id = 0 if event_votes > 0 else -1
                 detections.append({
                     'timestamp': float(rel_ts),
                     'frame_count': 1,
@@ -1067,11 +1106,11 @@ class ResultAnalyzer:
                     'z': float(src.get('z', 0.0)),
                     'activity': float(src.get('activity', 0.0)),
                     'bins': [],
-                    'class_id': -1,
+                    'class_id': event_class_id,
                     'class_name': class_name,
                     'class_confidence': class_conf,
                     'class_timestamp': raw_ts,
-                    'event_class_id': -1,
+                    'event_class_id': event_class_id,
                     'event_class_name': class_name,
                     'event_votes': event_votes,
                     'event_avg_confidence': class_conf,
@@ -1086,8 +1125,25 @@ class ResultAnalyzer:
                 })
         return detections
 
-    def _build_ground_truth_scene_from_tracks(self, tracks_path, scene_name):
+    def _summarize_mic_array_tracks(self, tracks_path):
+        """Return lightweight stats to explain empty Mic Array detections."""
+        text = Path(tracks_path).read_text(encoding='utf-8', errors='replace')
+        frames = self._parse_concatenated_json_objects(text)
+        total_frames = len(frames)
+        frames_with_src = 0
+
+        for frame in frames:
+            if isinstance(frame, dict) and frame.get('src'):
+                frames_with_src += 1
+
+        return {
+            'total_frames': total_frames,
+            'frames_with_nonempty_src': frames_with_src,
+        }
+
+    def _build_ground_truth_scene_from_tracks(self, tracks_path, scene_name=None, session_name=None):
         """Build a synthetic-style directional_sources scene from concatenated tracks JSON."""
+        scene_name = scene_name or session_name or 'mic_array_session'
         detections = self._parse_mic_array_tracks(tracks_path)
         if not detections:
             return None
@@ -1196,7 +1252,20 @@ class ResultAnalyzer:
         detections = self._parse_mic_array_tracks(tracks_path)
         st.info(f"Parsed {len(detections)} detections from Mic Array tracks JSON")
         if not detections:
-            st.warning('No detections found in the selected Mic Array session.')
+            try:
+                stats = self._summarize_mic_array_tracks(tracks_path)
+                total_frames = int(stats.get('total_frames', 0))
+                nonempty_src = int(stats.get('frames_with_nonempty_src', 0))
+                if total_frames > 0 and nonempty_src == 0:
+                    st.warning(
+                        "No detections found: tracks JSON parsed successfully, "
+                        f"but all {total_frames} frames have empty src arrays. "
+                        "This session contains no tracked sources to analyze."
+                    )
+                else:
+                    st.warning('No detections found in the selected Mic Array session.')
+            except Exception:
+                st.warning('No detections found in the selected Mic Array session.')
             return None
 
         scene = mic_array_context.get('ground_truth_scene') or {
@@ -1205,7 +1274,12 @@ class ResultAnalyzer:
         }
         if scene.get('directional_sources'):
             matches, unmatched = self._match_detections_to_sources(
-                detections, scene, angle_threshold, time_pre=time_pre, time_post=time_post
+                detections,
+                scene,
+                angle_threshold,
+                time_pre=time_pre,
+                time_post=time_post,
+                apply_event_filter=False,
             )
         else:
             unmatched = list(detections)
@@ -1314,7 +1388,7 @@ class ResultAnalyzer:
         if primary_json_path and Path(primary_json_path).exists():
             try:
                 if str(primary_json_path).endswith('_tracks.json'):
-                    ground_truth_scene = self._build_ground_truth_scene_from_tracks(primary_json_path, session_name=session_name)
+                    ground_truth_scene = self._build_ground_truth_scene_from_tracks(primary_json_path, scene_name=session_name)
                     ground_truth_name = Path(primary_json_path).name
                     if ground_truth_scene and ground_truth_scene.get('directional_sources'):
                         st.caption(f"Default ground truth loaded from session JSON: {ground_truth_name}")
@@ -1388,6 +1462,47 @@ class ResultAnalyzer:
             'selected_model_dir': str(selected_model_dir),
             'selected_model_name': selected_model_name,
         }
+
+    def _get_stale_mic_array_analysis_reason(self, analysis_path, mic_array_context):
+        """Return a reason when a cached Mic Array analysis should be ignored."""
+        try:
+            if not analysis_path.exists():
+                return None
+
+            with open(analysis_path, 'r', encoding='utf-8', errors='replace') as f:
+                cached = json.load(f)
+
+            current_tracks = str(mic_array_context.get('tracks_path') or '')
+            cached_tracks = str((cached.get('config') or {}).get('tracks_path') or '')
+
+            def _norm_path(p):
+                if not p:
+                    return ''
+                try:
+                    return str(Path(p).expanduser().resolve(strict=False))
+                except Exception:
+                    return str(p)
+
+            current_tracks_norm = _norm_path(current_tracks)
+            cached_tracks_norm = _norm_path(cached_tracks)
+
+            if current_tracks_norm and cached_tracks_norm and current_tracks_norm != cached_tracks_norm:
+                return 'selected tracks path differs from cached analysis'
+
+            tracks_path = Path(current_tracks_norm) if current_tracks_norm else None
+            if tracks_path and tracks_path.exists() and tracks_path.stat().st_mtime > analysis_path.stat().st_mtime:
+                return 'tracks JSON is newer than cached analysis'
+
+            summary = cached.get('summary') or {}
+            cached_total = int(summary.get('total_detections', 0) or 0)
+            if cached_total == 0 and tracks_path and tracks_path.exists():
+                stats = self._summarize_mic_array_tracks(tracks_path)
+                if int(stats.get('frames_with_nonempty_src', 0) or 0) > 0:
+                    return 'cached analysis has zero detections but tracks JSON contains src events'
+
+            return None
+        except Exception:
+            return None
     
     def _get_analysis_path(self, run_id):
         """Get path to analysis JSON file"""
@@ -1414,6 +1529,9 @@ class ResultAnalyzer:
                      time_pre=None, time_post=None):
         """Analyze a simulation run"""
         try:
+            scene_meta = run_data.get('scene_metadata', {}) if isinstance(run_data.get('scene_metadata', {}), dict) else {}
+            source_type = str(scene_meta.get('source_type', '')).strip().lower()
+
             # Get session_live file
             session_live_file = self._resolve_run_path(
                 run_data.get('session_live_file'),
@@ -1434,8 +1552,9 @@ class ResultAnalyzer:
                 return None
 
             st.caption(f"Using session_live file: {session_live_file}")
-            
-            # Get scene file
+
+            # Get scene/ground-truth source
+            scene_data = None
             scene_file = self._resolve_run_path(
                 run_data.get('scene_file'),
                 search_dirs=[
@@ -1443,13 +1562,50 @@ class ResultAnalyzer:
                     self.project_root / 'config',
                 ]
             )
-            if not scene_file or not os.path.exists(scene_file):
-                st.error(f"Scene file not found: {scene_file}")
-                return None
-            
-            # Load scene
-            with open(scene_file, 'r') as f:
-                scene_data = json.load(f)
+            if scene_file and os.path.exists(scene_file):
+                with open(scene_file, 'r') as f:
+                    scene_data = json.load(f)
+            else:
+                fallback_scene = self._resolve_run_path(
+                    scene_meta.get('ground_truth_scene_file'),
+                    search_dirs=[
+                        self.project_root / 'outputs' / 'imported_ground_truth',
+                        self.project_root / 'outputs' / 'mic_array_imports',
+                    ]
+                )
+                if fallback_scene and os.path.exists(fallback_scene):
+                    with open(fallback_scene, 'r') as f:
+                        scene_data = json.load(f)
+                    scene_file = fallback_scene
+                    st.caption(f"Using fallback ground-truth scene: {fallback_scene}")
+                else:
+                    gt_tracks_path = self._resolve_run_path(
+                        scene_meta.get('ground_truth_source'),
+                        search_dirs=[
+                            self.project_root / 'outputs' / 'mic_array_imports',
+                        ]
+                    )
+                    if gt_tracks_path and os.path.exists(gt_tracks_path):
+                        scene_data = self._build_ground_truth_scene_from_tracks(
+                            gt_tracks_path,
+                            scene_name=run_data.get('scene_name', 'mic_array_session')
+                        )
+                        scene_file = gt_tracks_path
+                        st.caption(f"Using fallback tracks JSON for GT: {gt_tracks_path}")
+
+            if scene_data is None:
+                if source_type in ('live_session', 'passive_session', 'mic_array_imported'):
+                    st.warning(
+                        "Scene/GT file not found for this Mic Array run. Continuing without ground truth; "
+                        "all detections will be treated as unmatched."
+                    )
+                    scene_data = {
+                        'scene_name': run_data.get('scene_name', 'mic_array_session'),
+                        'directional_sources': [],
+                    }
+                else:
+                    st.error(f"Scene file not found: {scene_file}")
+                    return None
             
             # Parse ODAS output
             # warmup_seconds: silence prepended to render so ODAS can initialise
@@ -1494,11 +1650,11 @@ class ResultAnalyzer:
             
             # Compile results
             source_type = (
-                run_data.get('scene_metadata', {}).get('source_type')
-                or ('mic_array_imported' if run_data.get('scene_metadata', {}).get('ground_truth_source') else 'synthetic_render')
+                scene_meta.get('source_type')
+                or ('mic_array_imported' if scene_meta.get('ground_truth_source') else 'synthetic_render')
             )
             gt_source = (
-                run_data.get('scene_metadata', {}).get('ground_truth_source')
+                scene_meta.get('ground_truth_source')
                 or run_data.get('scene_file', '')
             )
 
@@ -1844,7 +2000,8 @@ class ResultAnalyzer:
         return float(confidence)
     
     def _match_detections_to_sources(self, detections, scene, angle_threshold,
-                                     time_pre=None, time_post=None):
+                                     time_pre=None, time_post=None,
+                                     apply_event_filter=True):
         """Match detected peaks to ground truth sources using interval overlap and event validity.
 
         Improvements over previous version:
@@ -1873,7 +2030,7 @@ class ResultAnalyzer:
         valid_detections = []
         filtered_stats = {'total': len(detections), 'no_classification': 0, 'low_votes': 0, 
                          'low_confidence': 0, 'valid': 0, 'legacy_mode': not has_event_fields}
-        if has_event_fields:
+        if has_event_fields and apply_event_filter:
             # New firmware: Apply event validity filtering
             for det in detections:
                 # Check 1: Has valid classification (not -1)
@@ -1900,7 +2057,7 @@ class ResultAnalyzer:
                 valid_detections.append(det)
                 filtered_stats['valid'] += 1
         else:
-            # Legacy firmware: Use all detections (backward compatibility)
+            # Legacy mode or explicit bypass: Use all detections.
             valid_detections = list(detections)
             filtered_stats['valid'] = len(detections)
         
@@ -2049,9 +2206,23 @@ class ResultAnalyzer:
                             top_k_candidates=candidates,
                             ambiguous=ambiguous,
                             strategy_used='odas_voting')
+
+            # Mic Array tracks can carry class names with missing event IDs.
+            # Treat name-present events as classified to avoid collapsing to 0.
+            if ev_name not in ('unclassified', ''):
+                return dict(class_id=0, class_name=ev_name,
+                            confidence=ev_conf or det.get('class_confidence', 0.0),
+                            votes=max(ev_votes, 1),
+                            top_k_candidates=candidates,
+                            ambiguous=ambiguous,
+                            strategy_used='odas_voting_name_only')
             # Fallback to legacy single-hop fields
-            return dict(class_id=det.get('class_id', -1),
-                        class_name=det.get('class_name', 'unclassified'),
+            legacy_name = det.get('class_name', 'unclassified')
+            legacy_id = det.get('class_id', -1)
+            if legacy_id == -1 and legacy_name not in ('unclassified', ''):
+                legacy_id = 0
+            return dict(class_id=legacy_id,
+                        class_name=legacy_name,
                         confidence=det.get('class_confidence', 0.0),
                         votes=0, top_k_candidates=[], ambiguous=False,
                         strategy_used='odas_legacy')

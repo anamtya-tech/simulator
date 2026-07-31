@@ -443,15 +443,47 @@ class SimulationRunner:
         session_root = source_path
         if source_path.suffix.lower() == '.zip':
             extract_dir = self.mic_array_cache_dir / source_path.stem
-            if not extract_dir.exists():
+            stamp_file = extract_dir / '.zip_source_mtime'
+            source_mtime = source_path.stat().st_mtime
+
+            needs_extract = True
+            if extract_dir.exists() and stamp_file.exists():
+                try:
+                    cached_mtime = float(stamp_file.read_text(encoding='utf-8').strip())
+                    needs_extract = cached_mtime != source_mtime
+                except Exception:
+                    needs_extract = True
+
+            if needs_extract:
+                if extract_dir.exists():
+                    shutil.rmtree(extract_dir)
                 extract_dir.mkdir(parents=True, exist_ok=True)
                 with zipfile.ZipFile(source_path, 'r') as zf:
                     zf.extractall(extract_dir)
-            children = [p for p in extract_dir.iterdir() if p.is_dir()]
+                stamp_file.write_text(str(source_mtime), encoding='utf-8')
+
+            children = [p for p in extract_dir.iterdir() if p.is_dir() and p.name != '__MACOSX']
             session_root = children[0] if len(children) == 1 else extract_dir
 
-        tracks_files = sorted(session_root.rglob('*_tracks.json'))
-        cfg_files = sorted(session_root.rglob('*.cfg'))
+        session_name = session_root.name
+        json_files = sorted(session_root.rglob('*.json'))
+        cfg_files_all = sorted(session_root.rglob('*.cfg'))
+
+        # Prefer canonical session tracks and ignore run-level tracked_*.json noise.
+        tracks_files = [p for p in json_files if p.name == f"{session_name}_tracks.json"]
+        if not tracks_files:
+            tracks_files = [
+                p for p in json_files
+                if p.name.endswith('_tracks.json') and not p.name.startswith('tracked_')
+            ]
+        if not tracks_files:
+            tracks_files = [p for p in json_files if p.name == 'tracks.json']
+
+        # Prefer source cfg over generated *_fileInput.cfg variants.
+        cfg_files = [p for p in cfg_files_all if not p.name.endswith('_fileInput.cfg')]
+        if not cfg_files:
+            cfg_files = cfg_files_all
+
         latlong_files = sorted(session_root.rglob('*_latlong.txt'))
         raw_files = sorted(session_root.rglob('*.raw'))
         txt_files = sorted(session_root.rglob('*.txt'))
@@ -767,6 +799,81 @@ class SimulationRunner:
         except Exception as exc:
             st.warning(f"⚠️ Could not patch ODAS config with preset: {exc}")
 
+    def _normalize_mic_array_timestamp_sidecar(self, raw_file_path: str):
+        """Normalize Mic Array sidecar timestamps to epoch-ms lines for ODAS parser.
+
+        Some captured sessions store ISO8601 timestamps in the companion .txt,
+        while ODAS sidecar loading expects integer millisecond timestamps.
+        """
+        txt_path = Path(raw_file_path).with_suffix('.txt')
+        if not txt_path.exists():
+            return
+
+        max_supported_timestamps = 100000
+
+        try:
+            lines = txt_path.read_text(encoding='utf-8', errors='replace').splitlines()
+            numeric_lines = []
+            converted = 0
+
+            for raw_line in lines:
+                line = raw_line.strip()
+                if not line:
+                    continue
+
+                # Preserve already numeric timestamp lines as-is.
+                if line.isdigit():
+                    numeric_lines.append(line)
+                    continue
+
+                # Ignore metadata header lines often present in recorder sidecars.
+                if (
+                    line.startswith('Recording started at:')
+                    or line.startswith('Sample Rate:')
+                    or line.startswith('Hop Size:')
+                    or line.startswith('Bit Depth:')
+                    or line.startswith('Channels:')
+                    or line.startswith('Parent PID:')
+                ):
+                    continue
+
+                # Convert ISO8601 timestamps (with optional trailing Z) to epoch ms.
+                iso = line.replace('Z', '+00:00')
+                try:
+                    ts_ms = int(datetime.fromisoformat(iso).timestamp() * 1000.0)
+                    numeric_lines.append(str(ts_ms))
+                    converted += 1
+                except Exception:
+                    continue
+
+            trimmed = 0
+            if len(numeric_lines) > max_supported_timestamps:
+                src_count = len(numeric_lines)
+                if max_supported_timestamps == 1:
+                    numeric_lines = [numeric_lines[0]]
+                else:
+                    numeric_lines = [
+                        numeric_lines[int(i * (src_count - 1) / (max_supported_timestamps - 1))]
+                        for i in range(max_supported_timestamps)
+                    ]
+                trimmed = src_count - len(numeric_lines)
+
+            if numeric_lines and (converted > 0 or trimmed > 0):
+                backup = txt_path.with_suffix('.txt.iso_backup')
+                if not backup.exists():
+                    backup.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+                txt_path.write_text('\n'.join(numeric_lines) + '\n', encoding='utf-8')
+                msg = (
+                    f"Normalized timestamp sidecar for ODAS: {txt_path.name} "
+                    f"({converted} ISO rows converted to epoch-ms"
+                )
+                if trimmed > 0:
+                    msg += f", {trimmed} rows downsampled to fit ODAS 100000-row limit"
+                msg += ').'
+                st.caption(msg)
+        except Exception as exc:
+            st.warning(f"⚠️ Could not normalize Mic Array timestamp sidecar: {exc}")
+
     def _prepare_runtime_cfg_for_simulation(
         self,
         cfg_path: str,
@@ -789,6 +896,9 @@ class SimulationRunner:
 
         try:
             text = src_path.read_text(encoding='utf-8', errors='replace')
+
+            if is_mic_array_import:
+                self._normalize_mic_array_timestamp_sidecar(raw_file_path)
 
             # Imported ZIP configs often come from device paths. Normalize common
             # prefixes so odaslive can run directly on this VM.

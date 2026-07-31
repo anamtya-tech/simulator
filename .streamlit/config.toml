@@ -1,5 +1,14 @@
 [server]
+address = "0.0.0.0"
+port = 8502
+headless = true
+enableCORS = false
+enableXsrfProtection = false
+fileWatcherType = "none"
 maxUploadSize = 10000
 
 [client]
 showErrorDetails = true
+
+[browser]
+gatherUsageStats = false
