@@ -84,6 +84,27 @@ class ResultAnalyzer:
         # Initialize timing compensator for interval-based matching
         self.timing_compensator = TimingCompensator()
 
+        # Background analysis jobs: {job_key: {'status': 'running'|'done'|'error', 'start': float, 'error': str}}
+        if not hasattr(ResultAnalyzer, '_bg_jobs'):
+            ResultAnalyzer._bg_jobs = {}
+        if not hasattr(ResultAnalyzer, '_bg_thread_local'):
+            ResultAnalyzer._bg_thread_local = __import__('threading').local()
+            ResultAnalyzer._patch_st_for_background()
+
+    @staticmethod
+    def _patch_st_for_background():
+        """Wrap st display fns to use print() when called from a background thread."""
+        import streamlit as _st
+        _local = ResultAnalyzer._bg_thread_local
+        for _fn in ('info', 'warning', 'error', 'caption', 'success'):
+            _orig = getattr(_st, _fn)
+            def _safe(msg='', *a, __fn=_fn, __orig=_orig, **kw):
+                if getattr(ResultAnalyzer._bg_thread_local, 'active', False):
+                    print(f'[ST.{__fn.upper()}] {msg}')
+                else:
+                    return __orig(msg, *a, **kw)
+            setattr(_st, _fn, _safe)
+
     def _map_legacy_path(self, raw_path):
         """Map legacy absolute paths from older runs to current workspace paths."""
         if not raw_path:
@@ -313,7 +334,10 @@ class ResultAnalyzer:
 
         rows = []
         matched_count = 0
-        available_odas = list(odas_events)
+        # Build sorted timestamps for bisect — avoids O(N²) scan + list.remove().
+        import bisect as _bisect
+        _ev_times = [e['timestamp'] for e in odas_events]
+        _matched_ev_idx: set = set()
         for idx, src in enumerate(gt_sources, 1):
             label = str(src.get('label', 'unknown'))
             gt_ts = _to_float(src.get('start_time', 0.0), 0.0)
@@ -322,15 +346,18 @@ class ResultAnalyzer:
             gy = _to_float(gt_pos[1] if len(gt_pos) > 1 else 0.0, 0.0)
             gz = _to_float(gt_pos[2] if len(gt_pos) > 2 else 0.0, 0.0)
 
+            _lo = _bisect.bisect_left(_ev_times, gt_ts - time_tolerance)
+            _hi = _bisect.bisect_right(_ev_times, gt_ts + time_tolerance)
+            _candidates = [(i, odas_events[i]) for i in range(_lo, _hi) if i not in _matched_ev_idx]
+
+            best_i = None
             best = None
             best_score = None
-            for ev in available_odas:
-                dt = abs(ev['timestamp'] - gt_ts)
+            for _i, ev in _candidates:
                 dxyz = float(np.linalg.norm(np.array([ev['x'] - gx, ev['y'] - gy, ev['z'] - gz])))
-                score = (dt / max(time_tolerance, 1e-9)) + (dxyz / max(xyz_tolerance, 1e-9))
-                if best is None or score < best_score:
-                    best = ev
-                    best_score = score
+                score = abs(ev['timestamp'] - gt_ts) / max(time_tolerance, 1e-9) + dxyz / max(xyz_tolerance, 1e-9)
+                if best_score is None or score < best_score:
+                    best_i, best, best_score = _i, ev, score
 
             if best is not None:
                 dt = abs(best['timestamp'] - gt_ts)
@@ -343,7 +370,7 @@ class ResultAnalyzer:
 
             if is_match:
                 matched_count += 1
-                available_odas.remove(best)
+                _matched_ev_idx.add(best_i)
 
             rows.append({
                 'Seq': idx,
@@ -649,6 +676,9 @@ class ResultAnalyzer:
                 st.caption(f"Model used: {selected_model_name}")
                 if runtime_cfg_path:
                     st.caption(f"Runtime cfg path: {runtime_cfg_path}")
+                gt_src = (run_data.get('scene_metadata') or {}).get('ground_truth_source', '')
+                if gt_src:
+                    st.caption(f"GT file: {gt_src}")
 
         # Show experiment provenance if tagged
         exp_tag = run_data.get('experiment_tag', '') if run_data else ''
@@ -696,6 +726,43 @@ class ResultAnalyzer:
                          "Handles Kalman persistence tail (observed: up to 12.75s for Wolfhowl)."
                 )
 
+            st.divider()
+            run_duration_s_for_ui = 0.0
+            if active_mic_session:
+                run_duration_s_for_ui = float(
+                    mic_array_context.get('duration_seconds')
+                    or mic_array_context.get('raw_duration_seconds')
+                    or mic_array_context.get('tracks_duration_seconds')
+                    or 0.0
+                )
+            elif run_data:
+                run_duration_s_for_ui = float(
+                    run_data.get('scene_metadata', {}).get('duration')
+                    or run_data.get('duration')
+                    or 0.0
+                )
+
+            max_minutes_ui = max(60, int(np.ceil(max(run_duration_s_for_ui, 60.0) / 60.0)))
+            default_minutes_ui = max(1, min(max_minutes_ui, int(np.ceil(max(run_duration_s_for_ui, 60.0) / 60.0))))
+
+            use_fast_window = st.checkbox(
+                "⚡ Fast mode: cap analysis window",
+                value=False,
+                help="OFF = analyze full run. ON = analyze only first N minutes for a quick report."
+            )
+
+            if use_fast_window:
+                max_window_s = st.slider(
+                    "⏱ Max analysis window (minutes)",
+                    1,
+                    max_minutes_ui,
+                    min(10, default_minutes_ui),
+                    1,
+                    help="Limit analysis to the first N minutes. Use this only for a quick top-line pass."
+                ) * 60
+            else:
+                max_window_s = None
+
         # Check if analysis exists
         analysis_path = self._get_analysis_path(analysis_id)
         report_path = self._get_report_path(analysis_id)
@@ -729,58 +796,106 @@ class ResultAnalyzer:
                     st.rerun()
 
         # Run analysis
+        job_key = f'_bg_analysis_{analysis_id}'
+        job = ResultAnalyzer._bg_jobs.get(job_key, {})
+
         if analyze_button:
-            with st.spinner("Analyzing..."):
-                if active_mic_session:
-                    results = self._analyze_mic_array_session(
-                        mic_array_context,
-                        angle_threshold,
-                        time_pre=time_pre,
-                        time_post=time_post,
-                    )
-                else:
-                    results = self._analyze_run(run_data, angle_threshold, save_unmatched,
-                                                time_pre=time_pre, time_post=time_post)
+            import time as _time, threading as _threading
 
-                if results:
-                    # Use YAMNet classifications instead of custom model
-                    strategy = st.session_state.get('label_strategy', 'ODAS event voting')
-                    results = self._apply_yamnet_classifications(results, label_strategy=strategy)
+            # Capture loop-locals for the thread closure
+            _active_mic = active_mic_session
+            _mic_ctx = mic_array_context
+            _run_data = run_data
+            _angle = angle_threshold
+            _save_unm = save_unmatched
+            _pre = time_pre
+            _post = time_post
+            _max_window = max_window_s
+            _analysis_id = analysis_id
+            _analysis_mode = analysis_mode
+            _save_to_ds = save_to_dataset if analysis_mode == "Synthetic Run" else False
+            _yamnet_conf = yamnet_conf_threshold if analysis_mode == "Synthetic Run" else 0.5
+            _ambient_only = ambient_only_mode if analysis_mode == "Synthetic Run" else False
+            _strategy = st.session_state.get('label_strategy', 'ODAS event voting')
 
-                    # Save analysis JSON
-                    self._save_analysis(analysis_id, results, angle_threshold)
+            def _bg_task():
+                ResultAnalyzer._bg_thread_local.active = True
+                try:
+                    print(f"[BG] Analysis started for {_analysis_id}")
+                    if _active_mic:
+                        r = self._analyze_mic_array_session(_mic_ctx, _angle, time_pre=_pre, time_post=_post, max_window_s=_max_window)
+                    else:
+                        r = self._analyze_run(_run_data, _angle, _save_unm, time_pre=_pre, time_post=_post, max_window_s=_max_window)
 
-                    # Generate HTML report
-                    self._generate_html_report(analysis_id, results)
-
-                    # Create dataset CSV
-                    self._create_dataset(results, analysis_id, save_unmatched)
-
-                    # Save to YAMNet training dataset only for synthetic mode.
-                    if analysis_mode == "Synthetic Run" and save_to_dataset:
+                    if r:
+                        # Checkpoint raw results immediately so a hot-reload can't lose them.
+                        _ckpt = self.analysis_dir / f"{_analysis_id}_checkpoint.json"
                         try:
-                            # Apply the UI threshold before curating
-                            self.yamnet_curator.config['curation_criteria']['confidence_threshold'] = yamnet_conf_threshold
-                            if ambient_only_mode:
-                                # Ambient-only run: label all peaks as 'background' hard negatives
-                                bg_stats = self.yamnet_curator.curate_ambient_as_background(
-                                    results, analysis_id)
-                                saved_bg = bg_stats.get('saved', 0)
-                                st.info(f"🌿 Ambient-only mode: {saved_bg} peaks saved as 'background' hard negatives")
-                            else:
-                                yamnet_stats = self.yamnet_curator.curate_from_analysis(results, analysis_id)
-                                saved_t = yamnet_stats.get('saved', 0)
-                                saved_u = yamnet_stats.get('unknown_saved', 0)
-                                if saved_t or saved_u:
-                                    st.info(f"🎵 YAMNet dataset: {saved_t} training + {saved_u} unknown samples saved")
-                        except Exception as e:
-                            st.warning(f"⚠️ YAMNet curation skipped: {e}")
+                            import json as _json
+                            _ckpt.write_text(_json.dumps({
+                                'status': 'post_match',
+                                'n_matches': len(r.get('matches', [])),
+                                'n_unmatched': len(r.get('unmatched', [])),
+                            }), encoding='utf-8')
+                            print(f"[BG] Checkpoint saved: {_ckpt.name}")
+                        except Exception as _ce:
+                            print(f"[BG] Checkpoint save failed (non-fatal): {_ce}")
+                        print(f"[BG] Applying YAMNet classifications...")
+                        r = self._apply_yamnet_classifications(r, label_strategy=_strategy)
+                        print(f"[BG] Saving analysis JSON...")
+                        self._save_analysis(_analysis_id, r, _angle)
+                        print(f"[BG] Generating HTML report...")
+                        self._generate_html_report(_analysis_id, r)
+                        print(f"[BG] Creating dataset CSV...")
+                        self._create_dataset(r, _analysis_id, _save_unm)
+                        if _analysis_mode == "Synthetic Run" and _save_to_ds:
+                            try:
+                                self.yamnet_curator.config['curation_criteria']['confidence_threshold'] = _yamnet_conf
+                                if _ambient_only:
+                                    bg_stats = self.yamnet_curator.curate_ambient_as_background(r, _analysis_id)
+                                    print(f"[BG] Ambient: {bg_stats.get('saved', 0)} background samples saved")
+                                else:
+                                    ys = self.yamnet_curator.curate_from_analysis(r, _analysis_id)
+                                    print(f"[BG] YAMNet dataset: {ys.get('saved', 0)} training + {ys.get('unknown_saved', 0)} unknown saved")
+                            except Exception as _ce:
+                                print(f"[BG] YAMNet curation skipped: {_ce}")
+                        ResultAnalyzer._bg_jobs[job_key] = {'status': 'done', 'start': ResultAnalyzer._bg_jobs.get(job_key, {}).get('start', 0)}
+                        print(f"[BG] Analysis complete: {_analysis_id}")
+                        try:
+                            _ckpt.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    else:
+                        ResultAnalyzer._bg_jobs[job_key] = {'status': 'error', 'error': 'Analysis returned no results', 'start': 0}
+                        print(f"[BG] Analysis returned no results for {_analysis_id}")
+                except Exception as _exc:
+                    import traceback
+                    traceback.print_exc()
+                    ResultAnalyzer._bg_jobs[job_key] = {'status': 'error', 'error': str(_exc), 'start': ResultAnalyzer._bg_jobs.get(job_key, {}).get('start', 0)}
 
-                    st.success("✅ Analysis complete!")
-                    analysis_exists = True
-                    generated_analysis_data = self._convert_to_native(results)
-                    if active_mic_session:
-                        st.session_state[f'auto_open_report_{analysis_id}'] = True
+            ResultAnalyzer._bg_jobs[job_key] = {'status': 'running', 'start': _time.time()}
+            _threading.Thread(target=_bg_task, daemon=True).start()
+            st.rerun()
+
+        # Show background job status
+        import time as _time
+        if job.get('status') == 'running':
+            elapsed = _time.time() - job.get('start', _time.time())
+            st.info(f"⏳ Analysis running in background... ({elapsed:.0f}s elapsed) — check terminal for progress.")
+            _time.sleep(3)
+            st.rerun()
+            return
+        elif job.get('status') == 'error':
+            st.error(f"❌ Analysis failed: {job.get('error', 'unknown error')}")
+            if st.button("🗑️ Clear Error", key=f"clear_err_{analysis_id}"):
+                ResultAnalyzer._bg_jobs.pop(job_key, None)
+                st.rerun()
+        elif job.get('status') == 'done':
+            ResultAnalyzer._bg_jobs.pop(job_key, None)
+            analysis_exists = True
+            st.success("✅ Analysis complete!")
+            if active_mic_session:
+                st.session_state[f'auto_open_report_{analysis_id}'] = True
 
         # Display results if analysis exists
         if analysis_exists:
@@ -1242,7 +1357,7 @@ class ResultAnalyzer:
             })
         return matches
 
-    def _analyze_mic_array_session(self, mic_array_context, angle_threshold, time_pre=None, time_post=None):
+    def _analyze_mic_array_session(self, mic_array_context, angle_threshold, time_pre=None, time_post=None, max_window_s=None):
         """Analyze a selected Mic Array session using uploaded GT when available."""
         tracks_path = mic_array_context.get('tracks_path')
         if not tracks_path or not Path(tracks_path).exists():
@@ -1250,6 +1365,10 @@ class ResultAnalyzer:
             return None
 
         detections = self._parse_mic_array_tracks(tracks_path)
+        if max_window_s and max_window_s > 0:
+            before = len(detections)
+            detections = [d for d in detections if float(d.get('timestamp', 0)) <= max_window_s]
+            print(f"[Window] Trimmed detections to first {max_window_s/60:.0f} min: {before} → {len(detections)}")
         st.info(f"Parsed {len(detections)} detections from Mic Array tracks JSON")
         if not detections:
             try:
@@ -1273,6 +1392,13 @@ class ResultAnalyzer:
             'directional_sources': [],
         }
         if scene.get('directional_sources'):
+            if max_window_s and max_window_s > 0:
+                scene = dict(scene)
+                scene['directional_sources'] = [
+                    s for s in scene['directional_sources']
+                    if float(s.get('start_time', 0)) <= max_window_s
+                ]
+                print(f"[Window] GT sources in window: {len(scene['directional_sources'])}")
             matches, unmatched = self._match_detections_to_sources(
                 detections,
                 scene,
@@ -1526,7 +1652,7 @@ class ResultAnalyzer:
         st.success(f"Deleted analysis for {run_id}")
     
     def _analyze_run(self, run_data, angle_threshold, save_unmatched,
-                     time_pre=None, time_post=None):
+                     time_pre=None, time_post=None, max_window_s=None):
         """Analyze a simulation run"""
         try:
             scene_meta = run_data.get('scene_metadata', {}) if isinstance(run_data.get('scene_metadata', {}), dict) else {}
@@ -1555,43 +1681,56 @@ class ResultAnalyzer:
 
             # Get scene/ground-truth source
             scene_data = None
-            scene_file = self._resolve_run_path(
-                run_data.get('scene_file'),
-                search_dirs=[
-                    self.project_root / 'config' / 'scenes',
-                    self.project_root / 'config',
-                ]
-            )
-            if scene_file and os.path.exists(scene_file):
-                with open(scene_file, 'r') as f:
-                    scene_data = json.load(f)
-            else:
-                fallback_scene = self._resolve_run_path(
-                    scene_meta.get('ground_truth_scene_file'),
+            scene_file = None
+            is_mic_array_run = source_type in ('live_session', 'passive_session', 'mic_array_imported')
+
+            # For mic-array runs use the session's own _tracks.json as GT first.
+            if is_mic_array_run:
+                gt_tracks_path = self._resolve_run_path(
+                    scene_meta.get('ground_truth_source'),
                     search_dirs=[
-                        self.project_root / 'outputs' / 'imported_ground_truth',
                         self.project_root / 'outputs' / 'mic_array_imports',
                     ]
                 )
-                if fallback_scene and os.path.exists(fallback_scene):
-                    with open(fallback_scene, 'r') as f:
-                        scene_data = json.load(f)
-                    scene_file = fallback_scene
-                    st.caption(f"Using fallback ground-truth scene: {fallback_scene}")
+                if gt_tracks_path and os.path.exists(gt_tracks_path):
+                    print(f"[GT] Loading session tracks JSON: {gt_tracks_path}")
+                    scene_data = self._build_ground_truth_scene_from_tracks(
+                        gt_tracks_path,
+                        scene_name=run_data.get('scene_name', 'mic_array_session')
+                    )
+                    scene_file = gt_tracks_path
+                    n_sources = len((scene_data or {}).get('directional_sources', []))
+                    print(f"[GT] Loaded {n_sources} directional sources from tracks JSON")
+                    st.caption(f"Ground truth: {Path(gt_tracks_path).name} ({n_sources} sources)")
                 else:
-                    gt_tracks_path = self._resolve_run_path(
-                        scene_meta.get('ground_truth_source'),
+                    print(f"[GT] WARNING: tracks JSON not found (ground_truth_source={scene_meta.get('ground_truth_source')!r})")
+
+            if scene_data is None:
+                scene_file = self._resolve_run_path(
+                    run_data.get('scene_file'),
+                    search_dirs=[
+                        self.project_root / 'config' / 'scenes',
+                        self.project_root / 'config',
+                    ]
+                )
+                if scene_file and os.path.exists(scene_file):
+                    print(f"[GT] Loading scene file: {scene_file}")
+                    with open(scene_file, 'r') as f:
+                        scene_data = json.load(f)
+                else:
+                    fallback_scene = self._resolve_run_path(
+                        scene_meta.get('ground_truth_scene_file'),
                         search_dirs=[
+                            self.project_root / 'outputs' / 'imported_ground_truth',
                             self.project_root / 'outputs' / 'mic_array_imports',
                         ]
                     )
-                    if gt_tracks_path and os.path.exists(gt_tracks_path):
-                        scene_data = self._build_ground_truth_scene_from_tracks(
-                            gt_tracks_path,
-                            scene_name=run_data.get('scene_name', 'mic_array_session')
-                        )
-                        scene_file = gt_tracks_path
-                        st.caption(f"Using fallback tracks JSON for GT: {gt_tracks_path}")
+                    if fallback_scene and os.path.exists(fallback_scene):
+                        print(f"[GT] Loading fallback scene file: {fallback_scene}")
+                        with open(fallback_scene, 'r') as f:
+                            scene_data = json.load(f)
+                        scene_file = fallback_scene
+                        st.caption(f"Using fallback ground-truth scene: {fallback_scene}")
 
             if scene_data is None:
                 if source_type in ('live_session', 'passive_session', 'mic_array_imported'):
@@ -1619,8 +1758,21 @@ class ResultAnalyzer:
             )
             if warmup_seconds > 0:
                 st.info(f"⏱ Warmup offset: subtracting {warmup_seconds:.0f}s from event timestamps")
+            print(f"[Analyze] Parsing ODAS output: {session_live_file}")
             detections = self._parse_odas_output(session_live_file, warmup_seconds=warmup_seconds)
+            print(f"[Analyze] Parsed {len(detections)} detections from ODAS output")
             st.info(f"Parsed {len(detections)} detections from ODAS output")
+
+            if max_window_s and max_window_s > 0:
+                before = len(detections)
+                detections = [d for d in detections if float(d.get('timestamp', 0)) <= max_window_s]
+                srcs_before = len(scene_data.get('directional_sources', []))
+                scene_data = dict(scene_data)
+                scene_data['directional_sources'] = [
+                    s for s in scene_data.get('directional_sources', [])
+                    if float(s.get('start_time', 0)) <= max_window_s
+                ]
+                print(f"[Window] {max_window_s/60:.0f}-min cap: detections {before}→{len(detections)}, GT sources {srcs_before}→{len(scene_data['directional_sources'])}")
 
             run_duration_s = float(
                 run_data.get('scene_metadata', {}).get('duration', run_data.get('duration', 0.0))
@@ -1636,14 +1788,14 @@ class ResultAnalyzer:
             if not detections:
                 st.warning("No detections found in ODAS output")
                 return None
-            
+
             # Match detections to sources
             matches, unmatched = self._match_detections_to_sources(
                 detections, scene_data, angle_threshold,
-                                time_pre=time_pre, time_post=time_post
+                time_pre=time_pre, time_post=time_post
             )
-            
             st.info(f"Matched: {len(matches)}, Unmatched: {len(unmatched)}")
+            print(f"[Match] Final: matched={len(matches)}, unmatched={len(unmatched)}")
             
             # Calculate statistics
             stats = self._calculate_statistics(matches, unmatched, scene_data)
@@ -2074,28 +2226,44 @@ class ResultAnalyzer:
         
         matched_detection_indices = set()
         matches = []
-        
+
+        # Sort once by timestamp so we can binary-search into the time window
+        # instead of scanning all valid_detections for every source.
+        import bisect
+        valid_detections_sorted = sorted(
+            enumerate(valid_detections), key=lambda t: t[1]['timestamp']
+        )
+        sorted_times = [t['timestamp'] for _, t in valid_detections_sorted]
+
+        print(f"[Match] {len(valid_detections)} valid detections, {len(sources)} GT sources — starting matching...")
+
         # PASS 1: Match detections to sources within time windows
-        for src in sources:
+        for src_idx, src in enumerate(sources, 1):
             src_start = src.get('start_time', 0)
             src_end = src.get('end_time', float('inf'))
             src_label = src.get('label', 'unknown')
-            
-            # Define asymmetric search window:
-            # Pre-window catches ODAS early-starts (e.g. Frog detected 3.5s before GT start).
-            # Post-window catches Kalman persistence tails (e.g. Wolfhowl tracked 12.75s after GT end).
+
+            # Asymmetric search window (pre/post buffers for latency + Kalman tail).
             window_start = src_start - pre
             window_end   = src_end   + post
-            
+
+            if src_idx % 500 == 0 or src_idx == 1:
+                print(f"[Match] source {src_idx}/{len(sources)} — {src_label} [{src_start:.1f}s-{src_end:.1f}s], matched so far: {len(matches)}")
+
             # Get source position
             if 'position' in src:
                 src_pos = src['position']
             else:
                 src_pos = [src.get('x', 0), src.get('y', 0), src.get('z', 0)]
             src_az, src_el = self._cartesian_to_spherical(src_pos[0], src_pos[1], src_pos[2])
-            
-            # Find all detections in this time window
-            for idx, det in enumerate(valid_detections):
+
+            # Binary-search to find only detections whose timestamp falls in
+            # [window_start, window_end] — avoids scanning all 700k+ entries.
+            lo = bisect.bisect_left(sorted_times, window_start)
+            hi = bisect.bisect_right(sorted_times, window_end)
+            window_candidates = valid_detections_sorted[lo:hi]
+
+            for idx, det in window_candidates:
                 det_time = det['timestamp']
                 frame_count = det.get('frame_count', 1)
                 
@@ -2152,6 +2320,8 @@ class ResultAnalyzer:
                     
                     matched_detection_indices.add(idx)
         
+        print(f"[Match] PASS 1 done: {len(matches)} matched. Starting PASS 2 (unmatched labelling)...")
+
         # PASS 2: Label unmatched valid detections as 'unknown'
         # Note: Only valid_detections are considered, so invalid events are implicitly filtered out
         unmatched = []
@@ -2171,8 +2341,9 @@ class ResultAnalyzer:
                 })
                 unmatched.append(det)
         
+        print(f"[Match] Done. matched={len(matches)}, unmatched={len(unmatched)}")
         return matches, unmatched
-    
+
     def _derive_label(self, det, strategy='ODAS event voting'):
         """
         Derive (class_id, class_name, confidence, votes) from a detection dict
@@ -2315,14 +2486,19 @@ class ResultAnalyzer:
             'Fine-tuned model':                '🧠 Fine-tuned model',
         }
         st.info(f"{strategy_labels.get(label_strategy, label_strategy)} — labeling detections...")
+        print(f"[BG] Labeling {len(results.get('matches', []))} detections with strategy: {label_strategy}")
         
         matches_needing_training = []
+        training_seen_ids = set()
         yamnet_predicted = 0
         yamnet_correct = 0
         yamnet_incorrect = 0
         unclassified = 0
         
-        for match in results['matches']:
+        total_m = len(results.get('matches', []))
+        for _mi, match in enumerate(results['matches']):
+            if _mi % 100_000 == 0 and _mi > 0:
+                print(f"[Label] {_mi}/{total_m} detections labeled...")
             det = match['detection']
 
             # ── Enrich in-memory match with patch_quality + spectral_count ──
@@ -2380,6 +2556,7 @@ class ResultAnalyzer:
                     match['needs_training'] = True
                     match['training_reason'] = 'no_ground_truth'
                     matches_needing_training.append(match)
+                    training_seen_ids.add(id(match))
                 continue
 
             if yamnet_class == 'unclassified' or yamnet_id == -1:
@@ -2387,6 +2564,7 @@ class ResultAnalyzer:
                 match['needs_training'] = True
                 match['training_reason'] = 'unclassified'
                 matches_needing_training.append(match)
+                training_seen_ids.add(id(match))
                 continue
             
             yamnet_predicted += 1
@@ -2407,12 +2585,14 @@ class ResultAnalyzer:
                     match['needs_training'] = True
                     match['training_reason'] = f'mismatch (pred: {yamnet_class}, gt: {gt_label})'
                     matches_needing_training.append(match)
+                    training_seen_ids.add(id(match))
                 
                 if yamnet_conf < 0.5:
                     match['needs_training'] = True
                     match['training_reason'] = match.get('training_reason', '') + ' low_confidence'
-                    if match not in matches_needing_training:
+                    if id(match) not in training_seen_ids:
                         matches_needing_training.append(match)
+                        training_seen_ids.add(id(match))
             else:
                 match['label'] = yamnet_class
                 match['confidence'] = yamnet_conf
@@ -2420,6 +2600,7 @@ class ResultAnalyzer:
                     match['needs_training'] = True
                     match['training_reason'] = 'low_confidence'
                     matches_needing_training.append(match)
+                    training_seen_ids.add(id(match))
         
         # Update summary stats
         results['yamnet_stats'] = {
@@ -3071,6 +3252,9 @@ class ResultAnalyzer:
     def _save_analysis(self, run_id, results, angle_threshold):
         """Save analysis results to JSON"""
         analysis_path = self._get_analysis_path(run_id)
+        n_matches = len(results.get('matches', []))
+        n_unmatched = len(results.get('unmatched', []))
+        print(f"[BG] Serializing {n_matches} matches + {n_unmatched} unmatched to JSON...")
 
         # Create a saveable version (without large bin arrays)
         save_data = {
@@ -3121,6 +3305,7 @@ class ResultAnalyzer:
                 json.dump(save_data, f, indent=2, ensure_ascii=True)
             # Atomic rename - if this succeeds, the file is complete
             temp_path.rename(analysis_path)
+            print(f"[BG] Saved analysis JSON: {analysis_path}")
         except Exception as e:
             # Clean up temp file if something went wrong
             if temp_path.exists():
@@ -3263,14 +3448,18 @@ class ResultAnalyzer:
     def _generate_html_report(self, run_id, results):
         """Generate interactive HTML report with Plotly."""
         report_path = self._get_report_path(run_id)
+        print(f"[BG] Generating HTML report ({report_path.name})...")
 
         run_meta = results.get('run_metadata', {}) if isinstance(results, dict) else {}
         source_type = str((results.get('config', {}) or {}).get('source_type', '')).strip().lower()
         if run_meta.get('mic_array'):
+            print(f"[Report] Building mic-array report...")
             html_content = self._create_mic_array_report(results)
         elif source_type in ('live_session', 'passive_session'):
+            print(f"[Report] Building calibration report ({len(results.get('matches',[]))} matches)...")
             html_content = self._create_simple_calibration_report(results)
         else:
+            print(f"[Report] Building Plotly report...")
             html_content = self._create_plotly_report(results)
         
         # Strip surrogate characters that json-c may embed in malformed UTF-8
@@ -3281,7 +3470,7 @@ class ResultAnalyzer:
         # Save to file
         with open(report_path, 'w', encoding='utf-8', errors='replace') as f:
             f.write(html_content)
-        
+        print(f"[BG] HTML report saved: {report_path}")
         st.success(f"📊 Generated interactive report: {report_path.name}")
 
     def _create_simple_calibration_report(self, results):
@@ -3364,10 +3553,17 @@ class ResultAnalyzer:
         time_tolerance = 0.5
         xyz_tolerance = 0.35
 
+        # Build a sorted timestamp list for fast bisect lookup — avoids O(N²).
+        import bisect as _bisect
+        _ev_times = [e['timestamp'] for e in odas_events]
+        _matched_ev_idx: set = set()
+
         rows = []
         matched_count = 0
-        available_odas = list(odas_events)
+        print(f"[Report] Matching {len(gt_sources)} GT sources against {len(odas_events)} ODAS events...")
         for idx, src in enumerate(gt_sources, 1):
+            if idx % 500 == 0:
+                print(f"[Report] GT source {idx}/{len(gt_sources)}, matched so far: {matched_count}")
             label = str(src.get('label', 'unknown'))
             gt_ts = _to_float(src.get('start_time', 0.0), 0.0)
             gt_pos = src.get('position', [0.0, 0.0, 0.0])
@@ -3375,15 +3571,19 @@ class ResultAnalyzer:
             gy = _to_float(gt_pos[1] if len(gt_pos) > 1 else 0.0, 0.0)
             gz = _to_float(gt_pos[2] if len(gt_pos) > 2 else 0.0, 0.0)
 
+            # Bisect to candidate window [gt_ts - time_tolerance, gt_ts + time_tolerance]
+            _lo = _bisect.bisect_left(_ev_times, gt_ts - time_tolerance)
+            _hi = _bisect.bisect_right(_ev_times, gt_ts + time_tolerance)
+            _candidates = [(i, odas_events[i]) for i in range(_lo, _hi) if i not in _matched_ev_idx]
+
+            best_i = None
             best = None
             best_score = None
-            for ev in available_odas:
-                dt = abs(ev['timestamp'] - gt_ts)
+            for _i, ev in _candidates:
                 dxyz = float(np.linalg.norm(np.array([ev['x'] - gx, ev['y'] - gy, ev['z'] - gz])))
-                score = (dt / max(time_tolerance, 1e-9)) + (dxyz / max(xyz_tolerance, 1e-9))
-                if best is None or score < best_score:
-                    best = ev
-                    best_score = score
+                score = abs(ev['timestamp'] - gt_ts) / max(time_tolerance, 1e-9) + dxyz / max(xyz_tolerance, 1e-9)
+                if best_score is None or score < best_score:
+                    best_i, best, best_score = _i, ev, score
 
             if best is not None:
                 dt = abs(best['timestamp'] - gt_ts)
@@ -3396,7 +3596,7 @@ class ResultAnalyzer:
 
             if is_match:
                 matched_count += 1
-                available_odas.remove(best)
+                _matched_ev_idx.add(best_i)
 
             rows.append({
                 'seq': idx,

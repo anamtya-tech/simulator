@@ -64,6 +64,37 @@ class GTDatasetBuilder:
         self.yamnet_hop       = int(self.YAMNET_HOP_S    * self.SAMPLE_RATE)  # 24 000
         self.rir_tail_samples = int(self.RIR_TAIL_S      * self.SAMPLE_RATE)  # 24 000
 
+    @staticmethod
+    def _sanitize_label(label: str) -> str:
+        return re.sub(r'[^\w\-]', '_', str(label))
+
+    def _resolve_manifest_wav_path(self, dataset_path: Path, wav_path: str, label: str = '') -> Path:
+        """Resolve manifest wav paths when legacy absolute paths no longer exist."""
+        raw = Path(str(wav_path))
+        if raw.exists():
+            return raw
+
+        audio_root = dataset_path / 'audio'
+        candidates: list[Path] = []
+        if not raw.is_absolute():
+            candidates.append(dataset_path / raw)
+            candidates.append(audio_root / raw)
+
+        if label:
+            candidates.append(audio_root / self._sanitize_label(label) / raw.name)
+            candidates.append(audio_root / str(label) / raw.name)
+        candidates.append(audio_root / raw.name)
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        matches = list(audio_root.rglob(raw.name)) if audio_root.exists() else []
+        if matches:
+            return matches[0]
+
+        return raw
+
     # ── Render / dataset discovery ────────────────────────────────────────────
 
     def _find_gt_renders(self):
@@ -579,7 +610,8 @@ class GTDatasetBuilder:
                 self._render_dataset_detail(ds)
 
     def _render_dataset_detail(self, ds):
-        manifest_path = Path(ds['path']) / 'manifest.csv'
+        dataset_path = Path(ds['path'])
+        manifest_path = dataset_path / 'manifest.csv'
         df = pd.read_csv(manifest_path)
 
         # ── Summary metrics ────────────────────────────────────────────────────
@@ -619,7 +651,11 @@ class GTDatasetBuilder:
             key=f"preview_label_{ds['name']}"
         )
 
-        label_clips = df[df['label'] == sel_label]['wav_path'].tolist()
+        label_df = df[df['label'] == sel_label]
+        label_clips = [
+            str(self._resolve_manifest_wav_path(dataset_path, row['wav_path'], row.get('label', '')))
+            for _, row in label_df.iterrows()
+        ]
         n_show      = min(3, len(label_clips))
         rng         = np.random.default_rng()
         sample_paths = rng.choice(label_clips, n_show, replace=False).tolist()

@@ -596,11 +596,26 @@ class AudioRenderer:
             mic_signals /= max_val / 0.95  # in-place to avoid a copy
         mic_signals.flush()
 
-        # ── ODAS warm-up / tail constants ────────────────────────────────────
+        # ── ODAS warm-up / tail sizing ───────────────────────────────────────
+        # Keep warm-up fixed for stable ODAS initialization.
+        # For short clips (<= 60 s), scale tail to clip length so we do not
+        # over-pad tiny renders while still allowing ODAS to drain.
         WARMUP_SECONDS = 10
-        TAIL_SECONDS   = 10
+        LONG_CLIP_TAIL_SECONDS = 10
+        SHORT_CLIP_MAX_SECONDS = 60
+        SHORT_CLIP_TAIL_RATIO = 0.15
+        SHORT_CLIP_TAIL_MIN_SECONDS = 4
+
+        if duration <= SHORT_CLIP_MAX_SECONDS:
+            tail_seconds = max(
+                SHORT_CLIP_TAIL_MIN_SECONDS,
+                int(np.ceil(float(duration) * SHORT_CLIP_TAIL_RATIO)),
+            )
+        else:
+            tail_seconds = LONG_CLIP_TAIL_SECONDS
+
         warmup_samples = int(WARMUP_SECONDS * self.sample_rate)
-        tail_samples   = int(TAIL_SECONDS   * self.sample_rate)
+        tail_samples = int(tail_seconds * self.sample_rate)
 
         # ── Chunked streaming file writer ─────────────────────────────────────
         # Instead of:
@@ -670,7 +685,7 @@ class AudioRenderer:
             'scene_file': str(Path(self.scenes_dir) / f"{scene['name']}.json"),
             'output_file': str(output_path),
             'warmup_seconds': WARMUP_SECONDS,
-            'tail_silence_seconds': TAIL_SECONDS,
+            'tail_silence_seconds': tail_seconds,
             'source_sidecars': source_sidecars,
             'ambient_sidecar_path': amb_sidecar_path,
         }

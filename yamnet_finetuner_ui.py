@@ -39,6 +39,7 @@ class YAMNetFinetunerUI:
     _K_PROC        = 'ft_train_proc'
     _K_LOG         = 'ft_train_log'
     _K_RUN_NAME    = 'ft_run_name'
+    _K_INPUT_MODE  = 'ft_input_mode'
 
     def __init__(self, output_dir: str):
         self.ft = YAMNetFinetuner(output_dir)
@@ -252,6 +253,23 @@ class YAMNetFinetunerUI:
 
         st.info(f"Training from: `{Path(train_dir).name}`")
 
+        input_mode = st.radio(
+            "Training input mode",
+            options=["Direct bins (.f32 / spectra_file)", "Reconstructed WAV"],
+            index=0,
+            horizontal=True,
+            help=(
+                "Direct bins uses ODAS spectra_file sidecars when present and falls back to WAV for rows without bins. "
+                "Reconstructed WAV always trains from waveform clips."
+            ),
+        )
+        input_mode_key = 'bin' if input_mode.startswith('Direct bins') else 'wav'
+        st.session_state[self._K_INPUT_MODE] = input_mode_key
+        if input_mode_key == 'bin':
+            st.caption("ODAS-curated rows will train from direct 96×257 spectra patches; GT rows fall back to WAV.")
+        else:
+            st.caption("All rows will train from waveform clips using the legacy WAV path.")
+
         # ── Starting weights ─────────────────────────────────────────────────
         checkpoints  = self.ft.list_checkpoints()
         ckpt_options = {c['run_name']: c['model_path'] for c in checkpoints
@@ -365,7 +383,14 @@ class YAMNetFinetunerUI:
                 nick = nickname_input.strip() or None
                 try:
                     proc, log_path, actual_rn = self.ft.start_training(
-                        train_dir, phase1, phase2, batch_size, unfreeze_top, rn,
+                        training_dir=train_dir,
+                        phase1_epochs=phase1,
+                        phase2_epochs=phase2,
+                        batch_size=batch_size,
+                        unfreeze_top=unfreeze_top,
+                        focal_gamma=2.0,
+                        input_mode=input_mode_key,
+                        run_name=rn,
                         warm_start_checkpoint=warm_start_path,
                         nickname=nick,
                     )

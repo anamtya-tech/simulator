@@ -82,6 +82,10 @@ class YAMNetDatasetCurator:
             'save_unknown': True,
             'echo_pad_seconds': 0.5,  # Extra PCM to read past gt_end — captures natural decay/reverb tail
             'allow_render_fallback': False,  # If True, use raw render PCM when .bin peak spectra are unavailable
+            'accept_timestamp_in_gt_window': True,  # Accept pre_gt rows whose detection timestamp already lies inside GT window
+            'enable_pre_gt_continuous_rescue': True,  # Allow select pre_gt rows when they bridge continuously into GT
+            'pre_gt_max_lead_seconds': 3.0,  # Admit pre_gt rows up to this many seconds before GT start
+            'pre_gt_continuity_gap_seconds': 0.6,  # Max gap between last pre_gt and first during_gt on same track
         }
         if self.config_path.exists():
             with open(self.config_path, 'r') as f:
@@ -117,7 +121,11 @@ class YAMNetDatasetCurator:
                 'min_spectral_bins': 1,  # Min real spectral frames; < 1 means no spectral data at all
                 'echo_pad_seconds': 0.5,  # Extra PCM past gt_end — captures natural reverb/decay tail
                 'save_unknown': True,  # Save non-matching samples for manual labeling
-                'allow_render_fallback': False  # Use raw render only if explicitly enabled
+                'allow_render_fallback': False,  # Use raw render only if explicitly enabled
+                'accept_timestamp_in_gt_window': True,  # Accept rows whose detection timestamp falls inside GT window
+                'enable_pre_gt_continuous_rescue': True,  # Admit contiguous pre_gt rows near GT start
+                'pre_gt_max_lead_seconds': 3.0,  # Seconds before GT start eligible for rescue
+                'pre_gt_continuity_gap_seconds': 0.6  # Max discontinuity allowed at pre->during boundary
             },
             'audio_params': {
                 'sample_rate': 16000,
@@ -217,6 +225,70 @@ class YAMNetDatasetCurator:
         # Filter matches based on criteria
         samples_for_training = []  # Clean samples with issues - for training
         samples_unknown = []  # Need manual verification
+
+        # Optional pre-GT rescue: keep pre_gt rows only when they are close to
+        # GT start and belong to a track that continues into during_gt.
+        accept_timestamp_in_gt_window = bool(criteria.get('accept_timestamp_in_gt_window', True))
+        enable_pre_rescue = bool(criteria.get('enable_pre_gt_continuous_rescue', True))
+        pre_gt_max_lead_s = float(criteria.get('pre_gt_max_lead_seconds', 3.0) or 0.0)
+        pre_gt_cont_gap_s = float(criteria.get('pre_gt_continuity_gap_seconds', 0.6) or 0.0)
+
+        # Build track/window continuity anchors once per run.
+        # Key = (label, gt_start, gt_end, track_id)
+        # Value stores timestamps so we can detect a continuous pre->during bridge.
+        continuity_map = {}
+        if enable_pre_rescue:
+            from collections import defaultdict as _dd
+
+            bucket = _dd(lambda: {'gt_start': None, 'gt_end': None, 'pre_ts': [], 'during_ts': []})
+            for m in matches:
+                if m.get('match_type') != 'ground_truth':
+                    continue
+                src = m.get('source') or {}
+                det = m.get('detection') or {}
+                gt_label = m.get('label', 'unknown')
+                gt_start = src.get('start_time', None)
+                gt_end = src.get('end_time', None)
+                ts = det.get('timestamp', None)
+                track_id = det.get('track_id', det.get('id', None))
+                if gt_start is None or gt_end is None or ts is None or track_id is None:
+                    continue
+
+                key = (str(gt_label), round(float(gt_start), 3), round(float(gt_end), 3), int(track_id))
+                b = bucket[key]
+                b['gt_start'] = float(gt_start)
+                b['gt_end'] = float(gt_end)
+
+                pq = m.get('patch_quality', 'unknown')
+                ts_f = float(ts)
+                if pq == 'during_gt':
+                    b['during_ts'].append(ts_f)
+                elif pq == 'pre_gt':
+                    b['pre_ts'].append(ts_f)
+
+            for key, b in bucket.items():
+                during_ts = sorted(b['during_ts'])
+                pre_ts = sorted(b['pre_ts'])
+                has_during = len(during_ts) > 0
+                can_rescue = False
+
+                # Bridge continuity: last pre sample near GT start connects to
+                # first during sample without a large gap.
+                if has_during and pre_ts:
+                    gt_start = b['gt_start']
+                    pre_near = [t for t in pre_ts if (gt_start - t) >= 0.0 and (gt_start - t) <= pre_gt_max_lead_s]
+                    if pre_near:
+                        last_pre = max(pre_near)
+                        first_during = min(during_ts)
+                        bridge_gap = max(0.0, first_during - last_pre)
+                        can_rescue = bridge_gap <= pre_gt_cont_gap_s
+
+                continuity_map[key] = {
+                    'has_during': has_during,
+                    'can_rescue': can_rescue,
+                    'gt_start': b['gt_start'],
+                    'gt_end': b['gt_end'],
+                }
         
         for match in matches:
             # Get data
@@ -252,9 +324,51 @@ class YAMNetDatasetCurator:
             # direction but contain no actual animal audio (the animal is not
             # playing yet / has already finished) → route to unknown only.
             patch_quality = match.get('patch_quality', 'unknown')
-            is_temporally_aligned = (
-                match_type == 'ground_truth' and patch_quality == 'during_gt'
-            )
+            is_temporally_aligned = (match_type == 'ground_truth' and patch_quality == 'during_gt')
+
+            in_gt_window_rescued = False
+            if not is_temporally_aligned and accept_timestamp_in_gt_window and match_type == 'ground_truth':
+                src = match.get('source') or {}
+                det = match.get('detection') or {}
+                gt_start = src.get('start_time', None)
+                gt_end = src.get('end_time', None)
+                ts = det.get('timestamp', None)
+                if gt_start is not None and gt_end is not None and ts is not None:
+                    gt_start_f = float(gt_start)
+                    gt_end_f = float(gt_end)
+                    ts_f = float(ts)
+                    if gt_start_f <= ts_f <= gt_end_f:
+                        in_gt_window_rescued = True
+
+            pre_gt_rescued = False
+            if not is_temporally_aligned and enable_pre_rescue and match_type == 'ground_truth' and patch_quality == 'pre_gt':
+                src = match.get('source') or {}
+                det = match.get('detection') or {}
+                gt_start = src.get('start_time', None)
+                gt_end = src.get('end_time', None)
+                ts = det.get('timestamp', None)
+                track_id = det.get('track_id', det.get('id', None))
+                if gt_start is not None and gt_end is not None and ts is not None and track_id is not None:
+                    key = (str(ground_truth), round(float(gt_start), 3), round(float(gt_end), 3), int(track_id))
+                    anchor = continuity_map.get(key, {})
+                    ts_f = float(ts)
+                    gt_start_f = float(gt_start)
+                    gt_end_f = float(gt_end)
+                    lead_s = gt_start_f - ts_f
+                    in_gt_window = gt_start_f <= ts_f <= gt_end_f
+                    near_pre_window = (lead_s >= 0.0 and lead_s <= pre_gt_max_lead_s)
+                    # Rescue policy:
+                    # - If timestamp is already inside GT window, accept when
+                    #   the same track has during_gt anchors.
+                    # - If timestamp is before GT, accept only when near-start
+                    #   and continuity bridge is verified.
+                    if in_gt_window and anchor.get('has_during', False):
+                        pre_gt_rescued = True
+                    elif near_pre_window and anchor.get('can_rescue', False):
+                        pre_gt_rescued = True
+
+            if in_gt_window_rescued or pre_gt_rescued:
+                is_temporally_aligned = True
 
             # Spectral quality gate: require the ODAS spectral buffer to contain
             # at least MIN_SPECTRAL_BINS real frames.  Buffers with fewer frames
@@ -336,7 +450,12 @@ class YAMNetDatasetCurator:
                 # is the best available YAMNet guess.  Since training is supervised
                 # by the GT label (not YAMNet), an ambiguous detection is actually
                 # a valuable training sample — keep it in training, just flag it.
-                match['curation_reason'] = ','.join(reason) + (',ambiguous_topk' if match.get('ambiguous') else '')
+                suffix = ',ambiguous_topk' if match.get('ambiguous') else ''
+                if in_gt_window_rescued:
+                    suffix += ',timestamp_in_gt_window'
+                if pre_gt_rescued:
+                    suffix += ',pre_gt_contiguous_rescued'
+                match['curation_reason'] = ','.join(reason) + suffix
                 match['dataset_type'] = 'training'
                 match['clean_match'] = True
                 match['angular_error_deg'] = angular_error

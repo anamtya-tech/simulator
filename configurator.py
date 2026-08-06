@@ -1793,6 +1793,45 @@ class DatasetConfigurator:
                 value=criteria.get('save_unknown', True),
                 help="Save samples outside thresholds for manual verification"
             )
+
+        st.markdown("#### Temporal Entry Gate")
+        accept_timestamp_in_gt_window = st.checkbox(
+            "Accept detections whose timestamp is inside GT window",
+            value=criteria.get('accept_timestamp_in_gt_window', True),
+            help=(
+                "Treat a detection as temporally aligned when its current timestamp lies inside the GT interval, "
+                "even if the track was born earlier. This is the highest-impact yield fix for long continuous tracks."
+            )
+        )
+
+        enable_pre_gt_rescue = st.checkbox(
+            "Rescue continuous pre-GT tracks",
+            value=criteria.get('enable_pre_gt_continuous_rescue', True),
+            help=(
+                "Admit pre-GT detections when the same track continues into GT. "
+                "This increases yield for long continuous tracks while avoiding random early noise."
+            )
+        )
+
+        gate_col1, gate_col2 = st.columns(2)
+        with gate_col1:
+            pre_gt_max_lead_seconds = st.number_input(
+                "Max pre-GT lead (seconds)",
+                min_value=0.0,
+                max_value=30.0,
+                value=float(criteria.get('pre_gt_max_lead_seconds', 3.0)),
+                step=0.5,
+                help="Allow pre-GT detections up to this many seconds before GT start."
+            )
+        with gate_col2:
+            pre_gt_continuity_gap_seconds = st.number_input(
+                "Continuity gap tolerance (seconds)",
+                min_value=0.0,
+                max_value=5.0,
+                value=float(criteria.get('pre_gt_continuity_gap_seconds', 0.6)),
+                step=0.1,
+                help="Maximum gap between pre-GT and during-GT detections for same track."
+            )
         
         st.info("📌 **Note**: Direction and confidence thresholds are configured in Analysis Settings (used for both matching and curation)")
         
@@ -1830,7 +1869,11 @@ class DatasetConfigurator:
                 'include_unclassified': include_unclassified,
                 'include_low_confidence': include_low_confidence,
                 'min_activity': min_activity,
-                'save_unknown': save_unknown
+                'save_unknown': save_unknown,
+                'accept_timestamp_in_gt_window': accept_timestamp_in_gt_window,
+                'enable_pre_gt_continuous_rescue': enable_pre_gt_rescue,
+                'pre_gt_max_lead_seconds': float(pre_gt_max_lead_seconds),
+                'pre_gt_continuity_gap_seconds': float(pre_gt_continuity_gap_seconds)
                 # Note: confidence_threshold and direction_threshold_deg come from Analysis Settings
             })
             

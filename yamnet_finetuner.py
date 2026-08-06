@@ -32,6 +32,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -78,6 +79,12 @@ _YAMNET_PY_PATH = ':'.join([
     str(YAMNET_REPO / 'training'),
 ])
 
+def _default_training_python() -> str:
+    candidate = Path.home() / '.local' / 'envs' / 'yamnet-tf-pip' / 'bin' / 'python'
+    return str(candidate) if candidate.exists() else sys.executable
+
+TRAINING_PYTHON = os.getenv('YAMNET_TRAIN_PYTHON', _default_training_python())
+
 
 class YAMNetFinetuner:
     """Orchestrates the full fine-tuning pipeline from the simulator side."""
@@ -88,6 +95,59 @@ class YAMNetFinetuner:
         self.staging_root         = self.gt_dir / '_staged'
         self.yamnet_datasets_dir  = self.output_dir / 'yamnet_datasets'
         self.odas_staging_root    = self.yamnet_datasets_dir / '_staged'
+
+    @staticmethod
+    def _sanitize_label(label: str) -> str:
+        return re.sub(r'[^\w\-]', '_', str(label))
+
+    def _resolve_gt_wav_path(self, ds_dir: Path, wav_path: str, label: str = '') -> Path:
+        """Resolve GT manifest wav_path, tolerating stale absolute paths."""
+        raw = Path(str(wav_path))
+        if raw.exists():
+            return raw.resolve()
+
+        audio_root = ds_dir / 'audio'
+        candidates: list[Path] = []
+        if not raw.is_absolute():
+            candidates.append((ds_dir / raw).resolve())
+            candidates.append((audio_root / raw).resolve())
+
+        if label:
+            candidates.append((audio_root / self._sanitize_label(label) / raw.name).resolve())
+            candidates.append((audio_root / str(label) / raw.name).resolve())
+        candidates.append((audio_root / raw.name).resolve())
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        matches = list(audio_root.rglob(raw.name)) if audio_root.exists() else []
+        if matches:
+            return matches[0].resolve()
+
+        return candidates[0] if candidates else raw
+
+    def _resolve_odas_wav_path(self, ds_dir: Path, filename: str) -> Path:
+        """Resolve ODAS labels filename, tolerating stale absolute paths."""
+        raw = Path(str(filename))
+        if raw.exists():
+            return raw.resolve()
+
+        audio_root = ds_dir / 'audio'
+        candidates: list[Path] = []
+        if not raw.is_absolute():
+            candidates.append((audio_root / raw).resolve())
+        candidates.append((audio_root / raw.name).resolve())
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        matches = list(audio_root.rglob(raw.name)) if audio_root.exists() else []
+        if matches:
+            return matches[0].resolve()
+
+        return candidates[0] if candidates else raw
 
     # ── Dataset discovery ─────────────────────────────────────────────────────
 
@@ -217,7 +277,7 @@ class YAMNetFinetuner:
         audio_base = ds_dir / 'audio'
         rows = []
         for _, row in manifest.iterrows():
-            wav_abs = Path(row['wav_path'])
+            wav_abs = self._resolve_gt_wav_path(ds_dir, row['wav_path'], row.get('label', ''))
             try:
                 rel = wav_abs.relative_to(audio_base)
             except ValueError:
@@ -274,8 +334,11 @@ class YAMNetFinetuner:
             if set(bg['fold'].unique()) <= {'val', 'test'}:
                 continue
             for _, row in bg.iterrows():
+                resolved = self._resolve_gt_wav_path(ds_dir, row['wav_path'], 'background')
+                if not resolved.exists():
+                    continue
                 all_bg.append({
-                    'wav_path': row['wav_path'],
+                    'wav_path': str(resolved),
                     'fold'    : row.get('fold', 'train'),
                 })
 
@@ -311,9 +374,9 @@ class YAMNetFinetuner:
 
         The original labels.csv (25+ columns) is never touched.
         """
-        df   = pd.read_csv(ds_dir / 'labels.csv')
-        slim = df[['filename', 'label', 'fold']].copy() if 'fold' in df.columns \
-               else df[['filename', 'label']].assign(fold='train')
+        df = pd.read_csv(ds_dir / 'labels.csv')
+        keep_cols = [c for c in ('filename', 'spectra_file', 'n_frames', 'label', 'fold') if c in df.columns]
+        slim = df[keep_cols].copy() if 'fold' in df.columns else df[[c for c in keep_cols if c != 'fold']].assign(fold='train')
         slim = slim.copy()
 
         # Stratified train/val/test split when everything is still 'train'
@@ -351,10 +414,23 @@ class YAMNetFinetuner:
                         link_path.symlink_to(src_wav)
                 bg_df = pd.DataFrame([{
                     'filename': f'gt_bg_{Path(r["wav_path"]).name}',
+                    'spectra_file': '',
+                    'n_frames': '',
                     'label'   : 'background',
                     'fold'    : r['fold'],
                 } for r in bg_rows])
                 slim = pd.concat([slim, bg_df], ignore_index=True)
+
+        if 'spectra_file' in slim.columns:
+            def _resolve_spectra_path(value):
+                raw = str(value or '').strip()
+                if not raw:
+                    return ''
+                path = Path(raw)
+                if path.is_absolute():
+                    return str(path)
+                return str((ds_dir / path).resolve())
+            slim['spectra_file'] = slim['spectra_file'].map(_resolve_spectra_path)
 
         if max_clips_per_class > 0:
             slim = self._cap_train_clips(slim, max_clips_per_class)
@@ -387,16 +463,17 @@ class YAMNetFinetuner:
 
             if self._is_odas_dataset(ds_dir):
                 # ── Post-ODAS curator dataset ──────────────────────────────
-                df   = pd.read_csv(ds_dir / 'labels.csv')
-                slim = df[['filename', 'label', 'fold']].copy() if 'fold' in df.columns \
-                       else df[['filename', 'label']].assign(fold='train')
+                df = pd.read_csv(ds_dir / 'labels.csv')
+                keep_cols = [c for c in ('filename', 'spectra_file', 'n_frames', 'label', 'fold') if c in df.columns]
+                slim = df[keep_cols].copy() if 'fold' in df.columns else df[[c for c in keep_cols if c != 'fold']].assign(fold='train')
                 slim = slim.copy()
                 if set(slim['fold'].unique()) <= {'train'}:
                     slim = self._stratified_split(slim)
 
-                audio_base = ds_dir / 'audio'
                 for _, row in slim.iterrows():
-                    wav_abs   = (audio_base / str(row['filename'])).resolve()
+                    wav_abs   = self._resolve_odas_wav_path(ds_dir, str(row['filename']))
+                    if not wav_abs.exists():
+                        continue
                     label     = str(row['label'])
                     label_dir = audio / label
                     label_dir.mkdir(exist_ok=True)
@@ -404,8 +481,18 @@ class YAMNetFinetuner:
                     link_path = label_dir / link_name
                     if not link_path.exists():
                         link_path.symlink_to(wav_abs)
+                    spectra_file = ''
+                    if 'spectra_file' in row and pd.notna(row['spectra_file']):
+                        raw_spectra = str(row['spectra_file']).strip()
+                        if raw_spectra:
+                            spectra_path = Path(raw_spectra)
+                            if not spectra_path.is_absolute():
+                                spectra_path = (ds_dir / spectra_path).resolve()
+                            spectra_file = str(spectra_path)
                     all_rows.append({
                         'filename': f'{label}/{link_name}',
+                        'spectra_file': spectra_file,
+                        'n_frames': row['n_frames'] if 'n_frames' in row else '',
                         'label'   : label,
                         'fold'    : row['fold'],
                     })
@@ -415,7 +502,9 @@ class YAMNetFinetuner:
                 audio_base = ds_dir / 'audio'
 
                 for _, row in manifest.iterrows():
-                    wav_abs   = Path(row['wav_path'])
+                    wav_abs   = self._resolve_gt_wav_path(ds_dir, row['wav_path'], row.get('label', ''))
+                    if not wav_abs.exists():
+                        continue
                     label     = str(row['label'])
                     label_dir = audio / label
                     label_dir.mkdir(exist_ok=True)
@@ -427,6 +516,8 @@ class YAMNetFinetuner:
 
                     all_rows.append({
                         'filename': f'{label}/{link_name}',
+                        'spectra_file': '',
+                        'n_frames': '',
                         'label'   : label,
                         'fold'    : row.get('fold', 'train'),
                     })
@@ -449,6 +540,8 @@ class YAMNetFinetuner:
                     link_path.symlink_to(src_wav)
                 all_rows.append({
                     'filename': f'background/{link_name}',
+                    'spectra_file': '',
+                    'n_frames': '',
                     'label'   : 'background',
                     'fold'    : row['fold'],
                 })
@@ -599,6 +692,7 @@ class YAMNetFinetuner:
         unfreeze_top          : int   = 4,
         focal_gamma           : float = 2.0,  # >0 = alpha-weighted focal loss (recommended
                                               #      for wildlife/rare-class detection)
+        input_mode            : str   = 'wav',
         run_name              : Optional[str] = None,
         warm_start_checkpoint : Optional[str] = None,
         nickname              : Optional[str] = None,
@@ -639,10 +733,15 @@ class YAMNetFinetuner:
                 'created_at': datetime.now().isoformat()}
         (ckpt_dir / 'meta.json').write_text(json.dumps(meta, indent=2))
 
+        try:
+            focal_gamma = float(focal_gamma)
+        except (TypeError, ValueError):
+            focal_gamma = 2.0
+
         log_path = CHECKPOINTS_DIR / f'{run_name}_train.log'
 
         cmd = [
-            sys.executable,
+            TRAINING_PYTHON,
             str(TRAIN_SCRIPT),
             '--dataset',       str(training_dir),
             '--savedmodel',    str(SAVEDMODEL_PATH),
@@ -651,6 +750,7 @@ class YAMNetFinetuner:
             '--batch-size',    str(batch_size),
             '--unfreeze-top',  str(unfreeze_top),
             '--focal-gamma',   str(focal_gamma),
+            '--input-mode',    str(input_mode),
             '--output-dir',    str(CHECKPOINTS_DIR),
             '--run-name',      run_name,
         ]
@@ -685,7 +785,7 @@ class YAMNetFinetuner:
         RELEASES_DIR.mkdir(parents=True, exist_ok=True)
 
         cmd = [
-            sys.executable,
+            TRAINING_PYTHON,
             str(EXPORT_SCRIPT),
             '--checkpoint', str(ckpt_dir),
             '--version',    version,

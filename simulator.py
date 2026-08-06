@@ -192,6 +192,18 @@ class SimulationRunner:
     @property
     def odas_process(self):
         return _get_sim_state().get("odas_process")
+
+    def _estimate_wallclock_seconds(self, audio_duration: float) -> float:
+        """Estimate expected wall-clock run time from audio duration.
+
+        Policy:
+        - short clips (< 60 s): scale by 1.25
+        - longer clips: fixed +20 s buffer
+        """
+        duration = max(float(audio_duration or 0.0), 1.0)
+        if duration < 60.0:
+            return duration * 1.25
+        return duration + 20.0
         
     def render(self):
         """Render the simulation runner interface"""
@@ -262,6 +274,13 @@ class SimulationRunner:
             with col3:
                 gt_state = "Ready" if metadata.get('scene_file') else "Missing"
                 st.metric("Ground Truth", gt_state)
+
+            raw_dur = mic_ctx.get('raw_duration_seconds', 0.0) or 0.0
+            tracks_dur = mic_ctx.get('tracks_duration_seconds', 0.0) or 0.0
+            if raw_dur and tracks_dur:
+                st.caption(
+                    f"Raw duration: ~{raw_dur:.1f}s | Tracks timeline: ~{tracks_dur:.1f}s"
+                )
 
             if metadata.get('scene_file'):
                 st.info(
@@ -720,12 +739,28 @@ class SimulationRunner:
         st.caption(f"Tracks JSON: {discovered.get('tracks_path') or 'Not found'}")
         st.caption(f"Config file: {discovered.get('cfg_path') or 'Not found'}")
 
-        duration_seconds = duration_from_tracks
-        if not duration_seconds and discovered.get('raw_path'):
-            duration_seconds = self._estimate_raw_duration_seconds(
+        raw_duration_seconds = 0.0
+        if discovered.get('raw_path'):
+            raw_duration_seconds = self._estimate_raw_duration_seconds(
                 discovered['raw_path'],
                 cfg_n_channels or 4,
             )
+
+        tracks_duration_seconds = duration_from_tracks
+
+        # For ODAS replay, the .raw file length is the true runtime limit.
+        # Tracks JSON can be longer than the available raw payload.
+        duration_seconds = raw_duration_seconds or tracks_duration_seconds
+
+        if raw_duration_seconds and tracks_duration_seconds:
+            drift = abs(tracks_duration_seconds - raw_duration_seconds)
+            if drift > 2.0:
+                st.warning(
+                    "Duration mismatch detected: tracks JSON spans "
+                    f"~{tracks_duration_seconds:.1f}s but raw audio contains only "
+                    f"~{raw_duration_seconds:.1f}s. "
+                    "Simulation will stop when raw audio reaches EOF."
+                )
 
         return {
             'active_session': active_session,
@@ -740,6 +775,8 @@ class SimulationRunner:
             'raw_path': str(discovered.get('raw_path')) if discovered.get('raw_path') else '',
             'ground_truth_scene_file': gt_scene_file,
             'duration_seconds': duration_seconds,
+            'raw_duration_seconds': raw_duration_seconds,
+            'tracks_duration_seconds': tracks_duration_seconds,
         }
 
     def _render_running_status(self, sim):
@@ -748,9 +785,7 @@ class SimulationRunner:
 
         elapsed = sim.get("elapsed", 0.0)
         audio_duration = sim.get("duration") or 1.0
-        # Wall-clock time is longer than audio duration:
-        #   socket streams at ~1.25× real-time + up to 90 s ODAS drain
-        expected_wallclock = audio_duration * 1.25 + 90
+        expected_wallclock = self._estimate_wallclock_seconds(audio_duration)
         progress = min(elapsed / expected_wallclock, 1.0)
 
         st.progress(progress)
@@ -885,14 +920,17 @@ class SimulationRunner:
         source_type: str = '',
         tracked_output_file: str = '',
     ) -> str:
-        """Create a run-local cfg that enforces raw.interface file replay.
+        """Create a run-local cfg with transport chosen by source type.
 
         The user-selected config remains the source of truth for SST and all other
         ODAS sections; only the RAW transport is normalized for simulator runs.
+        Synthetic rendered audio uses socket transport, while imported live/passive
+        sessions use file replay.
         """
         src_path = Path(cfg_path)
         runtime_cfg = self.runs_dir / f"runtime_cfg_{run_timestamp}.cfg"
         is_mic_array_import = source_type in ('live_session', 'passive_session')
+        use_socket_transport = not is_mic_array_import
 
         try:
             text = src_path.read_text(encoding='utf-8', errors='replace')
@@ -924,13 +962,23 @@ class SimulationRunner:
             match = re.search(pattern, text, flags=re.S)
 
             if match:
-                file_block = (
-                    "\n"
-                    "        type = \"file\";\n"
-                    f"        path = \"{raw_file_path}\";\n"
-                    "\n"
-                )
-                text = text[:match.start(2)] + file_block + text[match.end(2):]
+                if use_socket_transport:
+                    socket_block = (
+                        "\n"
+                        "        type = \"socket\";\n"
+                        "        ip = \"127.0.0.1\";\n"
+                        f"        port = {int(port)};\n"
+                        "\n"
+                    )
+                    text = text[:match.start(2)] + socket_block + text[match.end(2):]
+                else:
+                    file_block = (
+                        "\n"
+                        "        type = \"file\";\n"
+                        f"        path = \"{raw_file_path}\";\n"
+                        "\n"
+                    )
+                    text = text[:match.start(2)] + file_block + text[match.end(2):]
 
             # Remap known file-system paths from device configs to local VM paths.
             local_model_dir = selected_model_dir.strip() if selected_model_dir else str(self.models_dir)
@@ -997,48 +1045,36 @@ class SimulationRunner:
                 flags=re.S,
             )
 
-            if is_mic_array_import:
-                # For ODAS calibration ZIP replay flow, write tracked output to
-                # a JSON file so Results Analyzer can compare GT ZIP tracks
-                # against this generated run artifact directly.
-                text = _set_section_format(text, 'tracked', 'json')
-                tracked_path = tracked_output_file or str(self.runs_dir / f"tracked_{run_timestamp}.json")
-                text = re.sub(
-                    r'(tracked\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
-                    f'\\1\\n            type = "file";\\n            path = "{tracked_path}";\\n        \\3',
-                    text,
-                    count=1,
-                    flags=re.S,
-                )
-            else:
-                # Preserve previous synthetic pipeline behavior.
-                text = _set_section_format(text, 'tracked', 'json')
-                text = re.sub(
-                    r'(tracked\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
-                    '\\1\n             type = "terminal";\n        \\3',
-                    text,
-                    count=1,
-                    flags=re.S,
-                )
+            # Always write tracked output to a run-local JSON file so every
+            # simulation run has a deterministic artifact for analysis.
+            text = _set_section_format(text, 'tracked', 'json')
+            tracked_path = tracked_output_file or str(self.runs_dir / f"tracked_{run_timestamp}.json")
+            text = re.sub(
+                r'(tracked\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
+                f'\\1\\n            type = "file";\\n            path = "{tracked_path}";\\n        \\3',
+                text,
+                count=1,
+                flags=re.S,
+            )
 
-            # Preserve separated/postfiltered interface for ZIP calibration flow
-            # (many provided cfg files intentionally write these to file).
-            # Keep blackhole for synthetic flow to avoid extra I/O/output files.
-            if not is_mic_array_import:
-                text = re.sub(
-                    r'(separated\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
-                    '\\1\n            type = "blackhole";\n        \\3',
-                    text,
-                    count=1,
-                    flags=re.S,
-                )
-                text = re.sub(
-                    r'(postfiltered\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
-                    '\\1\n            type = "blackhole";\n        \\3',
-                    text,
-                    count=1,
-                    flags=re.S,
-                )
+            # Keep separated/postfiltered as file outputs so ODAS writes the
+            # same run artifacts as the older working configs.
+            separated_path = str(self.renders_dir / 'sepearted.raw')
+            postfiltered_path = str(self.renders_dir / 'postfiltered.raw')
+            text = re.sub(
+                r'(separated\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
+                f'\\1\n            type = "file";\n            path = "{separated_path}";\n        \\3',
+                text,
+                count=1,
+                flags=re.S,
+            )
+            text = re.sub(
+                r'(postfiltered\s*:\s*\{.*?interface\s*:\s*\{)(.*?)(\}\s*;)',
+                f'\\1\n            type = "file";\n            path = "{postfiltered_path}";\n        \\3',
+                text,
+                count=1,
+                flags=re.S,
+            )
 
             # Write classifier artifacts into simulator logs directory so run metadata
             # can resolve files deterministically.
@@ -1105,6 +1141,7 @@ class SimulationRunner:
         duration = metadata.get('duration', 10) + warmup_seconds + tail_seconds
         log_file_path = str(self.runs_dir / f"odas_log_{run_timestamp}.txt")
         source_type = str(metadata.get('source_type', '')).strip().lower()
+        use_socket_emit = source_type not in ('live_session', 'passive_session')
         tracked_output_file = ''
         if source_type in ('live_session', 'passive_session'):
             tracked_output_file = str(self.runs_dir / f"tracked_{run_timestamp}.json")
@@ -1140,6 +1177,7 @@ class SimulationRunner:
             tracked_output_file=tracked_output_file,
         )
         tracked_sink_process = None
+        socket_process = None
 
         if apply_sst_preset:
             # Overrides take precedence over preset when patching is enabled.
@@ -1154,6 +1192,8 @@ class SimulationRunner:
             odas_cfg,
             self.odaslive_bin,
         ]
+        if use_socket_emit:
+            required_paths.append(self.socket_emit_script)
         missing = [p for p in required_paths if not Path(p).exists()]
         if missing:
             st.error("Missing ODAS runtime files. Set ODAS_ROOT/ODAS_BUILD_DIR/ODAS_CONFIG_PATH to valid paths.")
@@ -1165,6 +1205,28 @@ class SimulationRunner:
             )
             st.code("\n".join(missing))
             return False
+
+        if use_socket_emit:
+            self._free_port(int(port))
+            socket_cmd = [
+                "python3",
+                "-u",
+                self.socket_emit_script,
+                "--port",
+                str(int(port)),
+                "--audio",
+                str(raw_file_path),
+            ]
+            timestamp_sidecar = str(raw_file_path).replace('.raw', '.txt')
+            if Path(timestamp_sidecar).exists():
+                socket_cmd.extend(["--timestamps", timestamp_sidecar])
+
+            socket_process = subprocess.Popen(
+                socket_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(self.project_root),
+            )
 
         # ── start ODAS ───────────────────────────────────────────────────────
         run_start_time = time.time()
@@ -1187,8 +1249,34 @@ class SimulationRunner:
             log_fh.close()
             with open(log_file_path) as _lf:
                 tail = _lf.read()[-800:]
+            if socket_process:
+                try:
+                    socket_process.terminate()
+                    socket_process.wait(timeout=3)
+                except Exception:
+                    try:
+                        socket_process.kill()
+                    except Exception:
+                        pass
             st.error("❌ ODAS crashed during initialisation.")
             st.code(tail)
+            return False
+
+        if socket_process and socket_process.poll() is not None:
+            log_fh.close()
+            out, err = socket_process.communicate()
+            try:
+                odas_process.terminate()
+                odas_process.wait(timeout=3)
+            except Exception:
+                try:
+                    odas_process.kill()
+                except Exception:
+                    pass
+            st.error("❌ Socket streamer crashed during initialisation.")
+            details = (err or out or b'').decode(errors='replace')[-1000:]
+            if details:
+                st.code(details)
             return False
 
         # ── persist handles in session state ─────────────────────────────────
@@ -1196,10 +1284,14 @@ class SimulationRunner:
             "running": True,
             "status": "running",
             "log_lines": [
-                "✅ Raw file input mode enabled (ODAS reads file directly)",
+                (
+                    f"✅ Socket input mode enabled (vm_socket_emit -> 127.0.0.1:{int(port)})"
+                    if socket_process else
+                    "✅ Raw file input mode enabled (ODAS reads file directly)"
+                ),
                 "✅ ODAS started"
             ],
-            "socket_process": None,
+            "socket_process": socket_process,
             "tracked_sink_process": tracked_sink_process,
             "odas_process": odas_process,
             "run_name": run_name,
@@ -1249,7 +1341,7 @@ class SimulationRunner:
 
                 # Append a log heartbeat every ~10 s
                 if int(elapsed) % 10 == 0:
-                    expected = duration * 1.25 + 90
+                    expected = self._estimate_wallclock_seconds(duration)
                     sim["log_lines"].append(f"⏳ {elapsed:.0f}s elapsed / ~{expected:.0f}s est. (audio: {duration:.0f}s)")
 
                 if socket_process is None:
