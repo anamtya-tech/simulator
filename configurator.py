@@ -375,9 +375,47 @@ class SceneConfigurator:
         # ── Rich Scene Generator ──────────────────────────────────────────
         with st.expander('🎲 Rich Scene Generator', expanded=False):
             st.markdown(
-                'Automatically schedule **Z** directional source instances using '
-                '**X** unique clips per label and up to **Y** simultaneous sources.'
+                'Automatically schedule directional source instances using planner '
+                'inputs, clip multiplier, and up to **Y** simultaneous sources.'
             )
+
+            st.markdown('**Source Sounds (Planner Inputs):**')
+            src_c1, src_c2 = st.columns(2)
+            with src_c1:
+                bg_folder = st.text_input(
+                    'Background audio folder',
+                    value=st.session_state.get('planner_bg_folder', str(HOME_DIR / 'audio_cache' / 'forest' / 'audio')),
+                    key='planner_bg_folder',
+                    help='Folder containing ambient/background clips used to build base recordings.'
+                )
+                cls1_label = st.text_input('Class 1 label', value=st.session_state.get('planner_cls1_label', 'Elephant'), key='planner_cls1_label')
+                cls1_folder = st.text_input(
+                    'Class 1 clips folder',
+                    value=st.session_state.get('planner_cls1_folder', str(HOME_DIR / 'audio_cache' / 'elephant_samples_new')),
+                    key='planner_cls1_folder'
+                )
+            with src_c2:
+                cls2_label = st.text_input('Class 2 label', value=st.session_state.get('planner_cls2_label', 'Frog'), key='planner_cls2_label')
+                cls2_folder = st.text_input(
+                    'Class 2 clips folder',
+                    value=st.session_state.get('planner_cls2_folder', str(HOME_DIR / 'audio_cache' / 'forest' / 'audio')),
+                    key='planner_cls2_folder'
+                )
+
+            bg_meta = self._summarize_audio_folder(bg_folder)
+            cls1_meta = self._summarize_audio_folder(cls1_folder)
+            cls2_meta = self._summarize_audio_folder(cls2_folder)
+
+            met_c1, met_c2, met_c3 = st.columns(3)
+            with met_c1:
+                st.metric('Background clips', f"{bg_meta['count']:,}")
+                st.caption(f"Total background duration: {bg_meta['hours']:.2f} h")
+            with met_c2:
+                st.metric(f"{cls1_label} clips", f"{cls1_meta['count']:,}")
+                st.caption(f"Total duration: {cls1_meta['hours']:.2f} h")
+            with met_c3:
+                st.metric(f"{cls2_label} clips", f"{cls2_meta['count']:,}")
+                st.caption(f"Total duration: {cls2_meta['hours']:.2f} h")
 
             # ── Core parameters ──────────────────────────────────────────
             rsg_col1, rsg_col2, rsg_col3 = st.columns(3)
@@ -393,21 +431,30 @@ class SceneConfigurator:
                     help='Maximum number of sources playing at the same time.'
                 ))
             with rsg_col3:
-                rsg_Z = int(st.number_input(
-                    'Z – total insertions', 1, 10000, 100, key='rsg_Z',
-                    help='Total individual directional source instances to place across the scene.'
+                insertion_multiplier = int(st.number_input(
+                    'Insertion multiplier (per source clip)', 1, 100, 20, key='rsg_insert_multiplier',
+                    help='Planned insertions = total source clips across classes × multiplier.'
                 ))
 
+            total_source_clips = cls1_meta['count'] + cls2_meta['count']
+            rsg_Z = int(total_source_clips * insertion_multiplier)
+            st.metric('Planned total insertions (auto)', f'{rsg_Z:,}')
+
             # ── Labels ───────────────────────────────────────────────────
-            rsg_labels = st.multiselect(
-                'Labels to include',
-                options=directional_labels,
-                default=directional_labels[:min(3, len(directional_labels))],
-                key='rsg_labels'
+            target_labels = [lbl for lbl in [cls1_label.strip(), cls2_label.strip()] if lbl]
+            aux_options = [lbl for lbl in directional_labels if lbl not in target_labels]
+            rsg_aux_labels = st.multiselect(
+                'Auxiliary noise labels to include',
+                options=aux_options,
+                default=[],
+                key='rsg_aux_labels',
+                help='Repurposed from the old label selector: add other non-target labels as distractors.'
             )
 
+            rsg_labels = target_labels + [lbl for lbl in rsg_aux_labels if lbl not in target_labels]
+
             if not rsg_labels:
-                st.warning('Select at least one label to use the rich generator.')
+                st.warning('Provide at least one target class label.')
             else:
                 # ── Simultaneous distribution ─────────────────────────────
                 st.markdown(
@@ -553,20 +600,6 @@ class SceneConfigurator:
                         help=f'{rsg_X} clips × {len(rsg_labels)} labels × {rsg_min_occ} min occ'
                     )
 
-                if rsg_Z > max_z_est:
-                    st.warning(
-                        f'⚠️ Z={rsg_Z:,} exceeds the estimated maximum ({max_z_est:,}) for a '
-                        f'{scene["duration"]}s scene. The generator will stop early when the '
-                        f'timeline is exhausted — reduce min gap or increase scene duration.'
-                    )
-                if rsg_Z < min_z_needed:
-                    st.warning(
-                        f'⚠️ Z={rsg_Z:,} is less than the minimum needed ({min_z_needed:,}) to '
-                        f'give each of the {rsg_X * len(rsg_labels)} selected clips '
-                        f'{rsg_min_occ} occurrences. Some clips will fall short — '
-                        f'increase Z or reduce min occurrences.'
-                    )
-
                 rsg_replace = st.checkbox(
                     'Replace existing directional sources', value=True, key='rsg_replace',
                     help='Uncheck to append to the existing source list instead.'
@@ -591,12 +624,8 @@ class SceneConfigurator:
                         replace=rsg_replace,
                     )
                     with st.spinner('Generating scene…'):
-                        n_inserted, warnings = self._generate_rich_scene(scene, params)
+                        n_inserted, _ = self._generate_rich_scene(scene, params)
                     st.success(f'✅ Generated {n_inserted} source instances across {len(scene["directional_sources"])} total.')
-                    for w in warnings[:20]:   # cap warning spam
-                        st.warning(w)
-                    if len(warnings) > 20:
-                        st.warning(f'… and {len(warnings) - 20} more clip(s) below minimum occurrence.')
                     st.rerun()
 
         # ── Existing sources list ──────────────────────────────────────────
@@ -1175,6 +1204,42 @@ class SceneConfigurator:
         scene['ambient_sources'].append(source)
 
     # ── Rich scene generator helpers ─────────────────────────────────────────
+
+    def _summarize_audio_folder(self, folder_path):
+        """Return basic metadata for an audio folder: clip count and duration."""
+        summary = {
+            'count': 0,
+            'seconds': 0.0,
+            'hours': 0.0,
+        }
+        if not folder_path:
+            return summary
+
+        root = Path(folder_path).expanduser()
+        if not root.exists() or not root.is_dir():
+            return summary
+
+        audio_ext = {'.wav', '.flac', '.mp3', '.ogg', '.m4a'}
+        for f in root.rglob('*'):
+            if not f.is_file() or f.suffix.lower() not in audio_ext:
+                continue
+
+            summary['count'] += 1
+            duration = 0.0
+            try:
+                with wave.open(str(f), 'rb') as wf:
+                    fr = wf.getframerate() or 1
+                    duration = wf.getnframes() / fr
+            except Exception:
+                try:
+                    import soundfile as _sf
+                    duration = float(_sf.info(str(f)).duration)
+                except Exception:
+                    duration = 0.0
+            summary['seconds'] += max(0.0, duration)
+
+        summary['hours'] = summary['seconds'] / 3600.0
+        return summary
 
     def _estimate_avg_clip_duration(self, labels, X, max_probe=3):
         """Estimate average clip duration (s) by sampling up to max_probe files per label."""
